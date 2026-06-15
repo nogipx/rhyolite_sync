@@ -1,3 +1,18 @@
+## [2.2.1] - 2026-06-15
+
+### Bug Fixes
+
+- defer auto sign-in modal instead of stacking on resume (obsidian)
+
+### Refactoring
+
+- remove dead Migrate-blobs button from settings (obsidian)
+
+### Other
+
+- bump version to 2.2.1 (obsidian)
+
+
 ## [2.2.0] - 2026-06-15
 
 ### Features

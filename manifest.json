@@ -1,7 +1,7 @@
 {
   "id": "rhyolite-sync",
   "name": "Rhyolite Sync",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "minAppVersion": "1.11.4",
   "description": "Syncs your vault across devices using end-to-end encryption.",
   "author": "Karim Mamatkazin",

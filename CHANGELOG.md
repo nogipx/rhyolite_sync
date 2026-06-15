@@ -1,3 +1,17 @@
+## [2.2.0] - 2026-06-15
+
+### Features
+
+- gzip blob compression decorator (core)
+- blob transfer hub, parallel startup upload, disconnect wipe (core)
+- include PlanCapabilities in SubscriptionDto (account)
+- extend refresh TTL to 180d, retry once on unauthenticated (account)
+
+### Other
+
+- bump version to 2.2.0 (obsidian)
+
+
 ## [2.1.1] - 2026-06-12
 
 ### Other

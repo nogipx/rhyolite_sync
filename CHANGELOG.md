@@ -1,3 +1,33 @@
+## [2.3.0] - 2026-06-20
+
+### Features
+
+- verify blob durability with ack-check + bulkExists, auto-heal orphans (core)
+- retry transient RPC failures with backoff (rate limit, unavailable) (core)
+- VaultCipher to AES-256-GCM (WebCrypto/hardware-accelerated) (core)
+- move settings-sync section to bottom, collapse behind <details> (obsidian)
+- drop settings-sync polling timer, add manual sync command (obsidian)
+- drop plugin-code sync entirely (installedPlugins category) (obsidian)
+- .obsidian settings sync (opt-in, default off) (obsidian)
+- settings sync CRDT engine for .obsidian config keyspace (core)
+
+### Bug Fixes
+
+- retry transient "First chunk must carry blobId" upload error (core)
+- route text files through Fugue reconciler in StartupDiff (core)
+- batch blob exists probe to avoid RPC call timeout on large vaults (core)
+- drop runaway-bloated settings states on start (one-time heal) (core)
+- skip large wholeFile settings (pure-Dart cipher freezes UI) (obsidian)
+- relaunch settings sync after auth recovery restarts (obsidian)
+- core-plugins.json is fieldMap, isolate per-resource push errors (obsidian)
+
+### Other
+
+- bump version to 2.3.0 (obsidian)
+- lazy-decode settings states + purge orphan rows (fixes 81s open freeze) (core)
+- timing logs for settings-sync startup phases (core)
+
+
 ## [2.2.1] - 2026-06-15
 
 ### Bug Fixes

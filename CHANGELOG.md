@@ -1,3 +1,33 @@
+## [2.5.0] - 2026-06-22
+
+### Features
+
+- own the task scheduler, serialize engine restarts (obsidian)
+- host-owned task scheduler behind ITaskScheduler (core)
+- route settings sync through the engine background scheduler (obsidian)
+- expose scheduleBackground hook for sibling subsystems (core)
+- run GC + blob-verify as preemptible background tasks (core)
+- add universal PriorityTaskScheduler (scheduler foundation) (core)
+
+### Bug Fixes
+
+- re-arm notify on resume when the socket is alive (obsidian)
+- self-healing notify + explicit reissue hook (core)
+- drain startup edits synchronously so notes sync before settings (core)
+- capture file edits made during engine startup (core)
+- keep both versions on divergent text conflict via CRDT line-union (core)
+
+### Refactoring
+
+- route engine sync work through PriorityTaskScheduler (core)
+- decompose StateSyncEngine into testable collaborators (core)
+
+### Other
+
+- bump version to 2.5.0 (obsidian)
+- pin that engine.stop() spares the host-owned scheduler (core)
+
+
 ## [2.4.0] - 2026-06-21
 
 ### Features

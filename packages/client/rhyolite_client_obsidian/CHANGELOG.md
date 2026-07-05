@@ -1,3 +1,53 @@
+## [3.0.0] - 2026-07-06
+
+### BREAKING CHANGES
+
+- Plugin id changed from `rhyolite-sync` to `rhyolite_sync`. Obsidian treats the update as a new plugin: your previous plugin settings do not carry over, so after updating you must reconnect once (server URL, vault, passphrase) and may need to remove the old plugin entry. Your notes on disk and your data on the server are safe — the local cache re-syncs automatically.
+
+### Changed
+
+- Repository and container image URLs moved to the project's standalone account (obsidian, deploy).
+
+
+## [2.7.0] - 2026-07-04
+
+### Features
+
+- keyed blob ids + persistent startup change-detection (core)
+
+### Other
+
+- bump version to 2.7.0 (obsidian)
+
+
+## [2.6.0] - 2026-07-02
+
+### Features
+
+- map external_storage_unavailable rejection (obsidian)
+- enable External Storage (BYO) for self-host (obsidian)
+- gate External Storage to managed Pro tier (obsidian)
+- self-host UX in settings tab (obsidian)
+- self-host mode in the plugin (obsidian)
+- IVaultDirectory seam (managed + self-host) (obsidian)
+- vault registry contract (core)
+
+### Bug Fixes
+
+- bound self-host registry connect + reset vault on edition switch (obsidian)
+- keep self-host token on config rebuild + fix offref crash (obsidian)
+- apply self-host without manual reload + never prompt account (obsidian)
+
+### Refactoring
+
+- move shared auth surface into engine (core)
+
+### Other
+
+- bump version to 2.6.0 (obsidian)
+- bump rpc_dart to d5a665e (core)
+
+
 ## [2.5.0] - 2026-06-22
 
 ### Features

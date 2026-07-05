@@ -1,0 +1,23 @@
+name: rhyolite_sync_server_selfhost
+description: Self-host edition of the Rhyolite sync server — single-tenant, shared-secret auth, no billing/account service.
+version: 1.1.1
+publish_to: none
+
+resolution: workspace
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  dotenv: ^4.2.0
+  rpc_dart: any
+  rpc_dart_framework: any
+  rpc_dart_websocket: any
+  rpc_data: any
+  rhyolite_observability: any
+  rhyolite_sync: any
+  rhyolite_sync_server_runtime: any
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6

@@ -1,0 +1,26 @@
+name: rhyolite_sync_server_runtime
+description: Shared server composition for Rhyolite sync — infra modules, common interceptors, bootstrap. Edition-agnostic (no auth/billing policy).
+version: 1.0.0
+publish_to: none
+
+resolution: workspace
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  rpc_dart: any
+  rpc_dart_framework: any
+  rpc_data: any
+  rpc_data_postgres: any
+  rpc_notify: any
+  rpc_blob: any
+  rpc_blob_minio: any
+  postgres: ^3.5.9
+  web_socket_channel: ^3.0.3
+  rhyolite_sync: any
+  rhyolite_sync_server: any
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6

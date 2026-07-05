@@ -1,0 +1,1183 @@
+// ignore_for_file: deprecated_member_use
+import 'dart:async';
+import 'dart:convert';
+import 'dart:js_interop';
+import 'dart:js_util' as jsu;
+
+import 'package:obsidian_dart/obsidian_dart.dart';
+import 'package:rhyolite_client_account/rhyolite_client_account.dart';
+import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
+import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
+import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
+import 'package:rhyolite_client_obsidian/src/engine/file_version_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/logs_modal.dart'
+    as logs_modal;
+import 'package:rhyolite_client_obsidian/src/engine/modal_lock.dart';
+import 'package:rhyolite_client_obsidian/src/engine/self_host_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/server_rejections.dart';
+import 'package:rhyolite_client_obsidian/src/engine/sign_in_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/storage_cleanup_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/sync_status_indicator.dart';
+import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
+import 'package:rhyolite_client_obsidian/src/platform/obsidian_http_client.dart';
+import 'package:rhyolite_client_obsidian/src/vault/managed_vault_directory.dart';
+import 'package:rpc_blob_sqlite/rpc_blob_sqlite.dart';
+import 'package:rpc_dart/rpc_dart.dart';
+import 'package:rpc_dart_compression/rpc_dart_compression.dart';
+import 'package:rpc_dart_http/rpc_dart_http.dart';
+import 'package:rpc_dart_log/rpc_dart_log.dart';
+import 'package:rpc_data/rpc_data.dart';
+import 'package:rpc_data_sqlite/rpc_data_sqlite.dart';
+
+// Release builds emit only warnings and errors to the developer
+// console — per Obsidian's plugin guidelines, info/debug logs should
+// not appear by default. Dev builds (RHYOLITE_DEBUG=true) keep the
+// full debug-level stream for live debugging.
+final _logController = LogController(
+  outputs: [ConsoleOutput()],
+  minLevel: kDebug ? RpcLogLevel.debug : RpcLogLevel.warning,
+);
+final _log = _logController.scope('plugin');
+
+ISyncEngine? _engine;
+DatabaseConnection? _dbConn;
+SyncStatusIndicator? _syncIndicator;
+ObsidianConfigSync? _configSync;
+StreamSubscription<SyncEngineEvent>? _configReconnectSub;
+
+/// Plugin-owned task lane. Created in onLoad, injected into the engine so the
+/// engine's steady-state sync work (reconcile/pull/GC/settings) and the
+/// plugin's lifecycle work (boot/restart) share one serialized,
+/// connection-fair scheduler instead of racing the single WebSocket. Outlives
+/// every engine session; disposed on unload. See [[engine_sync_scheduler_plan]].
+PriorityTaskScheduler? _scheduler;
+
+/// Priority for lifecycle (boot/restart) tasks. Above the engine's interactive
+/// lane (100) so a restart is never blocked by the user-active typing gate.
+const int _kBootPriority = 1000;
+
+/// Runs [body] as the single coalesced `engine-lifecycle` task, so the restart
+/// triggers (initial start, Start command, resume health-check, blob-config
+/// adopt, token refresh) can't overlap or interleave their `engine.start()` —
+/// the latest supersedes a still-pending one, and a running one is never
+/// re-entered. Settings relaunch is deliberately NOT wrapped: it routes through
+/// engine.scheduleBackground (lower priority) and awaiting it from inside this
+/// task would deadlock the single slot, so callers relaunch settings AFTER
+/// awaiting this. Runs [body] directly if the scheduler is gone (unloaded).
+Future<void> _scheduleBoot(Future<void> Function() body) {
+  final scheduler = _scheduler;
+  if (scheduler == null) return body();
+  return scheduler.schedule(
+    key: 'engine-lifecycle',
+    priority: _kBootPriority,
+    run: (_) => body(),
+  );
+}
+
+/// (Re)starts `.obsidian` settings sync. Idempotent — disposes any running
+/// instance first. No-op when disabled, before the engine has an endpoint, or
+/// before a vault key is available. The config caller reuses the engine's live
+/// connection via a distinct service name.
+Future<void> _launchConfigSync({
+  required ISyncEngine engine,
+  required IDataClient dataClient,
+  required IVaultCipher cipher,
+  required String vaultId,
+  required PluginHandle plugin,
+  required SettingsSyncPrefs prefs,
+}) async {
+  _stopConfigSync();
+  if (!prefs.enabled || engine is! StateSyncEngine) return;
+  final endpoint = engine.endpoint;
+  if (endpoint == null) return;
+
+  final caller = StateSyncContractCaller(
+    endpoint,
+    serviceNameOverride: StateSyncContractNames.instance('config'),
+  );
+  final sync = SettingsSync(
+    remote: caller,
+    store: SettingsStore(client: dataClient, vaultId: vaultId),
+    cipher: cipher,
+    vaultId: vaultId,
+    kindOf: ObsidianSettingsRegistry.kindOf(prefs.categories),
+    log: _log.info,
+  );
+  final cs = ObsidianConfigSync(
+    adapter: plugin.app.vault.adapter,
+    sync: sync,
+    enabledCategories: prefs.categories,
+    // Event-driven remote->local: react to another device's settings push on
+    // the config keyspace topic (same vault qualification the server uses).
+    notifyEndpoint: endpoint,
+    notifyTopic: 'vault:${vaultId}_config',
+    onActivity: (active) => _syncIndicator?.setSettingsActivity(active),
+    log: _log.info,
+    // Share the note engine's connection-fair scheduler: settings sync runs
+    // as low-priority background work that yields to interactive note sync
+    // and pauses while the user is actively editing.
+    runBackground: engine.scheduleBackground,
+  );
+  _configSync = cs;
+  try {
+    await cs.start();
+    _log.info('Settings sync started (${prefs.categories.length} categories)');
+  } catch (e, st) {
+    _log.error('Settings sync start failed', error: e, stackTrace: st);
+  }
+}
+
+void _stopConfigSync() {
+  _configSync?.dispose();
+  _configSync = null;
+}
+
+/// Updates the engine's reference to the auth-backed vault meta storage.
+///
+/// `metaStorage` is set once at engine construction; without this helper a
+/// post-construction sign-in (session-expired refresh, manual re-auth,
+/// onAuthChanged callback) would leave the engine with a stale null
+/// `metaStorage` and `_checkExternalBlobConfig` would silently never
+/// load the server-side external blob config.
+void _setEngineAuth(ISyncEngine engine, RpcAccountClient? client) {
+  if (engine is! StateSyncEngine) return;
+  engine.metaStorage = client != null ? AccountVaultMetaStorage(client) : null;
+}
+
+/// Returns true if [error] indicates a corrupted or incompatible SQLite database.
+bool _isSqliteCorrupt(Object error) {
+  final msg = error.toString();
+  // SqliteException(11) — SQLITE_CORRUPT
+  if (msg.contains('SqliteException(11)') ||
+      (msg.contains('SqliteException') && msg.contains('malformed'))) {
+    return true;
+  }
+  // IndexedDB VFS failures — stale or incompatible DB layout:
+  // 1. Chunk shorter than expected → negative typed array length.
+  if (msg.contains('Invalid typed array length') && msg.contains('-')) {
+    return true;
+  }
+  // 2. IDB cursor key is null when a number is expected (missing chunk).
+  if (msg.contains('JSNull') && msg.contains('double')) {
+    return true;
+  }
+  return false;
+}
+
+/// Returns a URI for the sqlite3mc wasm module.
+/// The wasm is inlined as base64 in main.js by the build script — decoded here
+/// and wrapped in a Blob URL so no separate file is needed.
+Uri _resolveWasmUri() {
+  final b64 =
+      jsu.getProperty<String?>(jsu.globalThis, '__rhyoliteWasmB64') ?? '';
+  final bytes = base64Decode(b64);
+  final jsBytes = jsu.jsify(bytes);
+  final blobConstructor = jsu.getProperty<Object>(jsu.globalThis, 'Blob');
+  final blob = jsu.callConstructor<Object>(blobConstructor, [
+    [jsBytes],
+    jsu.jsify({'type': 'application/wasm'}),
+  ]);
+  final url = jsu.callMethod<String>(
+    jsu.getProperty<Object>(jsu.globalThis, 'URL'),
+    'createObjectURL',
+    [blob],
+  );
+  return Uri.parse(url);
+}
+
+void main() {
+  RpcGzipCodec.register();
+  bootstrapPlugin(
+    extraCss: '''
+      .rhyolite-setting-desc { color: var(--text-muted); font-size: 0.85em; }
+      .rhyolite-vault-label { font-weight: 500; }
+    ''',
+    onLoad: (plugin) async {
+      String dbFileName = '';
+      String dbName = '';
+      bool handlingCorruption = false;
+
+      void onCorruptDb() {
+        if (handlingCorruption) return;
+        handlingCorruption = true;
+        () async {
+          try {
+            await _engine?.stop();
+            await _dbConn?.close();
+            _engine = null;
+            _dbConn = null;
+          } catch (_) {}
+          await showDbCorruptionModal(
+            plugin,
+            dbFileName: dbFileName,
+            dbName: dbName,
+          );
+          handlingCorruption = false;
+        }();
+      }
+
+      await runZonedGuarded(
+        () async {
+          final configStorage = ObsidianConfigStorage(plugin);
+
+          // -----------------------------------------------------------------------
+          // Self-host mode: point the plugin at a self-hosted sync server with a
+          // static bearer token, bypassing the managed account service entirely.
+          // -----------------------------------------------------------------------
+          final selfHost = await configStorage.loadSelfHost();
+          final selfHostToken = selfHost.enabled
+              ? (await configStorage.loadSelfHostToken() ?? '')
+              : '';
+          final selfHostActive =
+              selfHost.enabled &&
+              selfHost.syncUrl.isNotEmpty &&
+              selfHostToken.isNotEmpty;
+
+          // Server URL: self-host overrides the compile-time managed sync URL.
+          final syncServerUrl = selfHostActive
+              ? selfHost.syncUrl
+              : kEnv.syncServiceUrl;
+
+          // Shared session bindings, filled by whichever edition is active.
+          IVaultDirectory? directory; // drives the vault picker
+          ITokenProvider? sessionTokenProvider; // engine bearer
+          IVaultMetaStorage? sessionMetaStorage; // external-blob config store
+          WebSocketSyncConnection? registryConn; // self-host: kept alive
+
+          // -----------------------------------------------------------------------
+          // Auth — account service URL comes from compile-time dart-define only.
+          // -----------------------------------------------------------------------
+          final authConfig = AuthConfig(
+            accountServiceUrl: kEnv.accountServiceUrl,
+          );
+
+          final accountTransport = RpcHttpCallerTransport(
+            baseUrl: authConfig.accountServiceUrl,
+          );
+          final accountEndpoint = RpcCallerEndpoint(
+            transport: accountTransport,
+          );
+          final accountClient = RpcAccountClient(accountEndpoint);
+          // Persist every server-issued session (sign-in + every background
+          // refresh). The server rotates the refresh token on each refresh, so
+          // without this the on-disk token goes stale within ~15 min and the
+          // next cold start is forced to re-login with a revoked token.
+          accountClient.onSessionPersist = configStorage.saveAuthSession;
+
+          RpcAccountClient? authClient;
+
+          if (!selfHostActive && authConfig.isConfigured) {
+            final savedSession = await configStorage.loadAuthSession();
+            if (savedSession != null) {
+              if (!savedSession.isExpired) {
+                accountClient.useSession(savedSession);
+                authClient = accountClient;
+              } else {
+                // Token expired — try to refresh.
+                try {
+                  accountClient.useSession(savedSession);
+                  await accountClient.refreshSession();
+                  final newSession = accountClient.session;
+                  if (newSession != null) {
+                    await configStorage.saveAuthSession(newSession);
+                  }
+                  authClient = accountClient;
+                } catch (e) {
+                  final msg = e.toString();
+                  if (msg.contains('(400)') || msg.contains('(401)')) {
+                    await configStorage.clearAuthSession();
+                  } else {
+                    accountClient.useSession(savedSession);
+                    authClient = accountClient;
+                  }
+                }
+              }
+            }
+          }
+
+          // Bind the vault directory + engine auth to the active edition.
+          if (selfHostActive) {
+            sessionTokenProvider = StaticTokenProvider(selfHostToken);
+            registryConn = WebSocketSyncConnection(
+              serverUrl: syncServerUrl,
+              tokenProvider: sessionTokenProvider,
+              logger: _logController.scope('registry'),
+            );
+            try {
+              // Bounded: onLoad must never hang on a stalled connect, or the
+              // rest of onLoad (settings tab, commands, engine) never runs and
+              // the settings page shows up blank.
+              await registryConn.connect().timeout(const Duration(seconds: 10));
+              final regCaller = VaultRegistryContractCaller(
+                registryConn.endpoint,
+              );
+              directory = SelfHostVaultDirectory(regCaller);
+              sessionMetaStorage = SelfHostVaultMetaStorage(regCaller);
+            } catch (e) {
+              _log.warning('Self-host registry connect failed: $e');
+            }
+          } else if (authClient != null) {
+            directory = ManagedVaultDirectory(authClient);
+            sessionTokenProvider = RpcAccountClientTokenProvider(authClient);
+            sessionMetaStorage = AccountVaultMetaStorage(authClient);
+          }
+
+          // -----------------------------------------------------------------------
+          // Vault
+          // -----------------------------------------------------------------------
+          var config = await configStorage.tryLoad();
+          VaultCipher? cipher;
+
+          if (directory != null) {
+            final dir = directory;
+            if (config == null) {
+              final result = await withModalLock(
+                () => showVaultPickerModal(plugin, dir, configStorage),
+              );
+              if (result != null) {
+                config = result.$1;
+                cipher = result.$2;
+              }
+            } else if (config.verificationToken == null ||
+                config.verificationToken!.isEmpty) {
+              final result = await withModalLock(
+                () => showVaultPickerModal(plugin, dir, configStorage),
+              );
+              if (result != null) {
+                config = result.$1;
+                cipher = result.$2;
+              }
+            } else {
+              final snapshot = config;
+              cipher =
+                  await configStorage.tryUnlockFromStorage() ??
+                  await withModalLock(
+                    () => showPassphraseModal(
+                      plugin,
+                      configStorage,
+                      vaultId: snapshot.vaultId,
+                      verificationToken: snapshot.verificationToken!,
+                    ),
+                  );
+            }
+          }
+
+          final cfg = config ?? const VaultConfig(vaultId: '', vaultName: '');
+
+          // Single config builder for every (re)build — initial boot AND the
+          // settings callbacks (onVaultChanged/onConfigChanged/onAuthChanged).
+          // Self-host always uses the static token provider (no account client,
+          // so the managed branch would otherwise drop the token and the engine
+          // would connect unauthenticated). Managed uses the passed client.
+          VaultConfig buildConfig(VaultConfig base, RpcAccountClient? client) {
+            if (selfHostActive) {
+              return sessionTokenProvider != null
+                  ? base.copyWith(tokenProvider: sessionTokenProvider)
+                  : base;
+            }
+            if (client == null) return base;
+            return base.copyWith(
+              tokenProvider: RpcAccountClientTokenProvider(client),
+            );
+          }
+
+          final activeConfig = buildConfig(cfg, authClient);
+
+          final wasmUri = _resolveWasmUri();
+
+          final vaultId = cfg.vaultId;
+          // Dev-only log collector — streams structured logs to a local
+          // rpc_log server for live debugging. Disabled in release builds
+          // so user plugins never reach out to a developer host. Enable
+          // with `--dart-define=RHYOLITE_DEBUG=true` plus
+          // `--dart-define=RHYOLITE_LOG_URI=ws://your-host:9500` during
+          // a dev session.
+          const debugLogUri = String.fromEnvironment('RHYOLITE_LOG_URI');
+          if (kDebug && debugLogUri.isNotEmpty) {
+            _logController.addOutput(
+              LogCollectorOutput(
+                uri: Uri.parse(debugLogUri),
+                device: DeviceInfo(
+                  name: 'Obsidian',
+                  app: 'rhyolite_sync',
+                  os: 'WASM',
+                  appVersion: cfg.vaultName.isNotEmpty ? cfg.vaultName : null,
+                ),
+              ),
+            );
+          }
+
+          final bootSw = Stopwatch()..start();
+          final raw = await plugin.loadData();
+          _log.info('boot: loadData ${bootSw.elapsedMilliseconds}ms');
+          final dbSuffix =
+              (raw as Map<Object?, Object?>?)?['dbSuffix'] as String? ?? '';
+          final suffix = dbSuffix.isNotEmpty ? '-$dbSuffix' : '';
+          dbFileName = '$vaultId$suffix.db';
+          dbName = 'rhyolite-$vaultId$suffix';
+
+          // .obsidian settings sync preferences (opt-in; default off).
+          var settingsPrefs = SettingsSyncPrefs.fromData(raw);
+
+          final dbConn = await openFileDb(
+            options: SqliteConnectionOptions(
+              webDatabaseName: dbName,
+              webFileName: dbFileName,
+              webSqliteWasmUri: wasmUri,
+            ),
+          );
+          _dbConn = dbConn;
+          _log.info('boot: openFileDb ${bootSw.elapsedMilliseconds}ms');
+
+          // Set up database logger
+          final dataRepository = SqliteDataRepository(
+            storage: SqliteDataStorageAdapter.connection(dbConn),
+          );
+          final dataClient = IDataClient.repository(repository: dataRepository);
+          // Database logging removed during logger migration
+
+          final blobRepo = SqliteBlobRepository.db(
+            dbConn.database,
+            enableWal: false,
+          );
+
+          String platformTag;
+          bool isMobile = false;
+          try {
+            isMobile = jsu.getProperty<bool>(plugin.app.raw, 'isMobile');
+            platformTag = isMobile ? 'mobile' : 'desktop';
+          } catch (_) {
+            platformTag = 'unknown';
+          }
+
+          // On mobile (Obsidian iOS/Android) RAM is tight. StartupDiff
+          // holds N × file_bytes in memory while uploading; with large
+          // attachments (PDFs, attachments in MB range) concurrency=4
+          // can OOM the host process. Cap to 2 on mobile.
+          final startupUploadConcurrency = isMobile ? 2 : 4;
+
+          // One scheduler for the whole plugin: the engine's sync work and the
+          // lifecycle boot/restart work below share it (see [_scheduleBoot]).
+          final scheduler = PriorityTaskScheduler(
+            onError: (e, _) => _log.warning('scheduler task error: $e'),
+          );
+          _scheduler = scheduler;
+
+          final ISyncEngine engine = StateSyncEngine(
+            vaultPath: '',
+            serverUrl: syncServerUrl,
+            config: activeConfig.copyWith(clientName: 'Obsidian/$platformTag'),
+            cipher: cipher,
+            dataClient: dataClient,
+            blobStore: LocalBlobStore(blobRepo),
+            io: ObsidianIO(plugin.app.vault),
+            changeProvider: ObsidianChangeProvider(
+              plugin,
+              logger: _logController.scope('engine'),
+            ),
+            metaStorage: sessionMetaStorage,
+            httpClient: ObsidianHttpClient(),
+            logger: _logController.scope('engine'),
+            rejectionFactory: pluginRejectionFactory,
+            startupUploadConcurrency: startupUploadConcurrency,
+            scheduler: scheduler,
+          );
+          _engine = engine;
+          _log.info('boot: engine ctor ${bootSw.elapsedMilliseconds}ms');
+
+          // Single indicator, surface picks itself by platform:
+          // status bar on desktop, floating pill on mobile.
+          _syncIndicator = SyncStatusIndicator(
+            plugin: plugin,
+            engine: engine,
+            logger: _logController.scope('plugin'),
+          )..init();
+
+          // The settings notify subscription is an in-flight call too, so it
+          // dies on a transport reconnect. The engine emits SyncConnected on
+          // every (re)connect; reissue the config notify + catch-up pull. The
+          // first SyncConnected fires before config sync is launched, so the
+          // null-guard makes it a no-op then and a real reissue on reconnects.
+          _configReconnectSub = engine.events.listen((e) {
+            if (e is SyncConnected) _configSync?.handleReconnect();
+          });
+
+          late final void Function() refreshSettings;
+          refreshSettings = _registerSettings(
+            plugin: plugin,
+            configStorage: configStorage,
+            config: cfg,
+            authConfig: authConfig,
+            authClient: authClient,
+            accountClient: accountClient,
+            engine: engine,
+            buildConfig: buildConfig,
+            cipher: cipher,
+            settingsSyncPrefs: () => settingsPrefs,
+            selfHostEnabled: selfHostActive,
+            selfHostUrl: selfHost.syncUrl,
+            selfHostDirectory: selfHostActive ? directory : null,
+            onSettingsSyncChanged: (next) async {
+              settingsPrefs = next;
+              await configStorage.saveSettingsSync(next.toJson());
+              if (cipher != null) {
+                await _launchConfigSync(
+                  engine: engine,
+                  dataClient: dataClient,
+                  cipher: cipher!,
+                  vaultId: vaultId,
+                  plugin: plugin,
+                  prefs: settingsPrefs,
+                );
+              }
+              refreshSettings();
+            },
+          );
+
+          plugin.addCommand(
+            id: 'rhyolite-sync-start',
+            name: 'Start Sync',
+            callback: () async {
+              if (cipher == null) {
+                final verificationToken = config?.verificationToken;
+                if (verificationToken != null && verificationToken.isNotEmpty) {
+                  cipher = await withModalLock(
+                    () => showPassphraseModal(
+                      plugin,
+                      configStorage,
+                      vaultId: cfg.vaultId,
+                      verificationToken: verificationToken,
+                    ),
+                  );
+                }
+                if (cipher == null) return;
+                engine.cipher = cipher;
+              }
+              await _scheduleBoot(() => engine.start());
+              await _launchConfigSync(
+                engine: engine,
+                dataClient: dataClient,
+                cipher: cipher!,
+                vaultId: vaultId,
+                plugin: plugin,
+                prefs: settingsPrefs,
+              );
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-sync-stop',
+            name: 'Stop Sync',
+            callback: () async {
+              _stopConfigSync();
+              await engine.stop();
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-sync-now',
+            name: 'Sync Now',
+            callback: () async {
+              await engine.triggerPull();
+              _log.info('Manual sync triggered');
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-sync-config-now',
+            name: 'Sync settings now (.obsidian)',
+            callback: () async {
+              final cs = _configSync;
+              if (cs == null) {
+                _log.info('Settings sync is off');
+                return;
+              }
+              await cs.sync();
+              _log.info('Manual settings sync triggered');
+            },
+          );
+          // Graph viz not available with CRDT engine.
+          plugin.addCommand(
+            id: 'rhyolite-show-logs',
+            name: 'Show Sync Logs',
+            callback: () {
+              logs_modal.showLogsModal(plugin, dataClient);
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-cleanup-storage',
+            name: 'Clean up storage (history + blobs)',
+            callback: () {
+              showStorageCleanupModal(plugin, engine);
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-configure-selfhost',
+            name: 'Configure self-host server',
+            callback: () async {
+              final changed = await withModalLock(
+                () => showSelfHostModal(plugin, configStorage),
+              );
+              if (changed) {
+                // Re-run onLoad so the new mode takes effect immediately.
+                reloadPlugin(plugin);
+              }
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-show-file-history',
+            name: 'Show version history for current file',
+            callback: () {
+              showFileVersionModal(plugin, engine);
+            },
+          );
+
+          if (cipher == null) {
+            _log.info(
+              'No vault key — sync disabled. Sign in and connect a vault.',
+            );
+          } else if (syncServerUrl.isEmpty) {
+            _log.info('Server URL not set — sync disabled.');
+          } else {
+            // Defer start so plugin onload returns immediately and Obsidian
+            // UI stays responsive while sync warms up. If start blocks the
+            // event loop later, the user can still reach Stop Sync / Disable.
+            Future<void>.delayed(Duration.zero, () async {
+              try {
+                await _scheduleBoot(() => engine.start());
+                await _launchConfigSync(
+                  engine: engine,
+                  dataClient: dataClient,
+                  cipher: cipher!,
+                  vaultId: vaultId,
+                  plugin: plugin,
+                  prefs: settingsPrefs,
+                );
+              } catch (e, st) {
+                _log.error('Engine start failed', error: e, stackTrace: st);
+              }
+            });
+          }
+
+          // Resume-from-background recovery. When Obsidian is backgrounded
+          // — mobile multitasking, desktop sleep, OS suspending the
+          // WebView — the WebSocket can die silently: client-side state
+          // says "Online" but every send hangs. The user returns, edits,
+          // nothing syncs, until they manually run Start Sync (which
+          // tears down and rebuilds the engine).
+          //
+          // Hook visibilitychange: when the tab becomes visible, run a
+          // cheap healthCheck. If it fails, the transport is stale —
+          // restart the engine. `registerDomEvent` ensures the listener
+          // is removed on plugin unload (community-plugin requirement).
+          {
+            var healthInFlight = false;
+            final documentJs = jsu.getProperty<JSObject?>(
+              jsu.globalThis,
+              'document',
+            );
+            if (documentJs != null) {
+              final handler = jsu.allowInterop((JSAny? _) async {
+                if (healthInFlight) return;
+                final visible =
+                    jsu.getProperty<String?>(documentJs, 'visibilityState') ==
+                    'visible';
+                if (!visible) return;
+                if (_engine == null) return;
+                healthInFlight = true;
+                try {
+                  final ok = await _engine!.healthCheck(
+                    timeout: const Duration(seconds: 5),
+                  );
+                  if (!ok) {
+                    _log.warning(
+                      'Health check failed on resume — restarting engine',
+                    );
+                    try {
+                      await _scheduleBoot(() async {
+                        await _engine!.stop();
+                        await _engine!.start();
+                      });
+                      if (cipher != null) {
+                        await _launchConfigSync(
+                          engine: _engine!,
+                          dataClient: dataClient,
+                          cipher: cipher!,
+                          vaultId: vaultId,
+                          plugin: plugin,
+                          prefs: settingsPrefs,
+                        );
+                      }
+                    } catch (e) {
+                      _log.error('Engine restart on resume failed: $e');
+                    }
+                  } else {
+                    // Connection is alive — but the notify server-stream may
+                    // have gone silent while backgrounded without a state
+                    // transition to trigger the engine's own reissue. Re-arm
+                    // both the note and settings notify streams (idempotent) so
+                    // live push keeps flowing, then do an opportunistic pull/
+                    // sync so anything pushed by other devices while this one
+                    // was backgrounded lands immediately.
+                    await _engine!.reissueNotify();
+                    await _engine!.triggerPull();
+                    _configSync?.handleReconnect();
+                    await _configSync?.sync();
+                  }
+                } finally {
+                  healthInFlight = false;
+                }
+              });
+              jsu.callMethod<void>(plugin.raw, 'registerDomEvent', [
+                documentJs,
+                'visibilitychange',
+                handler,
+              ]);
+            }
+          }
+
+          // Listen for session expiry and prompt re-authentication.
+          // `_autoSignInInFlight` dedupes overlapping SessionExpired
+          // events while the auto sign-in flow is mid-wait or mid-modal.
+          var _autoSignInInFlight = false;
+          engine.events.listen((event) async {
+            // Every engine (re)start in this listener (blob-config adopt,
+            // token refresh, re-auth) must also relaunch settings sync —
+            // otherwise .obsidian config stops syncing after any auth recovery.
+            Future<void> relaunchConfigSync() async {
+              if (cipher == null) return;
+              await _launchConfigSync(
+                engine: engine,
+                dataClient: dataClient,
+                cipher: cipher!,
+                vaultId: vaultId,
+                plugin: plugin,
+                prefs: settingsPrefs,
+              );
+            }
+
+            switch (event) {
+              case ExternalBlobConfigDiscovered(:final configJson):
+                _log.info('External blob config discovered from server');
+                final extConfig = ExternalBlobConfig.fromJson(configJson);
+                if (extConfig != null) {
+                  // Build on top of the *current* config, not the initial
+                  // load-time snapshot — `cfg` is `final` and misses any
+                  // post-load edits (verification token rotation, vault
+                  // rename, etc.).
+                  final base = config ?? cfg;
+                  final updated = base.copyWith(externalBlobConfig: extConfig);
+                  config = updated;
+                  await configStorage.save(updated);
+                  engine.config = buildConfig(updated, authClient);
+                  await _scheduleBoot(() async {
+                    await engine.stop();
+                    await engine.start();
+                  });
+                  await relaunchConfigSync();
+                  // The settings tab was built with the snapshot config
+                  // and still shows "Configure" buttons. Re-render so
+                  // the user sees the freshly-adopted "Connected: ..."
+                  // panel without having to close and reopen Settings.
+                  refreshSettings();
+                  _log.info('Restarted with external blob storage');
+                }
+                return;
+              case SubscriptionRequired():
+                return;
+              case SessionExpired():
+                // Self-host has no account session — never prompt for sign-in.
+                if (selfHostActive) return;
+                break; // fall through to refresh handler below
+              // Catch-all for every other policy/auth rejection (managed
+              // storage unavailable, quota exceeded, permission denied,
+              // unrecognised app_policy code, etc.). Engine has already
+              // stopped via its own fatal-rejection handler; we just log
+              // and let the sync indicator surface the state. Crucially:
+              // no auto-restart — that's what was creating the per-record
+              // grind loop that froze Obsidian.
+              case SyncServerRejected(:final code, :final message)
+                  when code.startsWith('auth.') ||
+                      code.startsWith('app_policy.'):
+                _log.warning('Sync paused — server refused ($code): $message');
+                return;
+              default:
+                return;
+            }
+            _log.warning('Auth rejected — attempting token refresh');
+
+            final client = authClient;
+            if (client != null) {
+              try {
+                final session = await client.refreshSession();
+                await configStorage.saveAuthSession(session);
+                _setEngineAuth(engine, client);
+                engine.config = buildConfig(cfg, client);
+                await _scheduleBoot(() => engine.start());
+                await relaunchConfigSync();
+                _log.info('Token refreshed — restarted');
+                return;
+              } catch (_) {
+                _log.warning('Refresh failed — prompting re-authentication');
+              }
+            }
+
+            await configStorage.clearAuthSession();
+            authClient = null;
+            _setEngineAuth(engine, null);
+            engine.config = cfg;
+
+            if (!authConfig.isConfigured) return;
+
+            // Dedupe: multiple SessionExpired events can fire in
+            // quick succession (notify reconnect, pending RPCs all
+            // failing). Without this flag every one of them would
+            // queue its own awaitModalClose + showSignInModal.
+            if (_autoSignInInFlight) return;
+            _autoSignInInFlight = true;
+            RpcAccountClient? newClient;
+            try {
+              if (isModalOpen) {
+                _log.info(
+                  'Session expired — waiting for current modal '
+                  'to close before prompting sign-in',
+                );
+                await awaitModalClose();
+                // World may have moved on while we waited (user might
+                // have signed in via Settings, or refreshed the token
+                // through another flow). Try refresh once more; if it
+                // succeeds the prompt is no longer needed.
+                try {
+                  final session = await accountClient.refreshSession();
+                  await configStorage.saveAuthSession(session);
+                  authClient = accountClient;
+                  _setEngineAuth(engine, accountClient);
+                  engine.config = buildConfig(cfg, accountClient);
+                  await engine.start();
+                  await relaunchConfigSync();
+                  _log.info(
+                    'Token refreshed after modal closed — no prompt needed',
+                  );
+                  return;
+                } catch (_) {
+                  // Still bad — fall through and show the modal.
+                }
+              }
+              newClient = await withModalLock(
+                () => showSignInModal(plugin, client: accountClient),
+              );
+            } finally {
+              _autoSignInInFlight = false;
+            }
+            if (newClient == null) return;
+            final newSession = newClient.session;
+            if (newSession != null) {
+              await configStorage.saveAuthSession(newSession);
+            }
+            authClient = newClient;
+            _setEngineAuth(engine, newClient);
+            engine.config = buildConfig(cfg, newClient);
+            await engine.start();
+            await relaunchConfigSync();
+          });
+        },
+        (error, stack) {
+          if (_isSqliteCorrupt(error)) {
+            onCorruptDb();
+          } else {
+            _log.error('Unhandled error', error: error, stackTrace: stack);
+          }
+        },
+      );
+    },
+    onUnload: (_) async {
+      _stopConfigSync();
+      await _configReconnectSub?.cancel();
+      _configReconnectSub = null;
+      _syncIndicator?.dispose();
+      _syncIndicator = null;
+      await _engine?.stop();
+      _engine = null;
+      await _scheduler?.dispose();
+      _scheduler = null;
+      await _dbConn?.close();
+      _dbConn = null;
+    },
+  );
+}
+
+// Returns the `refreshSettings` callback so the caller can re-render the
+// settings tab in response to events that update vault config from
+// outside the tab itself (notably ExternalBlobConfigDiscovered).
+/// Resolves the external-blob meta store for the active edition: the self-host
+/// registry when connected, otherwise the account service (managed).
+IVaultMetaStorage? _sessionMetaStorage(
+  IVaultDirectory? selfHostDirectory,
+  RpcAccountClient? authClient,
+) {
+  if (selfHostDirectory != null) return selfHostDirectory.metaStorage;
+  if (authClient != null) return AccountVaultMetaStorage(authClient);
+  return null;
+}
+
+void Function() _registerSettings({
+  required PluginHandle plugin,
+  required ObsidianConfigStorage configStorage,
+  required VaultConfig config,
+  required AuthConfig authConfig,
+  required RpcAccountClient? authClient,
+  required RpcAccountClient accountClient,
+  required ISyncEngine engine,
+  required VaultConfig Function(VaultConfig, RpcAccountClient?) buildConfig,
+  required IVaultCipher? cipher,
+  required SettingsSyncPrefs Function() settingsSyncPrefs,
+  required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
+  required bool selfHostEnabled,
+  required String selfHostUrl,
+  IVaultDirectory? selfHostDirectory,
+}) {
+  late final void Function() refreshSettings;
+  refreshSettings = registerSettingsTab(
+    plugin: plugin,
+    configStorage: configStorage,
+    config: config,
+    authConfig: authConfig,
+    authClient: authClient,
+    accountClient: accountClient,
+    onFetchUsage: () async {
+      return null; // TODO: implement for CRDT engine
+    },
+    openUrl: (url) => jsu.callMethod<void>(jsu.globalThis, 'open', [url]),
+    onConfigChanged: (updated) async {
+      engine.config = buildConfig(updated, authClient);
+      await engine.stop();
+      await engine.start();
+    },
+    onAuthChanged: (newAuthConfig, client) async {
+      authClient = client;
+      _setEngineAuth(engine, client);
+      engine.config = buildConfig(config, client);
+      _log.info('Signed in');
+    },
+    onSignOut: () async {
+      authClient = null;
+      _setEngineAuth(engine, null);
+      engine.config = config;
+      await engine.stop();
+      _log.info('Signed out');
+    },
+    onDisconnectVault: () async {
+      // Order matters: stop the engine BEFORE wiping the local stores
+      // so no in-flight reconcile/push can resurrect rows mid-wipe.
+      // wipeLocalState reads config.vaultId, which stays in memory on
+      // the engine even after configStorage.disconnectVault() has
+      // cleared the on-disk vault config.
+      engine.cipher = null;
+      await engine.stop();
+      try {
+        await engine.wipeLocalState();
+      } catch (e) {
+        _log.error('Vault disconnect: local wipe failed', error: e);
+      }
+      _log.info('Vault disconnected (local state wiped)');
+    },
+    onVaultChanged: (newConfig, newCipher) async {
+      engine.config = buildConfig(newConfig, authClient);
+      engine.cipher = newCipher;
+      await engine.stop();
+      await engine.start();
+      _log.info('Switched to vault ${newConfig.vaultId}');
+    },
+    onSubscribed: () => _waitForSubscriptionAndStart(
+      plugin: plugin,
+      engine: engine,
+      accountClient: accountClient,
+      onDone: refreshSettings,
+    ),
+    onResetVault: () async {
+      await engine.triggerReset();
+      _log.info('Vault re-upload initiated');
+    },
+    onRestoreFromServer: () async {
+      await engine.triggerRestoreFromServer();
+      _log.info('Vault restore from server initiated');
+    },
+    onRepairVault: () async {
+      await engine.triggerRepair();
+      _log.info('Vault repair initiated');
+    },
+    onSaveExternalBlobConfig: (extConfig) async {
+      // Fail loudly. Silent skips here mean the user ticked Configure,
+      // saw the modal close, but the encrypted config never reached the
+      // server — so other devices never adopt it, and a local-DB wipe
+      // on this device loses it forever. The settings tab catches these
+      // throws and surfaces them as a Notice.
+      final store = _sessionMetaStorage(selfHostDirectory, authClient);
+      if (store == null) {
+        throw StateError(
+          'Connect a vault before configuring external storage.',
+        );
+      }
+      final c = cipher;
+      if (c == null) {
+        throw StateError('Vault is locked — enter your passphrase first.');
+      }
+      final metaService = VaultMetaService(
+        storage: store,
+        vaultId: config.vaultId,
+        cipher: c,
+      );
+      await metaService.saveExternalBlobConfig(extConfig);
+      _log.info('External blob config saved');
+    },
+    onClearExternalBlobConfig: () async {
+      final store = _sessionMetaStorage(selfHostDirectory, authClient);
+      if (store == null) {
+        throw StateError('Connect a vault before clearing external storage.');
+      }
+      final c = cipher;
+      if (c == null) {
+        throw StateError('Vault is locked — enter your passphrase first.');
+      }
+      final metaService = VaultMetaService(
+        storage: store,
+        vaultId: config.vaultId,
+        cipher: c,
+      );
+      await metaService.clearExternalBlobConfig();
+      _log.info('External blob config cleared');
+    },
+    settingsSyncPrefs: settingsSyncPrefs,
+    onSettingsSyncChanged: onSettingsSyncChanged,
+    onResetSettings: () async {
+      final cs = _configSync;
+      if (cs == null) {
+        throw StateError('Settings sync is off.');
+      }
+      await cs.resetFromThisDevice();
+      _log.info('Settings re-upload finished');
+    },
+    onRestoreSettings: () async {
+      final cs = _configSync;
+      if (cs == null) {
+        throw StateError('Settings sync is off.');
+      }
+      await cs.restoreFromServer();
+      _log.info('Settings download finished');
+    },
+    selfHostEnabled: selfHostEnabled,
+    selfHostUrl: selfHostUrl,
+    selfHostDirectory: selfHostDirectory,
+  );
+  return refreshSettings;
+}
+
+/// Polls the account service's getSubscription endpoint every 10 seconds for up to 5 minutes.
+/// Shows a modal with a spinner while waiting. Starts the engine on success.
+Future<void> _waitForSubscriptionAndStart({
+  required PluginHandle plugin,
+  required ISyncEngine engine,
+  required RpcAccountClient accountClient,
+  void Function()? onDone,
+}) async {
+  const interval = Duration(seconds: 10);
+  const timeout = Duration(minutes: 5);
+  final deadline = DateTime.now().add(timeout);
+
+  _log.info('Waiting for subscription activation...');
+
+  ModalContext<void>? modalCtx;
+  SpinnerRef? spinnerRef;
+
+  // Open a modal with a spinner — the polling runs in the background.
+  // We capture ctx/spinner via the build closure and close/update from below.
+  unawaited(
+    showModalWith<void>(
+      plugin,
+      build: (ctx) {
+        modalCtx = ctx;
+        ctx.h3('Activating subscription…');
+        ctx.spaceVertical(px: 12);
+        ctx.createEl('p', text: 'Please wait while we confirm your payment.');
+        ctx.spaceVertical(px: 12);
+        spinnerRef = ctx.spinner(label: 'Checking…');
+        spinnerRef!.show();
+        ctx.spaceVertical(px: 4);
+        ctx.onEscape(() {}); // disable accidental close
+      },
+    ),
+  );
+
+  // Give the modal a moment to render before polling starts.
+  await Future<void>.delayed(const Duration(milliseconds: 300));
+
+  bool confirmed = false;
+
+  while (DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(interval);
+
+    try {
+      final subscription = await accountClient.getSubscription();
+      if (subscription.isActive) {
+        confirmed = true;
+        break;
+      }
+      _log.debug('Subscription not yet active, retrying...');
+    } catch (e) {
+      _log.error('checkAccess error', error: e);
+    }
+  }
+
+  final ctx = modalCtx;
+  if (ctx == null) return;
+
+  if (confirmed) {
+    _log.info('Subscription confirmed — starting engine');
+    spinnerRef?.hide();
+    // Replace modal content with success message.
+    ctx.close(null);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    await showModalWith<void>(
+      plugin,
+      build: (ctx2) {
+        ctx2.h3('🎉 Subscription activated!');
+        ctx2.spaceVertical(px: 12);
+        ctx2.createEl(
+          'p',
+          text: 'Your subscription is now active. Sync will start shortly.',
+        );
+        ctx2.spaceVertical(px: 16);
+        ctx2.buttonRow([
+          ButtonSpec(
+            'Got it',
+            () => ctx2.close(null),
+            variant: ButtonVariant.primary,
+          ),
+        ]);
+        ctx2.onEscape(() => ctx2.close(null));
+      },
+    );
+    onDone?.call();
+    await engine.start();
+  } else {
+    _log.warning('Subscription not activated within 5 minutes');
+    spinnerRef?.hide();
+    ctx.close(null);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    await showModalWith<void>(
+      plugin,
+      build: (ctx2) {
+        ctx2.h3('Payment not confirmed');
+        ctx2.spaceVertical(px: 12);
+        ctx2.createEl(
+          'p',
+          text:
+              'We could not confirm your payment within 5 minutes. '
+              'If you completed the payment, please restart Obsidian. '
+              'If the issue persists, contact support.',
+        );
+        ctx2.spaceVertical(px: 16);
+        ctx2.buttonRow([ButtonSpec('Close', () => ctx2.close(null))]);
+        ctx2.onEscape(() => ctx2.close(null));
+      },
+    );
+    onDone?.call();
+  }
+}

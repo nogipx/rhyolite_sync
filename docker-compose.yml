@@ -1,0 +1,86 @@
+# Self-host Rhyolite sync server.
+#
+#   cp .env.example .env
+#   # edit .env — set RHYOLITE_SYNC_TOKEN and SYNC_DOMAIN
+#   docker compose up -d
+#
+# The sync server image is prebuilt and pulled from GHCR — nothing is
+# compiled locally. Postgres/MinIO schemas and buckets are created on
+# demand. Caddy terminates TLS and reverse-proxies wss:// to the server.
+name: rhyolite-selfhost
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+      POSTGRES_DB: rhyolite
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rhyolite"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - miniodata:/data
+
+  sync:
+    image: ghcr.io/nogipx/rhyolite_sync_selfhost:1.1.1
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DATABASE: rhyolite
+      PG_USER: postgres
+      PG_PASSWORD: ${PG_PASSWORD:-postgres}
+      PG_SCHEMA: ${PG_SCHEMA:-sync}
+      PG_SSL_MODE: disable
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_USE_SSL: "false"
+      WS_PORT: 9765
+      RHYOLITE_SYNC_TOKEN: ${RHYOLITE_SYNC_TOKEN:?set RHYOLITE_SYNC_TOKEN in .env}
+    # Reachable only inside the compose network; Caddy is the public edge.
+    # To run plain ws:// without TLS, comment out caddy below and publish
+    # this port instead:  ports: ["9765:9765"]
+    expose:
+      - "9765"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - sync
+    environment:
+      SYNC_DOMAIN: ${SYNC_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+
+volumes:
+  pgdata:
+  miniodata:
+  caddydata:
+  caddyconfig:

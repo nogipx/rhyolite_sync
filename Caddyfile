@@ -1,0 +1,13 @@
+# TLS termination + WebSocket reverse-proxy for the self-host sync server.
+#
+# The site address is taken from $SYNC_DOMAIN:
+#   - a real domain (sync.example.com)      -> real Let's Encrypt cert (needs 80+443 public)
+#   - <your-public-ip>.sslip.io             -> real cert WITHOUT owning a domain (needs 80+443 public)
+#   - localhost or a bare IP                -> Caddy's internal self-signed CA
+#                                              (clients must trust the root at /data/caddy/pki)
+#
+# Caddy upgrades WebSocket connections transparently, so wss:// just works.
+
+{$SYNC_DOMAIN:localhost} {
+	reverse_proxy sync:9765
+}

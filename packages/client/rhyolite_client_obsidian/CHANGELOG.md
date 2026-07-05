@@ -1,9 +1,5 @@
 ## [3.0.0] - 2026-07-06
 
-### BREAKING CHANGES
-
-- Plugin id changed from `rhyolite-sync` to `rhyolite_sync`. Obsidian treats the update as a new plugin: your previous plugin settings do not carry over, so after updating you must reconnect once (server URL, vault, passphrase) and may need to remove the old plugin entry. Your notes on disk and your data on the server are safe — the local cache re-syncs automatically.
-
 ### Changed
 
 - Repository and container image URLs moved to the project's standalone account (obsidian, deploy).

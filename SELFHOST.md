@@ -31,15 +31,31 @@ Caddyfile                              # TLS termination for wss://
 ## Self-host the server
 
 The server image is prebuilt and pulled from GHCR — nothing compiles locally.
+One line installs into `./rhyolite-selfhost`, generates a token, and starts the
+stack:
 
 ```bash
-git clone https://github.com/nogipx/rhyolite_sync.git
-cd rhyolite_sync
-cp .env.example .env
-# set RHYOLITE_SYNC_TOKEN  ->  openssl rand -hex 32
-# set SYNC_DOMAIN          ->  see TLS below
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/nogipx/rhyolite_sync/main/install.sh)"
+```
+
+The script explains what it will do and pauses before doing it, then prints your
+token and `wss://` URL. For an unattended install, preset the domain and skip
+the prompts:
+
+```bash
+SYNC_DOMAIN=sync.example.com RHYOLITE_YES=1 \
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/nogipx/rhyolite_sync/main/install.sh)"
+```
+
+<details><summary>Manual, without the script</summary>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nogipx/rhyolite_sync/main/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/nogipx/rhyolite_sync/main/Caddyfile          -o Caddyfile
+printf 'RHYOLITE_SYNC_TOKEN=%s\nSYNC_DOMAIN=localhost\n' "$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
+</details>
 
 Clients connect to `wss://SYNC_DOMAIN` with the token as their bearer secret.
 Postgres schemas and MinIO buckets are created on first run.

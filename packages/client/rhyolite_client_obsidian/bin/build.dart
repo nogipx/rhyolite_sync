@@ -26,7 +26,7 @@ Future<void> main(List<String> args) async {
 
   await buildPlugin(
     packageDir: packageDir,
-    pluginId: 'rhyolite_sync',
+    pluginId: 'rhyolite-sync',
     entry: 'bin/plugin.dart',
     outDir: outDir,
     pluginClass: 'RhyolitePlugin',
@@ -36,7 +36,7 @@ Future<void> main(List<String> args) async {
   );
 
   final manifestSrc = File(p.join(packageDir, 'manifest.json'));
-  final manifestDst = File(p.join(outDir, 'rhyolite_sync', 'manifest.json'));
+  final manifestDst = File(p.join(outDir, 'rhyolite-sync', 'manifest.json'));
   await manifestSrc.copy(manifestDst.path);
   print('Copied manifest.json → ${manifestDst.path}');
 
@@ -44,12 +44,12 @@ Future<void> main(List<String> args) async {
   final wasmSrc = File(p.join(packageDir, 'sqlite3mc.wasm'));
   final wasmBytes = await wasmSrc.readAsBytes();
   final wasmB64 = base64Encode(wasmBytes);
-  final mainJs = File(p.join(outDir, 'rhyolite_sync', 'main.js'));
+  final mainJs = File(p.join(outDir, 'rhyolite-sync', 'main.js'));
   final mainJsContent = await mainJs.readAsString();
   await mainJs.writeAsString(
     '$mainJsContent\nglobalThis.__rhyoliteWasmB64="$wasmB64";',
   );
   print('Inlined sqlite3mc.wasm (${wasmBytes.length} bytes) into main.js');
 
-  print('Build complete → $outDir/rhyolite_sync/');
+  print('Build complete → $outDir/rhyolite-sync/');
 }

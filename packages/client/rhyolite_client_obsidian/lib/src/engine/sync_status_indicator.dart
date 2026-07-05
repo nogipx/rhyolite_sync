@@ -37,7 +37,7 @@ class SyncStatusIndicator {
   final ISyncEngine _engine;
   final LogScope? _log;
 
-  static const _pluginId = 'rhyolite_sync';
+  static const _pluginId = 'rhyolite-sync';
   static const _revertDelay = Duration(seconds: 3);
   static const _errorRevertDelay = Duration(seconds: 5);
 

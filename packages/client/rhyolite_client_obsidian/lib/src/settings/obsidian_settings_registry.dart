@@ -21,14 +21,14 @@ class SettingsResourceClass {
 
 /// Classifies `.obsidian` paths into sync resources. Pure path logic, no IO.
 ///
-/// The rhyolite_sync self-exclusion and `workspace*.json` exclusion are
+/// The rhyolite-sync self-exclusion and `workspace*.json` exclusion are
 /// load-bearing safety invariants: syncing our own plugin would overwrite the
 /// running engine and its credentials; `workspace.json` is device-specific and
 /// changes on every interaction.
 class ObsidianSettingsRegistry {
   const ObsidianSettingsRegistry._();
 
-  static const selfPluginId = 'rhyolite_sync';
+  static const selfPluginId = 'rhyolite-sync';
 
   /// Categories enabled by default. Plugin *code* (`main.js`/`manifest.json`/
   /// `styles.css`) is intentionally NOT a sync category at all: those files are

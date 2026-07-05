@@ -1,6 +1,6 @@
 name: rhyolite_client_obsidian
 description: Obsidian plugin implementation for rhyolite_sync.
-version: 3.0.0
+version: 3.0.1
 publish_to: none
 
 resolution: workspace

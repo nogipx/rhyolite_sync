@@ -6,10 +6,10 @@ void main() {
   SettingsResourceClass? c(String p) => ObsidianSettingsRegistry.classify(p);
 
   group('denylist (always wins)', () {
-    test('rhyolite_sync own plugin dir is never synced', () {
-      expect(c('plugins/rhyolite_sync/data.json'), isNull);
-      expect(c('plugins/rhyolite_sync/main.js'), isNull);
-      expect(c('.obsidian/plugins/rhyolite_sync/data.json'), isNull);
+    test('rhyolite-sync own plugin dir is never synced', () {
+      expect(c('plugins/rhyolite-sync/data.json'), isNull);
+      expect(c('plugins/rhyolite-sync/main.js'), isNull);
+      expect(c('.obsidian/plugins/rhyolite-sync/data.json'), isNull);
     });
 
     test('workspace files are device-specific and excluded', () {
@@ -143,7 +143,7 @@ void main() {
       });
       expect(kindOf('appearance.json'), SettingsCrdtKind.fieldMap);
       expect(kindOf('hotkeys.json'), isNull); // category disabled
-      expect(kindOf('plugins/rhyolite_sync/data.json'), isNull); // denylisted
+      expect(kindOf('plugins/rhyolite-sync/data.json'), isNull); // denylisted
     });
   });
 }

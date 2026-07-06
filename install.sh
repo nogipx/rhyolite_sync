@@ -63,6 +63,7 @@ else
   } > .env
 fi
 
+mkdir -p data/postgres data/minio data/caddy/data data/caddy/config
 docker compose up -d
 
 TOKEN="$(grep '^RHYOLITE_SYNC_TOKEN=' .env | cut -d= -f2-)"
@@ -75,5 +76,6 @@ say "  url:    wss://$DOMAIN"
 say "  token:  $TOKEN"
 say ""
 say "Point your client at the url above with the token as its bearer secret."
-say "Stop:   (cd $DIR && docker compose down)"
+say "Stop:   (cd $DIR && docker compose down)     # data in ./data survives this"
+say "Backup: (cd $DIR && tar czf backup.tgz data)"
 say "Logs:   (cd $DIR && docker compose logs -f sync)"

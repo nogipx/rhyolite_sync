@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:uuid/uuid.dart';
 
+import 'path_normalize.dart';
+
 /// Per-file version viewer. Lists every historical write for one file,
 /// fetches and decrypts the bytes of any past version, and can restore
 /// a chosen version to disk.
@@ -30,7 +32,8 @@ class FileVersionViewer {
   final String vaultPath;
   final String vaultId;
 
-  String _fileIdFor(String relPath) => const Uuid().v5(vaultId, relPath);
+  String _fileIdFor(String relPath) =>
+      const Uuid().v5(vaultId, normalizeVaultPath(relPath));
 
   /// All recorded versions for the file at [relPath], newest first.
   Future<List<HistoryEntry>> versionsOf(String relPath) =>

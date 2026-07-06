@@ -3,6 +3,8 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:uuid/uuid.dart';
 
+import 'path_normalize.dart';
+
 class StateStartupDiffResult {
   final int newFiles;
   final int modifiedFiles;
@@ -148,7 +150,7 @@ class StateStartupDiff {
         await Future<void>.delayed(Duration.zero);
       }
 
-      final relPath = absPath.substring(vaultPath.length + 1);
+      final relPath = normalizeVaultPath(absPath.substring(vaultPath.length + 1));
       if (_isHidden(relPath)) continue;
       diskRelPaths.add(relPath);
 
@@ -459,7 +461,7 @@ class StateStartupDiff {
   }
 
   String _deterministicFileId(String relativePath) =>
-      const Uuid().v5(vaultId, relativePath);
+      const Uuid().v5(vaultId, normalizeVaultPath(relativePath));
 
   static bool _isHidden(String relPath) =>
       relPath.split('/').any((s) => s.startsWith('.'));

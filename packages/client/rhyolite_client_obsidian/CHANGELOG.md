@@ -1,3 +1,10 @@
+## [3.0.2] - 2026-07-06
+
+### Fixed
+
+- Filenames whose characters have more than one Unicode form — accented Latin or Cyrillic letters like «й»/«ё» — no longer sync as phantom duplicates between macOS/iOS and other platforms. Paths are normalized (NFC) so the same file keeps a single identity across devices instead of churning forever (core).
+
+
 ## [3.0.1] - 2026-07-06
 
 ### Changed

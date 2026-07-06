@@ -12,6 +12,7 @@ import 'disk_reconciler.dart';
 import 'remote_applier.dart';
 import 'state_puller.dart';
 import 'state_pusher.dart';
+import 'path_normalize.dart';
 import 'state_record_codec.dart';
 import 'text_debounce_coordinator.dart';
 
@@ -753,19 +754,23 @@ class StateSyncEngine implements ISyncEngine {
         switch (event) {
           case FileCreatedEvent(:final relativePath):
           case FileModifiedEvent(:final relativePath):
-            _textDebounce.forget(relativePath);
-            await _onFileChanged(relativePath);
+            final rel = normalizeVaultPath(relativePath);
+            _textDebounce.forget(rel);
+            await _onFileChanged(rel);
           case FileDeletedEvent(:final relativePath):
-            _textDebounce.forget(relativePath);
-            _reconciler?.forgetStat(relativePath);
-            await _onFileDeleted(relativePath);
+            final rel = normalizeVaultPath(relativePath);
+            _textDebounce.forget(rel);
+            _reconciler?.forgetStat(rel);
+            await _onFileDeleted(rel);
           case FileMovedEvent(:final fromPath, :final toPath):
-            _textDebounce.forget(fromPath);
-            _textDebounce.forget(toPath);
-            _reconciler?.forgetStat(fromPath);
-            _reconciler?.forgetStat(toPath);
-            await _onFileDeleted(fromPath);
-            await _onFileChanged(toPath);
+            final from = normalizeVaultPath(fromPath);
+            final to = normalizeVaultPath(toPath);
+            _textDebounce.forget(from);
+            _textDebounce.forget(to);
+            _reconciler?.forgetStat(from);
+            _reconciler?.forgetStat(to);
+            await _onFileDeleted(from);
+            await _onFileChanged(to);
         }
       } catch (e) {
         _log.warning('Startup drain failed for $event: $e');
@@ -790,23 +795,27 @@ class StateSyncEngine implements ISyncEngine {
         // Text rides the debounce front-coalescer (Obsidian autosaves per
         // keystroke); it hands ONE settled edit to the scheduler. Amber shows
         // immediately; the reconcile clears it if the edit was a no-op.
-        if (const FileTypeDetector().isText(relativePath)) {
-          _markPending(_deterministicFileId(relativePath));
-          _textDebounce.onDiskEvent(relativePath);
+        final rel = normalizeVaultPath(relativePath);
+        if (const FileTypeDetector().isText(rel)) {
+          _markPending(_deterministicFileId(rel));
+          _textDebounce.onDiskEvent(rel);
           return;
         }
-        _scheduleReconcile(relativePath);
+        _scheduleReconcile(rel);
       case FileDeletedEvent(:final relativePath):
-        _textDebounce.forget(relativePath);
-        _reconciler?.forgetStat(relativePath);
-        _scheduleReconcile(relativePath);
+        final rel = normalizeVaultPath(relativePath);
+        _textDebounce.forget(rel);
+        _reconciler?.forgetStat(rel);
+        _scheduleReconcile(rel);
       case FileMovedEvent(:final fromPath, :final toPath):
-        _textDebounce.forget(fromPath);
-        _textDebounce.forget(toPath);
-        _reconciler?.forgetStat(fromPath);
-        _reconciler?.forgetStat(toPath);
-        _scheduleReconcile(fromPath);
-        _scheduleReconcile(toPath);
+        final from = normalizeVaultPath(fromPath);
+        final to = normalizeVaultPath(toPath);
+        _textDebounce.forget(from);
+        _textDebounce.forget(to);
+        _reconciler?.forgetStat(from);
+        _reconciler?.forgetStat(to);
+        _scheduleReconcile(from);
+        _scheduleReconcile(to);
     }
   }
 
@@ -1321,7 +1330,7 @@ class StateSyncEngine implements ISyncEngine {
   );
 
   String _deterministicFileId(String relPath) =>
-      const Uuid().v5(config.vaultId, relPath);
+      const Uuid().v5(config.vaultId, normalizeVaultPath(relPath));
 
   void _emit(SyncEngineEvent event) {
     if (!_eventsController.isClosed) _eventsController.add(event);

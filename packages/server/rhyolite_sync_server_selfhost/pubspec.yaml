@@ -1,6 +1,6 @@
 name: rhyolite_sync_server_selfhost
 description: Self-host edition of the Rhyolite sync server — single-tenant, shared-secret auth, no billing/account service.
-version: 1.2.0
+version: 1.2.1
 publish_to: none
 
 resolution: workspace

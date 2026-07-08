@@ -1,3 +1,10 @@
+## [3.1.1] - 2026-07-08
+
+### Changed
+
+- Updated the conflict-free text-sync engine with correctness fixes to the Fugue merge algorithm (convergent 0.6.0) (core).
+
+
 ## [3.1.0] - 2026-07-08
 
 ### Conflict-free text sync

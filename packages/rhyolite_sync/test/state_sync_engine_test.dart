@@ -52,6 +52,133 @@ void main() {
       );
     });
 
+    test('a failed startup tears the engine down, not a zombie reporting '
+        'healthy (L1-6)', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+
+      // The connection succeeds, then the initial startup pull throws a
+      // generic (non-auth) error. Only the first getStates fails, so
+      // healthCheck's own getStates would succeed — exposing a zombie.
+      h.state.failFirstGetStatesWith = StateError('transient startup pull');
+
+      await h.engine.start();
+
+      final healthy = await h.engine.healthCheck();
+      expect(
+        healthy,
+        isFalse,
+        reason: 'a startup that failed after connecting must leave the engine '
+            'idle (torn down), not a half-wired zombie (no notify / typing / '
+            'reconnect-watch) whose healthCheck reports healthy and blocks the '
+            "host's health-gated restart",
+      );
+      expect(
+        h.events.whereType<SyncError>(),
+        isNotEmpty,
+        reason: 'the failure is still surfaced',
+      );
+    });
+
+    test('changing the cipher across a restart re-derives the blob-id key '
+        '(L1-7)', () async {
+      final cipherA = VaultCipher.fromRawKey(
+          Uint8List.fromList(List.filled(32, 1)));
+      final cipherB = VaultCipher.fromRawKey(
+          Uint8List.fromList(List.filled(32, 2)));
+      final h = await _Harness.create(cipher: cipherA);
+      addTearDown(h.dispose);
+      final content = Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+      // Session A: push a binary file; its blobRef (manifest hash) is keyed
+      // by cipherA's derived blob-id key.
+      await h.engine.start();
+      final pushedA = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/a.bin'] = content;
+      h.changes.emit(const FileCreatedEvent(relativePath: 'a.bin'));
+      await pushedA;
+      final refA = h.state.puts.last.items.first.blobRef;
+
+      // Restart with a DIFFERENT cipher.
+      await h.engine.stop();
+      h.engine.cipher = cipherB;
+      await h.engine.start();
+
+      // Session B: push the SAME content under a different path. With the new
+      // cipher the blob-id key differs, so the manifest hash must differ.
+      final pushedB = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/b.bin'] = content;
+      h.changes.emit(const FileCreatedEvent(relativePath: 'b.bin'));
+      await pushedB;
+      // In session B the a.bin re-upload (under the new key) may coalesce
+      // with b.bin's push; both carry the same content so share one blobRef.
+      final refB = h.state.puts.last.items.first.blobRef;
+
+      expect(
+        refB,
+        isNot(refA),
+        reason: 'same content under a different cipher must hash to a '
+            "different blob id; a stale memoized key reuses the old vault's id",
+      );
+    });
+
+    test('restore surfaces a local delete failure instead of silently leaving '
+        'a stale file (L1-10a)', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      // A local file restore will try to delete, but the filesystem refuses.
+      // Swallowing this would leave the file shadowing the server copy the
+      // user clicked Restore to recover.
+      h.io.files['$_vaultPath/stuck.md'] = Uint8List.fromList([1, 2, 3]);
+      h.io.failDeletePaths.add('$_vaultPath/stuck.md');
+      h.events.clear();
+
+      await h.engine.triggerRestoreFromServer();
+
+      expect(
+        h.events.whereType<SyncError>(),
+        isNotEmpty,
+        reason: 'a delete that failed during restore must be surfaced, not '
+            'swallowed',
+      );
+    });
+
+    test('a failed epoch-triggered restore is observed, not an unobserved '
+        'async error (L1-10b)', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start(); // adopts the fake's epoch (1)
+
+      // Server jumps to a higher epoch → the next pull triggers an automatic
+      // restore. Make that restore fail (listFiles throws) and confirm the
+      // failure is surfaced rather than lost in the detached microtask.
+      h.state.epoch = 2;
+      h.io.failListFiles = true;
+      h.events.clear();
+
+      await h.engine.triggerPull();
+      // The restore runs in a detached microtask; let it settle.
+      await pumpEventQueue();
+
+      expect(
+        h.events.whereType<SyncVaultReset>(),
+        isNotEmpty,
+        reason: 'the epoch mismatch still signals a reset is under way',
+      );
+      expect(
+        h.events.whereType<SyncError>(),
+        isNotEmpty,
+        reason: 'the failed restore must be observed and surfaced, correcting '
+            'the optimistic SyncVaultReset',
+      );
+    });
+
     test(
       'push does NOT advance the pull cursor (documented invariant)',
       () async {
@@ -458,6 +585,7 @@ class _Harness {
   static Future<_Harness> create({
     _MemRemote? sharedRemote,
     PriorityTaskScheduler? scheduler,
+    IVaultCipher? cipher,
   }) async {
     final env = await DataServiceFactory.inMemory();
     final state = _FakeStateContract();
@@ -476,7 +604,7 @@ class _Harness {
       vaultPath: _vaultPath,
       serverUrl: 'ws://unused',
       config: const VaultConfig(vaultId: _vaultId, vaultName: 'test'),
-      cipher: _IdentityCipher(),
+      cipher: cipher ?? _IdentityCipher(),
       dataClient: env.client,
       blobStore: LocalBlobStore(InMemoryBlobRepository()),
       io: io,
@@ -543,12 +671,22 @@ class _FakeStateContract implements IStateSyncContract {
   Completer<void>? putStatesGate;
   bool _putGateUsed = false;
 
+  /// When set, getStates throws this on its FIRST call only — models a
+  /// transient startup-pull failure. Later calls (e.g. healthCheck) behave
+  /// normally, so a test can observe whether the engine was left a zombie.
+  Object? failFirstGetStatesWith;
+  bool _firstGetStatesFailed = false;
+
   @override
   Future<StateGetResponse> getStates(
     StateGetRequest request, {
     RpcContext? context,
   }) async {
     getSince.add(request.sinceCursor);
+    if (failFirstGetStatesWith != null && !_firstGetStatesFailed) {
+      _firstGetStatesFailed = true;
+      throw failFirstGetStatesWith!;
+    }
     return StateGetResponse(
       records: recordsFor?.call(request.sinceCursor) ?? const [],
       cursor: getCursor,
@@ -601,6 +739,12 @@ class _FakeHistoryContract implements IHistoryContract {
     GetHistoryHeadsRequest request, {
     RpcContext? context,
   }) async => GetHistoryHeadsResponse(heads: const []);
+
+  @override
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest request, {
+    RpcContext? context,
+  }) async => const ForgetDeviceResponse(removed: false);
 }
 
 class _FakeConnection implements SyncConnection {
@@ -684,6 +828,13 @@ class _MemRemote implements IBlobStorage {
 class _InMemoryIO implements IPlatformIO {
   final Map<String, Uint8List> files = {};
 
+  /// Absolute paths whose deleteFile should throw — models a filesystem
+  /// that refuses to remove a file (permissions, lock, etc.).
+  final Set<String> failDeletePaths = {};
+
+  /// When true, listFiles throws — used to make a restore fail mid-way.
+  bool failListFiles = false;
+
   @override
   Future<Uint8List> readFile(String absolutePath) async {
     final b = files[absolutePath];
@@ -699,9 +850,12 @@ class _InMemoryIO implements IPlatformIO {
   Future<bool> dirExists(String absolutePath) async => true;
 
   @override
-  Future<List<String>> listFiles(String absoluteDirPath) async => files.keys
-      .where((p) => p.startsWith('$absoluteDirPath/'))
-      .toList(growable: false);
+  Future<List<String>> listFiles(String absoluteDirPath) async {
+    if (failListFiles) throw StateError('listFiles failed');
+    return files.keys
+        .where((p) => p.startsWith('$absoluteDirPath/'))
+        .toList(growable: false);
+  }
 
   @override
   Future<void> writeFile(String absolutePath, Uint8List bytes) async {
@@ -716,6 +870,9 @@ class _InMemoryIO implements IPlatformIO {
 
   @override
   Future<void> deleteFile(String absolutePath) async {
+    if (failDeletePaths.contains(absolutePath)) {
+      throw StateError('refusing to delete $absolutePath');
+    }
     files.remove(absolutePath);
   }
 

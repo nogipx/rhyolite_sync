@@ -41,10 +41,19 @@ class SyncServerModule extends RpcServerModule {
 
     final contracts = <RpcResponderContract>[
       RhyoliteBlobResponder(client: blobClient),
+      // Orphan-blob sweep: reads state + history to build the live set, lists
+      // the shared blob bucket, reclaims the difference (dry-run by default).
+      RhyoliteVaultMaintenanceResponder(
+        dataClient: dataClient,
+        blobClient: blobClient,
+      ),
       StateSyncResponder(
         client: dataClient,
         blobClient: blobClient,
         notifyRepository: notifyRepository,
+        // OOM guard: notes records are tiny manifests; the cap only bounds the
+        // opaque-ciphertext vector. Over-cap items are rejected per-item.
+        recordSizeLimit: 5 << 20,
       ),
       // Second keyspace for .obsidian settings sync. Same vaultId (so it
       // reuses vault ownership), but isolated collections (<vaultId>_config_*),
@@ -56,6 +65,9 @@ class SyncServerModule extends RpcServerModule {
         namespace: 'config',
         historyEnabled: false,
         serviceNameOverride: StateSyncContractNames.instance('config'),
+        // Settings records are KB-scale even with whole-file inlining; keep a
+        // tighter cap than notes.
+        recordSizeLimit: 3 << 20,
       ),
       HistoryResponder(client: dataClient),
       NotifySubscribeResponder(

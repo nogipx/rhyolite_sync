@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:convergent/convergent.dart';
+import 'package:convergent/convergent.dart' hide Dot;
+import 'package:convergent/fugue.dart' show Dot, LamportClock;
 import 'package:rpc_data/rpc_data.dart';
 import 'package:uuid/uuid.dart';
 
@@ -52,6 +53,23 @@ class FileStateStore {
   /// Not persisted: rebuilt on load from the max HLC across all registers
   /// with `nodeId == deviceId`.
   Hlc? _ownLatestHlc;
+
+  /// One global, persistent Lamport clock per device for **Fugue element
+  /// dots** (the text CRDT). Its [replica] is [deviceId], so every dot this
+  /// device mints — `(counter, deviceId)` — is globally attributable and the
+  /// GC frontier is a simple per-replica version vector.
+  ///
+  /// A logical counter (not an [Hlc]) is what lets a whole typed run share
+  /// consecutive counters and coalesce into one Fugue block. Built in [load]
+  /// once [deviceId] is known; null before then.
+  ///
+  /// The counter is persisted in meta ([fugueClockCounter]) best-effort, for
+  /// coalescing quality and the GC frontier. **Correctness does not depend on
+  /// it**: [observeDots] (called on the file's own dots before every edit
+  /// batch) guarantees each freshly-minted dot's counter strictly exceeds
+  /// every counter already in that file — so no dot is ever reused within a
+  /// Fugue tree even if the persisted counter lags behind.
+  LamportClock? _fugueClock;
 
   String get deviceId => _deviceId ?? (throw StateError(
         'FileStateStore.deviceId accessed before load()',
@@ -119,6 +137,53 @@ class FileStateStore {
     _ownLatestHlc = next;
     return next;
   }
+
+  /// Fold an OBSERVED hlc (authored by any device, possibly ahead of this
+  /// device's wall clock) into the local clock so the next [nextHlc]
+  /// strictly dominates it.
+  ///
+  /// Call this before authoring edits against content that was pulled from
+  /// peers: it guarantees freshly-minted edit dots causally dominate the
+  /// content they edit. That invariant matters for the Fugue position
+  /// tree — an insert stamped with a SMALLER hlc than an adjacent existing
+  /// character can be misordered across a tombstoned gap when a peer's
+  /// wall clock ran ahead of ours. Keeping our clock dominant makes every
+  /// edit sort after existing content, sidestepping that ordering.
+  ///
+  /// Clamped by [maxClockSkewMs] (same bound as [applyRemote], via
+  /// [Hlc.receive]) so a wildly-future observed hlc cannot poison the
+  /// local clock — a char authored beyond the skew window is distrusted
+  /// exactly as an out-of-window register write would be.
+  void witness(Hlc observed, {int? maxClockSkewMs = defaultMaxClockSkewMs}) {
+    final wall = DateTime.now().millisecondsSinceEpoch;
+    final base = _ownLatestHlc ?? Hlc(wall, 0, deviceId);
+    _ownLatestHlc = base.receive(observed, wall, maxSkewMs: maxClockSkewMs);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fugue clock (text CRDT dots)
+  // ---------------------------------------------------------------------------
+
+  LamportClock get _clock => _fugueClock ??= LamportClock(deviceId);
+
+  /// The device's Fugue [LamportClock]. Pass this to `Fugue.applyOps` so the
+  /// batch mints consecutive dots (one coalesced block per reconcile).
+  LamportClock get fugueClock => _clock;
+
+  /// Mint the next Fugue element [Dot] for a local edit.
+  Dot nextDot() => _clock.tick();
+
+  /// Fold every observed Fugue [Dot] into the clock so the next [nextDot]
+  /// strictly dominates them (Lamport receive rule). **Replaces [witness]**
+  /// on the text path: call `observeDots(oldFugue.dots)` before authoring an
+  /// edit batch. This is what keeps a fresh edit's dot above every counter
+  /// already in the file — the skew-safety property, now for free and
+  /// independent of the (possibly stale) persisted counter.
+  void observeDots(Iterable<Dot> dots) => _clock.observeAll(dots);
+
+  /// Current Fugue clock high-water mark (0 before any local dot). Reported
+  /// in the GC frontier as this device's `deviceId → counter` boundary.
+  int get fugueClockCounter => _fugueClock?.value ?? 0;
 
   // ---------------------------------------------------------------------------
   // Mutations
@@ -265,6 +330,11 @@ class FileStateStore {
       _deviceId = const Uuid().v4();
       await persistMeta();
     }
+    // Resume the Fugue Lamport clock from its persisted counter (best-effort:
+    // see [_fugueClock]). A missing/absent counter starts at 0 — safe, since
+    // [observeDots] lifts it above each file's own dots before every edit.
+    final fugueCounter = (meta?.payload['fugueCounter'] as int?) ?? 0;
+    _fugueClock = LamportClock(_deviceId!, fugueCounter);
     // Rebuild the device's own latest HLC by scanning surviving TaggedValues.
     for (final reg in _registers.values) {
       for (final tv in reg.values) {
@@ -325,6 +395,7 @@ class FileStateStore {
       if (_serverEpoch != null) 'epoch': _serverEpoch,
       if (_deviceId != null) 'deviceId': _deviceId,
       'ownContext': _ownContext.pack(),
+      'fugueCounter': _fugueClock?.value ?? 0,
       'lastSyncedBlobRef': _lastSyncedBlobRef,
     };
     await _writeWithRetry(

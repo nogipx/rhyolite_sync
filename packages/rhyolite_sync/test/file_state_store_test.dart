@@ -377,4 +377,60 @@ void main() {
           reason: 'with defence disabled, paper Fig.5 semantics apply');
     });
   });
+
+  group('FileStateStore — witness (edit clock dominance)', () {
+    test('witness lifts nextHlc above an observed peer-ahead hlc', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+
+      // Content pulled from a peer whose wall clock is 30s ahead (within
+      // skew) and already has a non-trivial counter.
+      final ahead = DateTime.now().millisecondsSinceEpoch + 30 * 1000;
+      final observed = Hlc(ahead, 5, 'peer');
+
+      store.witness(observed);
+      final next = store.nextHlc();
+
+      // The very next edit dot must causally dominate the witnessed dot,
+      // regardless of nodeId tie-break — this is the property that keeps
+      // Fugue inserts sorting after existing content under clock skew.
+      expect(next > observed, isTrue);
+    });
+
+    test('every dot minted after witness dominates the observed hlc',
+        () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+
+      final ahead = DateTime.now().millisecondsSinceEpoch + 60 * 1000;
+      final observed = Hlc(ahead, 9, 'peer');
+      store.witness(observed);
+
+      // A whole run of edits (as applyOps would mint) must each dominate.
+      for (var i = 0; i < 20; i++) {
+        expect(store.nextHlc() > observed, isTrue, reason: 'dot #$i');
+      }
+    });
+
+    test('witness clamps a far-future observed hlc (no clock poisoning)',
+        () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final farFuture = now + 100 * 365 * 86400 * 1000; // ~100 years
+      store.witness(Hlc(farFuture, 0, 'attacker'));
+      final next = store.nextHlc();
+
+      // The clock must stay near wall time, not adopt the 100-year jump.
+      expect(
+        next.millis < now + FileStateStore.defaultMaxClockSkewMs,
+        isTrue,
+        reason: 'far-future witness must be clamped, not adopted',
+      );
+    });
+  });
 }

@@ -29,13 +29,19 @@ class SyncStatusIndicator {
     required PluginHandle plugin,
     required ISyncEngine engine,
     LogScope? logger,
+    void Function()? onTap,
   }) : _plugin = plugin,
        _engine = engine,
-       _log = logger;
+       _log = logger,
+       _onTap = onTap;
 
   final PluginHandle _plugin;
   final ISyncEngine _engine;
   final LogScope? _log;
+
+  /// Click action. Defaults to opening settings; the plugin overrides it to
+  /// reveal the docked sync panel.
+  final void Function()? _onTap;
 
   static const _pluginId = 'rhyolite-sync';
   static const _revertDelay = Duration(seconds: 3);
@@ -165,7 +171,10 @@ class SyncStatusIndicator {
   }
 
   void _registerClick(JSObject el) {
-    final handler = jsu.allowInterop((JSAny? _) => _openSettings());
+    final onTap = _onTap;
+    final handler = jsu.allowInterop(
+      (JSAny? _) => onTap != null ? onTap() : _openSettings(),
+    );
     // Route the listener through Obsidian's plugin lifecycle so the
     // handler is auto-unregistered when the plugin unloads — required
     // by Obsidian's community plugin review (no leaked listeners on
@@ -195,7 +204,10 @@ class SyncStatusIndicator {
         _set(_State.idle);
       case SyncDisconnected():
         _cancelRevert();
-        _set(_State.off);
+        // Distinct from `off` (intentionally stopped): the engine was running
+        // and lost the backend. Orange so green never implies "ready" while
+        // we actually can't reach the server.
+        _set(_State.offline);
       case SyncPushing():
         _cancelRevert();
         _set(_State.pushing);
@@ -382,6 +394,8 @@ class SyncStatusIndicator {
     }
     return switch (state) {
       _State.off => 'Rhyolite Sync: stopped',
+      _State.offline =>
+        'Rhyolite Sync: offline — can’t reach server, retrying',
       _State.connecting => 'Rhyolite Sync: connecting…',
       _State.idle => 'Rhyolite Sync: connected',
       _State.pushing => 'Rhyolite Sync: uploading changes',
@@ -401,6 +415,7 @@ class SyncStatusIndicator {
   static String _colorFor(_State state, {required bool hasPending}) =>
       switch (state) {
         _State.off => 'rgb(128, 128, 128)',
+        _State.offline => 'rgb(230, 110, 50)',
         _State.connecting => 'rgb(180, 180, 180)',
         // Amber when idle-with-pending — local edits exist that the
         // engine hasn't pushed yet. Distinct from orange (auth/sub)
@@ -425,6 +440,7 @@ class SyncStatusIndicator {
       _State.downloading ||
       _State.repairing ||
       _State.connecting ||
+      _State.offline ||
       _State.error ||
       _State.authExpired ||
       _State.subExpired => true,
@@ -469,6 +485,7 @@ class SyncStatusIndicator {
 
 enum _State {
   off,
+  offline,
   connecting,
   idle,
   pushing,

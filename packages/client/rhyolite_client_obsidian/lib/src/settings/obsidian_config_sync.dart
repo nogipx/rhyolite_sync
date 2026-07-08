@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart'
@@ -197,8 +198,12 @@ class ObsidianConfigSync {
     _notify = NotifyCoordinator(
       endpoint: endpoint,
       topic: topic,
-      onNotify: () {
+      onNotify: (sourceClientId) {
         if (_disposed) return;
+        // The server echoes our own pushes back on this topic. Ignore them —
+        // otherwise every settings push (and every file of a re-upload)
+        // self-notifies and pulls its own change back.
+        if (sourceClientId != null && sourceClientId == _sync.clientId) return;
         _log?.call('config notify received — pulling');
         unawaited(pullRemote());
       },
@@ -252,12 +257,35 @@ class ObsidianConfigSync {
       final bytes = _sync.renderResource(resourceId);
       if (bytes == null) continue;
       final path = '$_configDir/$resourceId';
+
+      // If the file on disk is already this content in Obsidian's own format,
+      // don't overwrite it with our canonical (sorted/minified) render — that
+      // pointless reformat is what made every synced settings file churn
+      // (our write flips it to canonical, Obsidian flips it back, repeat).
+      // Still record the current signature so the next scan treats it as
+      // already synced rather than a fresh local change.
+      final existing = await _readBinaryOrNull(path);
+      if (existing != null && _sync.diskMatchesRendered(resourceId, existing)) {
+        final st = await _adapter.stat(path);
+        if (st != null) await _sync.recordSourceSig(resourceId, _sigOf(st));
+        continue;
+      }
+
       await _ensureParentDir(path);
       await _adapter.writeBinary(path, bytes);
       // Record the written file's signature so the next scan recognises it as
       // our own echo rather than a fresh local change to push back.
       final st = await _adapter.stat(path);
       if (st != null) await _sync.recordSourceSig(resourceId, _sigOf(st));
+    }
+  }
+
+  Future<Uint8List?> _readBinaryOrNull(String path) async {
+    if (await _adapter.stat(path) == null) return null;
+    try {
+      return await _adapter.readBinary(path);
+    } catch (_) {
+      return null;
     }
   }
 

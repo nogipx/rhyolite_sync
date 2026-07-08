@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:convergent/convergent.dart';
+import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
@@ -31,6 +31,10 @@ import 'package:rpc_dart/rpc_dart.dart';
 ///   * Connection / epoch / push pipeline.
 ///   * Pull pipeline as a whole — only its disk-write step.
 class DiskReconciler {
+  /// Only files at least this big emit [SyncBlobTransfer] events — small notes
+  /// would flash through the active-transfers monitor as noise.
+  static const int _transferMonitorMinBytes = 256 * 1024;
+
   DiskReconciler({
     required this.vaultPath,
     required this.vaultId,
@@ -43,12 +47,16 @@ class DiskReconciler {
     required Set<String> Function() knownChunks,
     required String Function(String relPath) fileIdFor,
     required void Function(SyncEngineEvent event) emit,
+    int? Function()? maxFileSizeBytes,
+    Set<String>? sizeBlocked,
     StatSigStore? sigStore,
     LogScope? logger,
   }) : _chunkedIOBuilder = chunkedIOBuilder,
        _knownChunks = knownChunks,
        _fileIdFor = fileIdFor,
        _emit = emit,
+       _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
+       _sizeBlocked = sizeBlocked ?? <String>{},
        _sigStore = sigStore,
        _log = logger ?? LogScope.noop;
 
@@ -63,6 +71,17 @@ class DiskReconciler {
   final Set<String> Function() _knownChunks;
   final String Function(String relPath) _fileIdFor;
   final void Function(SyncEngineEvent event) _emit;
+
+  /// Current per-file upload size limit in bytes (null = unlimited). A file
+  /// larger than this is never read/chunked/uploaded — surfaced via
+  /// [SyncFileSizeBlocked] and skipped. Callback so a tier upgrade is live.
+  final int? Function() _maxFileSizeBytes;
+
+  /// Paths currently over the size limit (shared with [StateStartupDiff] via the
+  /// engine). Used to emit [SyncFileSizeUnblocked] exactly once when a blocked
+  /// file later disappears or shrinks — without it the UI's "too large" list
+  /// would never clear.
+  final Set<String> _sizeBlocked;
 
   /// Persistent mirror of [_statCache] so the stat short-circuit survives a
   /// plugin restart. Null when unavailable (tests) → in-memory only.
@@ -113,16 +132,37 @@ class DiskReconciler {
     // overwrite-with-same-mtime+size, which doesn't happen with normal
     // editors.
     final absPath = '$vaultPath/$relPath';
-    // In-session cache first; fall back to the persisted signature so the
-    // short-circuit works on a cold plugin start too.
+    final stat = await io.statFile(absPath);
+
+    // Size admission: a file over the plan's per-file limit is never
+    // read/chunked/uploaded — that would freeze the UI on a huge file and the
+    // server would reject the blob anyway. Surface it and skip. O(1) (stat
+    // only), so re-checking every reconcile is cheap; a shrunk file syncs.
+    final limit = _maxFileSizeBytes();
+    if (stat != null && limit != null && limit > 0 && stat.sizeBytes > limit) {
+      _sizeBlocked.add(relPath);
+      _emit(SyncFileSizeBlocked(
+        path: relPath,
+        sizeBytes: stat.sizeBytes,
+        limitBytes: limit,
+      ));
+      return false;
+    }
+    // Not over the limit (deleted, shrank, or the tier limit rose): if this
+    // path was blocked, announce it's clear so UI drops it from the list.
+    if (_sizeBlocked.remove(relPath)) {
+      _emit(SyncFileSizeUnblocked(path: relPath));
+    }
+
+    // Stat short-circuit: if neither mtime nor size moved since we last ran
+    // reconcile for this path, disk is still in sync with the store. Fall back
+    // to the persisted signature so the short-circuit works on a cold start too.
     final cached = _statCache[relPath] ?? _sigStore?.get(_fileIdFor(relPath));
-    if (cached != null) {
-      final stat = await io.statFile(absPath);
-      if (stat != null &&
-          stat.mtimeMs == cached.mtimeMs &&
-          stat.sizeBytes == cached.sizeBytes) {
-        return false;
-      }
+    if (cached != null &&
+        stat != null &&
+        stat.mtimeMs == cached.mtimeMs &&
+        stat.sizeBytes == cached.sizeBytes) {
+      return false;
     }
 
     final changed = await (const FileTypeDetector().isText(relPath)
@@ -150,7 +190,15 @@ class DiskReconciler {
   ///   1. Same blobRef as `lastSyncedBlobRefFor` — already on disk.
   ///   2. File on disk is byte-identical to what we'd write.
   ///   3. Blob is a Fugue Sequence — we project to text after caching.
-  Future<void> writeFileToDisk(
+  ///
+  /// Returns true when the on-disk content is now known to match
+  /// [state].blobRef (written just now, already identical, or already
+  /// synced by this device) — i.e. it is safe for the caller to record
+  /// this blobRef as the synced LCA. Returns false when nothing landed
+  /// (blob unavailable): the caller MUST NOT advance the LCA, otherwise
+  /// the already-synced short-circuit (1) permanently skips the file and
+  /// it stays missing on disk.
+  Future<bool> writeFileToDisk(
     FileState state, {
     RpcContext? context,
   }) async {
@@ -162,19 +210,42 @@ class DiskReconciler {
         'download=0ms compare=0ms write=0ms total=0ms '
         'result=skipped-already-synced',
       );
-      return;
+      return true;
     }
 
     final swWriteTotal = Stopwatch()..start();
     Uint8List? bytes;
     final chunkedIO = _chunkedIOBuilder();
     final swDownload = Stopwatch();
+    final monitor = state.sizeBytes >= _transferMonitorMinBytes;
     if (chunkedIO != null) {
       swDownload.start();
       try {
-        bytes = await chunkedIO.download(state.blobRef, context: context);
+        bytes = await chunkedIO.download(
+          state.blobRef,
+          context: context,
+          onProgress: monitor
+              ? (sent, total) => _emit(SyncBlobTransfer(
+                    path: state.path,
+                    upload: false,
+                    sentBytes: sent,
+                    totalBytes: total,
+                    done: false,
+                  ))
+              : null,
+        );
       } catch (e) {
         _log.warning('Chunked download failed for ${state.path}: $e');
+      } finally {
+        if (monitor) {
+          _emit(SyncBlobTransfer(
+            path: state.path,
+            upload: false,
+            sentBytes: state.sizeBytes,
+            totalBytes: state.sizeBytes,
+            done: true,
+          ));
+        }
       }
       swDownload.stop();
     }
@@ -183,12 +254,12 @@ class DiskReconciler {
           ? state.blobRef
           : state.blobRef.substring(0, 8);
       _log.warning('Blob not available: $tag for ${state.path}');
-      return;
+      return false;
     }
 
-    // (3) Fugue projection — cache the Sequence and write the projected
-    // text. Pre-Fugue plain-text blobs fall through and are written
-    // as-is; the next local edit upgrades them via [loadOrSeedSequence].
+    // (3) Fugue projection — cache the tree and write the projected text.
+    // Pre-Fugue plain-text blobs fall through and are written as-is; the
+    // next local edit upgrades them via [loadOrSeedSequence].
     if (const FileTypeDetector().isText(state.path)) {
       final swDecode = Stopwatch()..start();
       final fugue = _tryDecodeFugueBlob(bytes);
@@ -197,20 +268,30 @@ class DiskReconciler {
         fugueStore.set(state.fileId, fugue);
         await fugueStore.persistOne(state.fileId);
         // Yield to the host event loop before the projection — for big
-        // Sequences `_visible()` + `.join()` runs hundreds of ms on the
-        // main JS thread, freezing Obsidian when chaining files.
+        // trees `.values.join()` runs hundreds of ms on the main JS
+        // thread, freezing Obsidian when chaining files.
         await Future<void>.delayed(Duration.zero);
         final swProject = Stopwatch()..start();
         bytes = Uint8List.fromList(utf8.encode(fugue.values.join()));
         swProject.stop();
         _log.info(
           'fugue materialise path=${state.path} '
-          'entries=${fugue.entries.length} '
+          'elements=${fugue.elementCount} '
           'decode=${swDecode.elapsedMilliseconds}ms '
           'project=${swProject.elapsedMilliseconds}ms '
           'projected=${bytes.length}B',
         );
+      } else if (FugueStore.isLegacySequenceBlob(bytes)) {
+        // A pre-Fugue Sequence blob from a not-yet-upgraded peer. Its bytes
+        // are NOT document text — writing them would corrupt the note. Skip
+        // without advancing the LCA so a reseed (from this device's own
+        // reconcile-from-disk, or an upgraded peer) replaces it.
+        _log.warning(
+          'Skipping legacy Sequence blob for ${state.path} — awaiting reseed',
+        );
+        return false;
       }
+      // Otherwise: a genuine pre-Fugue plain-text blob — write as-is.
     }
 
     final fullPath = '$vaultPath/${state.path}';
@@ -236,7 +317,7 @@ class DiskReconciler {
             'total=${swWriteTotal.elapsedMilliseconds}ms '
             'result=skipped-identical',
           );
-          return;
+          return true;
         }
       } catch (_) {
         swCompare.stop();
@@ -263,13 +344,15 @@ class DiskReconciler {
       'total=${swWriteTotal.elapsedMilliseconds}ms '
       'result=${skippedIdentical ? 'unreachable' : 'written'}',
     );
+    return true;
   }
 
-  /// Returns the locally-stored Fugue [Sequence] for [fileId], seeding
-  /// it from the current FileState's blob (legacy plain-text or Fugue)
-  /// when this is the first time we touch the file as text. Returns an
-  /// empty [Sequence] when no prior state exists.
-  Future<Sequence<String>> loadOrSeedSequence(
+  /// Returns the locally-stored [Fugue] tree for [fileId], seeding it from
+  /// the current FileState's blob (plain-text or Fugue) when this is the
+  /// first time we touch the file as text. Returns an empty [Fugue] when no
+  /// prior state exists — or when the blob is a pre-Fugue Sequence, so the
+  /// caller reseeds from the current DISK text instead of from stale bytes.
+  Future<Fugue<String>> loadOrSeedSequence(
     String fileId,
     String relPath, {
     RpcContext? context,
@@ -279,16 +362,16 @@ class DiskReconciler {
 
     final current = store.get(fileId);
     if (current == null || current.tombstone || current.blobRef.isEmpty) {
-      return Sequence<String>.empty();
+      return Fugue<String>();
     }
     final chunkedIO = _chunkedIOBuilder();
-    if (chunkedIO == null) return Sequence<String>.empty();
+    if (chunkedIO == null) return Fugue<String>();
 
     try {
       final swDl = Stopwatch()..start();
       final bytes = await chunkedIO.download(current.blobRef, context: context);
       swDl.stop();
-      if (bytes == null) return Sequence<String>.empty();
+      if (bytes == null) return Fugue<String>();
       final swDecode = Stopwatch()..start();
       final fugue = _tryDecodeFugueBlob(bytes);
       swDecode.stop();
@@ -298,12 +381,19 @@ class DiskReconciler {
             'seed $relPath: fugue blob bytes=${bytes.length} '
             'dl=${swDl.elapsedMilliseconds}ms '
             'decode=${swDecode.elapsedMilliseconds}ms '
-            'entries=${fugue.entries.length}',
+            'elements=${fugue.elementCount}',
           );
         }
         return fugue;
       }
-      // Plain-text blob — seed deterministically. Two devices
+      // A pre-Fugue Sequence blob (old format) is NOT document text — seeding
+      // from its raw bytes would produce garbage. Return empty so the caller
+      // reseeds from the current disk content instead.
+      if (FugueStore.isLegacySequenceBlob(bytes)) {
+        _log.info('seed path=$relPath legacy Sequence blob — reseed from disk');
+        return Fugue<String>();
+      }
+      // Genuine plain-text blob — seed deterministically. Two devices
       // independently seeding the same bytes converge by construction.
       final text = utf8.decode(bytes, allowMalformed: true);
       final swSeed = Stopwatch()..start();
@@ -316,8 +406,8 @@ class DiskReconciler {
       );
       return seeded;
     } catch (e) {
-      _log.warning('Sequence seed failed for $relPath: $e');
-      return Sequence<String>.empty();
+      _log.warning('Fugue seed failed for $relPath: $e');
+      return Fugue<String>();
     }
   }
 
@@ -394,11 +484,34 @@ class DiskReconciler {
     }
 
     final bytes = await io.readFile(absPath);
-    final result = await chunkedIO.upload(
-      bytes,
-      _knownChunks(),
-      context: context,
-    );
+    final monitor = bytes.length >= _transferMonitorMinBytes;
+    final ({String manifestHash, List<String> chunkHashes}) result;
+    try {
+      result = await chunkedIO.upload(
+        bytes,
+        _knownChunks(),
+        context: context,
+        onProgress: monitor
+            ? (sent, total) => _emit(SyncBlobTransfer(
+                  path: relPath,
+                  upload: true,
+                  sentBytes: sent,
+                  totalBytes: total,
+                  done: false,
+                ))
+            : null,
+      );
+    } finally {
+      if (monitor) {
+        _emit(SyncBlobTransfer(
+          path: relPath,
+          upload: true,
+          sentBytes: bytes.length,
+          totalBytes: bytes.length,
+          done: true,
+        ));
+      }
+    }
 
     if (current != null &&
         current.blobRef == result.manifestHash &&
@@ -461,20 +574,29 @@ class DiskReconciler {
     swSeed.stop();
     _log.info(
       'text reconcile seed-done path=$relPath '
-      'entries=${oldSequence.entries.length} '
+      'elements=${oldSequence.elementCount} '
       'seed=${swSeed.elapsedMilliseconds}ms',
     );
 
+    // Raise the local edit clock above every dot already in this file, so
+    // the chars we are about to author strictly dominate existing content
+    // even when a peer's clock ran ahead. Without this a fresh edit can be
+    // stamped with a smaller counter than an adjacent character and be
+    // misplaced by the position resolver across a tombstoned gap. This
+    // `observe` SUBSUMES the old FileStateStore.witness step on the text
+    // path, now over the Fugue Lamport clock.
+    store.observeDots(oldSequence.dots);
+
     final swDiff = Stopwatch()..start();
     final newSequence = await FugueTextSync.applyTextSnapshot(
-      oldSequence: oldSequence,
+      oldFugue: oldSequence,
       newText: newText,
-      nextHlc: store.nextHlc,
+      clock: store.fugueClock,
     );
     swDiff.stop();
     _log.info(
       'text reconcile diff-done path=$relPath '
-      'newEntries=${newSequence.entries.length} '
+      'newElements=${newSequence.elementCount} '
       'diff=${swDiff.elapsedMilliseconds}ms',
     );
     // Unchanged content is a no-op for any TRACKED file. `current` is null
@@ -503,7 +625,7 @@ class DiskReconciler {
     swTotal.stop();
     _log.info(
       'text reconcile path=$relPath chars=${newText.length} '
-      'entries=${newSequence.entries.length} '
+      'elements=${newSequence.elementCount} '
       'blob=${upload.blobSize}B '
       'seed=${swSeed.elapsedMilliseconds}ms '
       'diff=${swDiff.elapsedMilliseconds}ms '
@@ -516,8 +638,8 @@ class DiskReconciler {
     // diverges → next reconcile picks the file up.
     context?.cancellationToken?.throwIfCancelled();
 
-    // Same manifest hash as the current FileState — Sequence changed
-    // (new tombstones) but bytes didn't. Cache the Sequence, skip the
+    // Same manifest hash as the current FileState — the tree changed
+    // (new tombstones) but bytes didn't. Cache the tree, skip the
     // FileState bump.
     if (current != null &&
         current.blobRef == upload.manifestHash &&
@@ -552,7 +674,7 @@ class DiskReconciler {
   /// upload is used internally by [_reconcileText].
   Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
   uploadSequenceBlob(
-    Sequence<String> seq, {
+    Fugue<String> seq, {
     RpcContext? context,
   }) =>
       _uploadSequenceBlob(seq, context: context);
@@ -560,23 +682,24 @@ class DiskReconciler {
   /// Exposed for the conflict-resolution path in the engine — needs
   /// to probe arbitrary blob bytes when reconstructing a Fugue
   /// loser-state during 3-way merge.
-  Sequence<String>? tryDecodeFugueBlob(Uint8List bytes) =>
+  Fugue<String>? tryDecodeFugueBlob(Uint8List bytes) =>
       _tryDecodeFugueBlob(bytes);
 
   Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
   _uploadSequenceBlob(
-    Sequence<String> seq, {
+    Fugue<String> seq, {
     RpcContext? context,
   }) async {
     final chunkedIO = _chunkedIOBuilder();
     if (chunkedIO == null) return null;
     final swEncode = Stopwatch()..start();
-    final json = FugueStore.encodeForBlob(seq) as Map<String, Object?>;
-    final bytes = CborCodec.encode(json.cast<String, dynamic>());
+    // Magic-prefixed compact binary — self-identifying, ~2 B/char, so peers
+    // decode it back with FugueStore.tryDecodeBlob and old clients reject it.
+    final bytes = FugueStore.encodeBlob(seq);
     swEncode.stop();
     if (swEncode.elapsedMilliseconds > 50 || bytes.length > 256 * 1024) {
       _log.info(
-        'fugue encode: entries=${seq.entries.length} bytes=${bytes.length} '
+        'fugue encode: elements=${seq.elementCount} bytes=${bytes.length} '
         'encode=${swEncode.elapsedMilliseconds}ms',
       );
     }
@@ -592,33 +715,13 @@ class DiskReconciler {
     );
   }
 
-  /// Tries to interpret raw blob bytes as a serialised [Sequence].
-  /// Returns null when the bytes are neither a Fugue envelope nor a
-  /// recognised legacy form — typically because the blob belongs to a
-  /// pre-Fugue plain-text file or to a binary file misrouted here.
-  ///
-  /// Probing order:
-  /// 1. CBOR — the current default. Almost all Fugue blobs go here.
-  /// 2. JSON — accepts blobs persisted before the wire format switched
-  ///    to CBOR (Phase 7) and the v1 envelope (Phase 3.2).
-  Sequence<String>? _tryDecodeFugueBlob(Uint8List bytes) {
-    try {
-      final obj = CborCodec.decode(bytes);
-      return FugueStore.decodeFromBlob(obj);
-    } catch (_) {
-      // Not CBOR, or CBOR but not a Sequence envelope — fall through.
-    }
-    try {
-      final str = utf8.decode(bytes);
-      final obj = jsonDecode(str);
-      if (obj is! Map) return null;
-      if (obj['v'] is! int) return null;
-      if (obj['chars'] is! List && obj['c'] is! List) return null;
-      return FugueStore.decodeFromBlob(Map<String, Object?>.from(obj));
-    } catch (_) {
-      return null;
-    }
-  }
+  /// Tries to interpret raw blob bytes as a serialised [Fugue] tree.
+  /// Returns null when the bytes are not a magic-prefixed Fugue blob —
+  /// typically a pre-Fugue plain-text / legacy Sequence blob, or a binary
+  /// file misrouted here. Callers pair a null with
+  /// [FugueStore.isLegacySequenceBlob] to tell those apart.
+  Fugue<String>? _tryDecodeFugueBlob(Uint8List bytes) =>
+      FugueStore.tryDecodeBlob(bytes);
 
   static bool _bytesEqual(Uint8List a, Uint8List b) {
     if (a.length != b.length) return false;

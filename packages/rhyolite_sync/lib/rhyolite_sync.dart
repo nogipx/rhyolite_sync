@@ -18,6 +18,7 @@ library;
 // --- Wire protocol (contracts + DTOs) ----------------------------------
 export 'src/contract/blob_contract.dart';
 export 'src/contract/history_contract.dart';
+export 'src/contract/vault_maintenance_contract.dart';
 export 'src/contract/state_sync_contract.dart';
 export 'src/contract/vault_registry_contract.dart';
 
@@ -89,6 +90,8 @@ export 'src/settings_sync/settings_sync.dart';
 
 // --- Use cases (consumer-facing helpers) -------------------------------
 export 'src/use_cases/conflict_list_use_case.dart';
+export 'src/use_cases/device_registry_use_case.dart';
+export 'src/use_cases/diff_text_use_case.dart';
 export 'src/use_cases/export_vault_use_case.dart';
 export 'src/use_cases/repair_vault_use_case.dart';
 export 'src/use_cases/vault_stats_use_case.dart';

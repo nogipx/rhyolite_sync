@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:convergent/convergent.dart';
+import 'package:convergent/fugue.dart';
 import 'package:uuid/uuid.dart';
 
 import '../chunking/file_type_detector.dart';
@@ -74,7 +74,7 @@ class RepairVaultUseCase {
   /// stays free of those concerns. Returns null when no remote storage
   /// is configured (offline-only); the repair aborts in that case.
   final Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
-      Function(Sequence<String> seq) uploadSequenceBlob;
+      Function(Fugue<String> seq) uploadSequenceBlob;
 
   /// Caller-supplied event sink — emits the repair lifecycle events so
   /// the UI can show progress and a final summary.

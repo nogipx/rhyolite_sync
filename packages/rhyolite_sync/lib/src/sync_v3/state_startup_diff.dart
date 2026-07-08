@@ -13,10 +13,16 @@ class StateStartupDiffResult {
   /// treats these as candidate deletes (or simply missing).
   final List<String> missingFileIds;
 
+  /// Binaries skipped this scan because they exceed the per-file size limit.
+  /// The engine emits [SyncFileSizeBlocked] for each and seeds the shared
+  /// blocked-set so a later delete/shrink can emit [SyncFileSizeUnblocked].
+  final List<({String path, int sizeBytes, int limitBytes})> blocked;
+
   const StateStartupDiffResult({
     required this.newFiles,
     required this.modifiedFiles,
     required this.missingFileIds,
+    this.blocked = const [],
   });
 }
 
@@ -92,10 +98,17 @@ class StateStartupDiff {
     this.reconcileText,
     this.sigStore,
     Uint8List? blobIdKey,
+    int? Function()? maxFileSizeBytes,
     LogScope? logger,
   })  : _blobIdKey = blobIdKey,
         _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
+        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
         log = logger ?? LogScope.noop;
+
+  /// Current per-file upload size limit in bytes (null = unlimited). Over-limit
+  /// binaries are skipped (not read/chunked/uploaded) to avoid re-freezing on
+  /// every startup; the server would reject the blob anyway.
+  final int? Function() _maxFileSizeBytes;
 
   /// Persisted per-file disk signatures. When present, an unchanged text file
   /// (same mtime+size as last sync, with a live state) is skipped before the
@@ -128,6 +141,7 @@ class StateStartupDiff {
     var pendingTombstoneRevive = 0;
     var pendingMissingChunks = 0;
     final typeDetector = const FileTypeDetector();
+    final blocked = <({String path, int sizeBytes, int limitBytes})>[];
 
     // First pass: scan disk, collect which files need upload and read
     // their bytes. We don't upload yet so we know how many to push and
@@ -195,6 +209,24 @@ class StateStartupDiff {
         continue;
       }
 
+      // Size admission: skip binaries over the plan's per-file limit — don't
+      // read or chunk them (that re-freezes the UI every startup) and the
+      // server would reject the blob anyway.
+      final limit = _maxFileSizeBytes();
+      if (limit != null && limit > 0) {
+        final stat = await io.statFile(absPath);
+        if (stat != null && stat.sizeBytes > limit) {
+          log.info('StartupDiff: skip oversize $relPath '
+              'size=${stat.sizeBytes} limit=$limit');
+          blocked.add((
+            path: relPath,
+            sizeBytes: stat.sizeBytes,
+            limitBytes: limit,
+          ));
+          continue;
+        }
+      }
+
       final fileId = _deterministicFileId(relPath);
       final current = store.get(fileId);
 
@@ -240,7 +272,7 @@ class StateStartupDiff {
 
         // (c) Multi-chunk: re-chunk if size matches.
         if (current.chunks.length > 1 && current.sizeBytes == bytes.length) {
-          final result = ContentDefinedChunker(blobIdHasher: _hasher)(bytes);
+          final result = await ContentDefinedChunker(blobIdHasher: _hasher)(bytes);
           final freshHashes = result.manifest.chunks
               .map((c) => c.hash)
               .toList(growable: false);
@@ -457,6 +489,7 @@ class StateStartupDiff {
       newFiles: newFiles,
       modifiedFiles: modifiedFiles,
       missingFileIds: missingFileIds,
+      blocked: blocked,
     );
   }
 

@@ -34,6 +34,7 @@ class StatePuller {
     required void Function(SyncEngineEvent event) emit,
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
+    String Function()? clientName,
   })  : _rpcTimeout = rpcTimeout,
         _getRemoteBlobStorage = getRemoteBlobStorage,
         _newResolver = newResolver,
@@ -41,7 +42,8 @@ class StatePuller {
         _handleEpochMismatch = handleEpochMismatch,
         _emit = emit,
         _isFatalRejection = isFatalRejection,
-        _log = log;
+        _log = log,
+        _clientName = clientName ?? (() => '');
 
   final IStateSyncContract stateCaller;
   final IHistoryContract historyCaller;
@@ -60,6 +62,23 @@ class StatePuller {
   final void Function(SyncEngineEvent event) _emit;
   final bool Function(Object error) _isFatalRejection;
   final LogScope _log;
+
+  /// Human-readable device label reported with the head so the
+  /// device-management UI can name this device.
+  final String Function() _clientName;
+
+  /// In-memory per-file consecutive apply-failure counter, scoped to this
+  /// session's puller. A file that throws during apply holds the cursor
+  /// (so the next pull re-fetches and retries it) until it either succeeds
+  /// (counter cleared) or reaches [_maxApplyAttempts] — at which point we
+  /// advance past it and surface a durable [SyncRecordSkipped], so a
+  /// genuinely-corrupt record can't stall every later record forever.
+  /// Intentionally not persisted: a restart is a fine point to re-attempt.
+  final Map<String, int> _applyAttempts = {};
+
+  /// Consecutive failed apply attempts after which a file is skipped past
+  /// (with a surfaced event) rather than blocking the cursor further.
+  static const int _maxApplyAttempts = 5;
 
   Future<void> pull() async {
     final caller = stateCaller;
@@ -95,8 +114,16 @@ class StatePuller {
     }
 
     if (response.records.isEmpty) {
+      final prevCursor = store.serverCursor;
+      final prevEpoch = store.serverEpoch;
       store.setServerCursor(response.cursor);
       _adoptEpoch(response.epoch);
+      // Persist the advanced cursor/epoch even on an empty pull so it
+      // survives a crash (otherwise a no-op pull re-fetches from the old
+      // cursor next time). Skip the write when nothing actually moved.
+      if (store.serverCursor != prevCursor || store.serverEpoch != prevEpoch) {
+        await store.persistMeta();
+      }
       // Pull was a no-op — don't flash the indicator; SyncPulling was
       // never emitted in this path.
       return;
@@ -136,6 +163,7 @@ class StatePuller {
     var maxFileMs = 0;
     String? maxFilePath;
     var fileIdx = 0;
+    final failedFileIds = <String>{};
 
     // Interleaved pipeline: for each batch of fileIds, prefetch only that
     // batch's blobs, then apply the batch, then move on. UI sees the first
@@ -178,6 +206,8 @@ class StatePuller {
         final swFile = Stopwatch()..start();
         try {
           await _applyFile(fileId, byFile[fileId]!, resolver);
+          // Success ends any prior failure streak for this file.
+          _applyAttempts.remove(fileId);
         } catch (e) {
           // A fatal policy/auth rejection means every subsequent record
           // will fail the same way. Bubble it out so the top-level start()
@@ -185,7 +215,10 @@ class StatePuller {
           // this we burn the host event loop on per-file no-op work for
           // every record in the batch.
           if (_isFatalRejection(e)) rethrow;
-          _log.warning('Skipping bad state records $fileId: $e');
+          // Transient/per-file failure: remember it so the cursor logic
+          // below can hold-and-retry instead of skipping it forever.
+          failedFileIds.add(fileId);
+          _log.warning('Deferring bad state records $fileId: $e');
         }
         swFile.stop();
         if (swFile.elapsedMilliseconds > maxFileMs) {
@@ -213,11 +246,92 @@ class StatePuller {
       );
     }
 
-    store.setServerCursor(response.cursor);
+    // In-pull retry: a per-file apply failure is often transient (a momentary
+    // IO error, or an apply that raced a just-finished blob write). Retry the
+    // failed files once more within THIS pull — after a yield so any pending
+    // microtask (e.g. an in-flight cache write) can settle — so the common
+    // case is corrected in the same sync cycle instead of waiting for the
+    // next pull. Only failures that survive fall through to the cross-pull
+    // hold-and-retry below.
+    if (failedFileIds.isNotEmpty) {
+      await Future<void>.delayed(Duration.zero);
+      final stillFailed = <String>{};
+      for (final fid in failedFileIds) {
+        try {
+          await _applyFile(fid, byFile[fid]!, resolver);
+          _applyAttempts.remove(fid);
+        } catch (e) {
+          if (_isFatalRejection(e)) rethrow;
+          stillFailed.add(fid);
+          _log.warning('In-pull retry still failing $fid: $e');
+        }
+      }
+      failedFileIds
+        ..clear()
+        ..addAll(stillFailed);
+    }
+
+    // A file that failed to apply must not be silently skipped by advancing
+    // the cursor past it (getStates(sinceCursor) never re-emits it). Hold
+    // the cursor just below the lowest failed record so the next pull
+    // re-fetches and retries it — bounded by [_maxApplyAttempts] so a
+    // genuinely-corrupt record can't stall every later record forever.
+    var effectiveCursor = response.cursor;
+    if (failedFileIds.isNotEmpty) {
+      final retrySeqs = <int>[];
+      for (final fid in failedFileIds) {
+        final attempts = (_applyAttempts[fid] ?? 0) + 1;
+        if (attempts >= _maxApplyAttempts) {
+          // Give up: advance past it, but surface the drop durably.
+          _applyAttempts.remove(fid);
+          for (final r in response.records) {
+            if (r.fileId != fid) continue;
+            _emit(
+              SyncRecordSkipped(
+                fileId: fid,
+                hlcPacked: r.hlcPacked,
+                reason: 'apply failed $_maxApplyAttempts times — '
+                    'skipped to unblock sync',
+              ),
+            );
+          }
+          _log.warning(
+            'Pull: giving up on $fid after $_maxApplyAttempts failed '
+            'attempts — advancing past it',
+          );
+        } else {
+          _applyAttempts[fid] = attempts;
+          for (final r in response.records) {
+            if (r.fileId == fid) retrySeqs.add(r.serverSeq);
+          }
+        }
+      }
+      if (retrySeqs.isNotEmpty) {
+        final minRetrySeq = retrySeqs.reduce((a, b) => a < b ? a : b);
+        final holdCursor = minRetrySeq - 1;
+        if (holdCursor < effectiveCursor) {
+          effectiveCursor = holdCursor;
+          _log.warning(
+            'Pull: holding cursor at $effectiveCursor (from '
+            '${response.cursor}) to retry ${retrySeqs.length} record(s) '
+            'from failed file(s)',
+          );
+        }
+      }
+    }
+
+    store.setServerCursor(effectiveCursor);
     _adoptEpoch(response.epoch);
+    // Persist cursor + ownContext + recorded LCAs now, at the pull's
+    // convergence point. Register rows are persisted per-file (persistOne),
+    // but the meta row used to be written only by a later push/housekeeping
+    // — a crash in that window left the persisted registers ahead of a
+    // stale meta (ownContext behind the register, cursor and the binary
+    // resolver base rolled back). See sync_v3_lca_semantics.
+    await store.persistMeta();
     _emit(
       SyncCursorAdvanced(
-        cursor: response.cursor,
+        cursor: effectiveCursor,
         recordCount: response.records.length,
       ),
     );
@@ -242,11 +356,13 @@ class StatePuller {
     // is a "pull complete" sentinel, not a per-file event.
     _emit(SyncFilePulled(fileId: '', nodeCount: response.records.length));
 
-    // Tell the server this device has now processed up to response.cursor.
+    // Tell the server this device has now processed up to effectiveCursor
+    // (which may be held below response.cursor while a failed file retries).
     // Best-effort — failure must not block sync. The server uses these
     // heads to keep history events safe from cleanup until every active
-    // device has caught up.
-    unawaited(_reportHistoryHead(response.cursor));
+    // device has caught up; reporting the held (lower) cursor is the
+    // conservative choice.
+    unawaited(_reportHistoryHead(effectiveCursor));
   }
 
   Future<void> _reportHistoryHead(int headSeq) async {
@@ -256,6 +372,7 @@ class StatePuller {
           vaultId: vaultId,
           deviceId: store.deviceId,
           headSeq: headSeq,
+          deviceName: _clientName(),
         ),
       );
     } catch (e) {

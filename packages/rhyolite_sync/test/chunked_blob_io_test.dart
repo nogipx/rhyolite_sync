@@ -173,4 +173,69 @@ void main() {
     final cached = await local.read(result.manifestHash, vaultId: _v);
     expect(cached, isNotNull);
   });
+
+  test('onProgress reports completion for upload and download', () async {
+    final original = Uint8List(1024);
+    for (var i = 0; i < original.length; i++) {
+      original[i] = (i * 17 + 11) & 0xff;
+    }
+
+    final up = <(int, int)>[];
+    final result =
+        await io.upload(original, {}, onProgress: (s, t) => up.add((s, t)));
+    expect(up, isNotEmpty);
+    // Total is always the content size; the final report is 100%.
+    expect(up.every((e) => e.$2 == original.length), isTrue);
+    expect(up.last, (original.length, original.length));
+
+    // Fresh cache → download must fetch from remote and end at full size.
+    final freshLocal = LocalBlobStore(InMemoryBlobRepository());
+    final io2 = ChunkedBlobIO(
+      blobStore: freshLocal,
+      remoteBlobStorage: remote,
+      vaultId: _v,
+    );
+    final down = <(int, int)>[];
+    final got = await io2.download(result.manifestHash,
+        onProgress: (s, t) => down.add((s, t)));
+    expect(got, isNotNull);
+    expect(down, isNotEmpty);
+    expect(down.last, (original.length, original.length));
+  });
+
+  test('onProgress advances across batches for a multi-MiB upload/download',
+      () async {
+    // Default ~1 MiB chunker + 5 MiB of varied data → several 2 MiB upload
+    // batches, so progress must report intermediate values (the bar moves).
+    final remote2 = _MemRemote();
+    final io2 = ChunkedBlobIO(
+      blobStore: LocalBlobStore(InMemoryBlobRepository()),
+      remoteBlobStorage: remote2,
+      vaultId: _v,
+    );
+    final big = Uint8List(5 * 1024 * 1024);
+    for (var i = 0; i < big.length; i++) {
+      big[i] = (i * 2654435761 >> 13) & 0xff; // pseudo-random, splits well
+    }
+
+    final up = <int>[];
+    final res = await io2.upload(big, {}, onProgress: (s, _) => up.add(s));
+    expect(up.where((s) => s > 0 && s < big.length), isNotEmpty,
+        reason: 'upload must report intermediate progress, not just 0 → done');
+    expect(up.last, big.length);
+
+    // Fresh cache download must also step through.
+    final io3 = ChunkedBlobIO(
+      blobStore: LocalBlobStore(InMemoryBlobRepository()),
+      remoteBlobStorage: remote2,
+      vaultId: _v,
+    );
+    final down = <int>[];
+    final got =
+        await io3.download(res.manifestHash, onProgress: (s, _) => down.add(s));
+    expect(got!.length, big.length);
+    expect(down.where((s) => s > 0 && s < big.length), isNotEmpty,
+        reason: 'download must report intermediate progress');
+    expect(down.last, big.length);
+  });
 }

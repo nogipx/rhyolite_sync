@@ -1,21 +1,24 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
-import 'package:convergent/convergent.dart';
+import 'package:convergent/fugue.dart';
+import 'package:rpc_dart/rpc_dart.dart' show CborCodec;
 import 'package:rpc_data/rpc_data.dart';
 
-/// Persistent + lazily-cached per-file Fugue [Sequence] states.
+/// Persistent + lazily-cached per-file [Fugue] text states.
 ///
 /// Storage layout: one row per fileId in `<vaultId>_fugue_store`,
-/// payload is the JSON-encoded [Sequence] via [SequenceCodec].
+/// payload is the JSON-encoded [Fugue] via [FugueCodec].
 ///
-/// Load policy: [load] learns the set of stored fileIds (no Sequence
+/// Load policy: [load] learns the set of stored fileIds (no Fugue
 /// decode — that's the expensive part), then individual [get] calls
 /// fetch + decode on demand. An LRU cache keeps the hottest [cacheMax]
-/// sequences in memory; cold files are evicted and re-read from sqlite
+/// trees in memory; cold files are evicted and re-read from sqlite
 /// the next time they're touched.
 ///
 /// Rationale: with a vault that's been edited for months, a single
-/// FugueStore may carry hundreds of thousands of CRDT entries spread
+/// FugueStore may carry hundreds of thousands of CRDT elements spread
 /// across hundreds of files. Decoding all of them at start costs
 /// seconds of pinned CPU on dart2js, plus tens of megabytes of
 /// long-lived Dart objects that put V8 GC under pressure. Lazy
@@ -42,12 +45,15 @@ class FugueStore {
 
   String get _storeCol => '${vaultId}_fugue_store';
 
-  /// Codec used for both wire (blob content) and local persistence.
-  /// Sharing the same format avoids a re-encode on push/pull paths.
-  static const _codec = SequenceCodec<String>(StringCodec());
+  /// JSON codec for LOCAL sqlite persistence (payload is a Map). The WIRE
+  /// blob uses the compact binary codec instead — see [encodeBlob].
+  static const _codec = FugueCodec<String>(StringCodec());
+
+  /// Compact binary codec for the WIRE blob content (`Uint8List`, ~2 B/char).
+  static const _binary = FugueTextBinaryCodec();
 
   /// Hot cache, LRU-evicted.
-  final Map<String, Sequence<String>> _cache = {};
+  final Map<String, Fugue<String>> _cache = {};
 
   /// LRU tracking — front is oldest, back is newest. Kept in sync with
   /// every cache mutation.
@@ -72,7 +78,7 @@ class FugueStore {
   /// and decode, then caches the result.
   ///
   /// Returns null when the fileId is not in the store.
-  Future<Sequence<String>?> get(String fileId) async {
+  Future<Fugue<String>?> get(String fileId) async {
     final cached = _cache[fileId];
     if (cached != null) {
       _touch(fileId);
@@ -88,7 +94,7 @@ class FugueStore {
       _knownFileIds.remove(fileId);
       return null;
     }
-    final Sequence<String> seq;
+    final Fugue<String> seq;
     try {
       seq = _codec.decode(record.payload);
     } catch (_) {
@@ -103,7 +109,7 @@ class FugueStore {
   /// Sync cache probe — returns the cached Sequence if present, null
   /// otherwise. Does NOT touch sqlite. Useful in hot paths where a
   /// miss is "no-op" rather than "go load it".
-  Sequence<String>? peek(String fileId) {
+  Fugue<String>? peek(String fileId) {
     final s = _cache[fileId];
     if (s != null) _touch(fileId);
     return s;
@@ -115,21 +121,20 @@ class FugueStore {
 
   /// Applies a new full state in memory. Schedule [persistOne] to
   /// flush to the backing store.
-  void set(String fileId, Sequence<String> state) {
+  void set(String fileId, Fugue<String> state) {
     _putInCache(fileId, state);
     _knownFileIds.add(fileId);
   }
 
   /// Removes the in-memory entry and queues a delete from persistence.
-  Future<void> remove(String fileId) =>
-      _serialise('store:$fileId', () async {
-        _cache.remove(fileId);
-        _accessOrder.remove(fileId);
-        _knownFileIds.remove(fileId);
-        try {
-          await _client.delete(collection: _storeCol, id: fileId);
-        } catch (_) {}
-      });
+  Future<void> remove(String fileId) => _serialise('store:$fileId', () async {
+    _cache.remove(fileId);
+    _accessOrder.remove(fileId);
+    _knownFileIds.remove(fileId);
+    try {
+      await _client.delete(collection: _storeCol, id: fileId);
+    } catch (_) {}
+  });
 
   // ---------------------------------------------------------------------------
   // LRU mechanics
@@ -140,7 +145,7 @@ class FugueStore {
     _accessOrder.add(fileId);
   }
 
-  void _putInCache(String fileId, Sequence<String> seq) {
+  void _putInCache(String fileId, Fugue<String> seq) {
     _cache[fileId] = seq;
     _touch(fileId);
     while (_cache.length > cacheMax) {
@@ -216,7 +221,7 @@ class FugueStore {
       _knownFileIds.remove(fileId);
       return;
     }
-    final payload = _codec.encode(state) as Map<String, Object?>;
+    final payload = _codec.encode(state)! as Map<String, Object?>;
     await _writeWithRetry(
       collection: _storeCol,
       id: fileId,
@@ -250,7 +255,8 @@ class FugueStore {
         return;
       } catch (e) {
         final msg = e.toString().toLowerCase();
-        final transient = msg.contains('not newer') ||
+        final transient =
+            msg.contains('not newer') ||
             msg.contains('conflict') ||
             msg.contains('expected version') ||
             msg.contains('already exists');
@@ -272,12 +278,76 @@ class FugueStore {
 
   // ---------------------------------------------------------------------------
   // Wire codec — exposed so callers (state engine, history viewer) can go
-  // straight from blob bytes to Sequence and back without depending on
-  // the convergent codec types directly.
+  // straight from blob bytes to Fugue and back without depending on the
+  // convergent codec types directly.
   // ---------------------------------------------------------------------------
 
-  static Sequence<String> decodeFromBlob(Object? json) => _codec.decode(json);
+  /// JSON (Map) round-trip helper — same format as local persistence. Kept
+  /// for tests and any caller that needs a JSON-compatible view of a tree.
+  static Fugue<String> decodeFromBlob(Object? json) => _codec.decode(json);
 
-  static Object encodeForBlob(Sequence<String> state) =>
-      _codec.encode(state) as Object;
+  /// JSON (Map) encode — inverse of [decodeFromBlob].
+  static Object encodeForBlob(Fugue<String> state) => _codec.encode(state)!;
+
+  /// Magic prefix that makes a new-format Fugue blob self-identifying. The
+  /// leading `0x00` guarantees the bytes are never mistaken for a UTF-8 text
+  /// blob (real notes never start with NUL), and the `fg1` tag distinguishes
+  /// it from the pre-Fugue Sequence blobs (CBOR/JSON maps) still on the
+  /// server during a rollout. See [tryDecodeBlob] / [isLegacySequenceBlob].
+  static const List<int> _magic = <int>[0x00, 0x66, 0x67, 0x31]; // \0fg1
+
+  /// Encode a tree for the WIRE blob: [_magic] + compact binary codec.
+  static Uint8List encodeBlob(Fugue<String> state) {
+    final body = _binary.encode(state);
+    final out = Uint8List(_magic.length + body.length);
+    out.setRange(0, _magic.length, _magic);
+    out.setRange(_magic.length, out.length, body);
+    return out;
+  }
+
+  /// Decode a WIRE blob back into a [Fugue], or null when [bytes] are NOT a
+  /// new-format (magic-prefixed) Fugue blob — a pre-Fugue plain-text blob, a
+  /// legacy Sequence blob, or a binary file. Callers pair a null with
+  /// [isLegacySequenceBlob] to decide between "genuine plain text" (write /
+  /// seed as-is) and "old-format, awaiting reseed" (skip). Pure — no store
+  /// side effects — so the history viewer can project a past version without
+  /// touching the live tree.
+  static Fugue<String>? tryDecodeBlob(Uint8List bytes) {
+    if (bytes.length < _magic.length) return null;
+    for (var i = 0; i < _magic.length; i++) {
+      if (bytes[i] != _magic[i]) return null;
+    }
+    try {
+      return _binary.decode(Uint8List.sublistView(bytes, _magic.length));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// True when [bytes] are a PRE-Fugue [Sequence] blob (the format shipped
+  /// before this migration: a CBOR or JSON map with `v` + `chars`/`c`).
+  ///
+  /// Such a blob is NOT valid document text — writing its raw bytes to disk,
+  /// or seeding a tree from them, would corrupt the note. Callers use this to
+  /// tell an old-format blob apart from a genuine plain-text blob so they can
+  /// skip it and let a reseed-from-disk (from this device or an upgraded
+  /// peer) replace it. Read-only; no `Sequence` decode is performed, so the
+  /// old CRDT type is not resurrected.
+  static bool isLegacySequenceBlob(Uint8List bytes) {
+    bool looksLikeSequence(Object? obj) =>
+        obj is Map &&
+        obj['v'] is int &&
+        (obj['chars'] is List || obj['c'] is List);
+    try {
+      if (looksLikeSequence(CborCodec.decode(bytes))) return true;
+    } catch (_) {
+      // Not CBOR — fall through to the JSON probe.
+    }
+    try {
+      if (looksLikeSequence(jsonDecode(utf8.decode(bytes)))) return true;
+    } catch (_) {
+      // Not JSON text either.
+    }
+    return false;
+  }
 }

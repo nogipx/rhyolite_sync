@@ -56,15 +56,24 @@ class ObsidianChangeProvider implements core.IChangeProvider {
   @override
   Stream<core.FileChangeEvent> get changes {
     _controller ??= StreamController<core.FileChangeEvent>.broadcast(
-      onListen: _start,
-      onCancel: _stop,
+      onListen: _startVaultEvents,
+      onCancel: _stopVaultEvents,
     );
     return _controller!.stream;
   }
 
   @override
   Stream<String> get typing {
-    _typingController ??= StreamController<String>.broadcast();
+    // Independent lifecycle from `changes`: editor-change attaches when
+    // `typing` is first listened and detaches when its last listener
+    // leaves. Previously editor-change was bound to the `changes` stream,
+    // so `typing` silently never emitted unless `changes` was also
+    // listened, and tearing down `changes` closed this controller out from
+    // under a live typing subscriber.
+    _typingController ??= StreamController<String>.broadcast(
+      onListen: _attachEditorChangeListener,
+      onCancel: _stopTyping,
+    );
     return _typingController!.stream;
   }
 
@@ -106,11 +115,10 @@ class ObsidianChangeProvider implements core.IChangeProvider {
     } catch (_) {}
   }
 
-  void _start() {
+  void _startVaultEvents() {
     _log?.info('ObsidianChangeProvider: attaching vault event listeners');
     final events = VaultEvents(_plugin)..attach();
     _vaultEvents = events;
-    _attachEditorChangeListener();
 
     events.created.listen((e) {
       final suppressed = _consumeSuppression(e.file.path);
@@ -167,18 +175,26 @@ class ObsidianChangeProvider implements core.IChangeProvider {
     });
   }
 
-  void _stop() {
+  void _stopVaultEvents() {
     _log?.info('ObsidianChangeProvider: detaching vault event listeners');
-    _detachEditorChangeListener();
     _vaultEvents?.dispose();
     _vaultEvents = null;
-    _typingController?.close();
-    _typingController = null;
     for (final timer in _suppressionTimers.values) {
       timer.cancel();
     }
     _suppressionTimers.clear();
     _suppressionCounts.clear();
+    // Close before nulling so the broadcast controller and its onListen/
+    // onCancel wiring are released, not leaked, each start/stop cycle.
+    final controller = _controller;
     _controller = null;
+    controller?.close();
+  }
+
+  void _stopTyping() {
+    _detachEditorChangeListener();
+    final controller = _typingController;
+    _typingController = null;
+    controller?.close();
   }
 }

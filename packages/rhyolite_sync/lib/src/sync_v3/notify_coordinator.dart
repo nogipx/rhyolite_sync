@@ -29,7 +29,11 @@ class NotifyCoordinator {
 
   final RpcCallerEndpoint endpoint;
   final String topic;
-  final void Function() onNotify;
+
+  /// Invoked on each delivered notification. Receives the publisher's
+  /// `sourceClientId` from the event payload (null when the publisher did not
+  /// set one) so a subscriber can ignore the echo of its own push.
+  final void Function(String? sourceClientId) onNotify;
   final void Function(String message)? _onWarning;
 
   static const Duration _minBackoff = Duration(seconds: 1);
@@ -61,9 +65,9 @@ class NotifyCoordinator {
     try {
       _subscriber = NotifySubscriber.endpoint(endpoint);
       _sub = _subscriber!.subscribe(topic).listen(
-            (_) {
+            (event) {
               _backoff = _minBackoff; // healthy delivery → reset backoff
-              onNotify();
+              onNotify(event.payload['sourceClientId'] as String?);
             },
             onError: (e) {
               _onWarning?.call('Notify stream error: $e — resubscribing');

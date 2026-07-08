@@ -1,3 +1,50 @@
+## [3.1.0] - 2026-07-08
+
+### Conflict-free text sync
+
+- Text notes now merge with a true conflict-free algorithm (Fugue CRDT). When the same note is edited on two devices at the same time, both sets of edits are combined into one file — no conflict copies, no lost keystrokes (core).
+- Large edits and full-file rewrites merge predictably: the diff is bounded by a deadline, so a big paste or bulk find-replace no longer stalls typing or drops characters (core).
+
+### Storage management
+
+- New storage overview shows how much space your synced vault and settings occupy, with a refresh control (obsidian).
+- "Reclaim orphaned blobs" removes server data no longer referenced by any file (obsidian, core).
+- Storage cleanup can now clear all synced history, not just history older than N days (obsidian, core).
+- Cleanup and blob-delete failures are surfaced instead of failing silently (obsidian, core).
+
+### Devices
+
+- New device management view: list the devices syncing this vault and forget ones you no longer use (obsidian, core).
+
+### File history
+
+- History browser now shows a git-style line diff between versions, with a scrollable version list and back navigation (obsidian, core).
+- Restoring an older version writes the real file content again (it could previously restore raw internal data) (core).
+
+### Sync panel & transfers
+
+- New docked sync side panel with a single unified pause/resume control (obsidian).
+- Live per-file transfer progress and an active-transfers monitor, so large uploads and downloads show real movement (obsidian, core).
+- Sync reconnects automatically when the network comes back (obsidian).
+
+### Large files
+
+- Files above your plan's per-file size limit are skipped cleanly before chunking instead of freezing the app, and are picked up automatically once they're within the limit (obsidian, core).
+- Chunking is cooperative, so importing or editing very large files no longer freezes the interface (core).
+
+### Reliability
+
+- Engine startup is atomic — a failed start no longer leaves a half-running sync behind (core).
+- A failed pull is retried instead of skipping that file forever, and sync no longer converges on data that isn't available yet (core).
+- Every version is preserved in a three-or-more-way conflict (core).
+- Settings sync no longer echoes its own writes, reformats unchanged files, or syncs device-specific workspace layout (obsidian).
+- Remembered vault keys are verified on boot, and external-storage config is encrypted per vault (obsidian).
+
+### Removed
+
+- The in-plugin log viewer was removed (obsidian).
+
+
 ## [3.0.2] - 2026-07-06
 
 ### Fixed

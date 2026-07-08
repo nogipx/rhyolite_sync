@@ -1,9 +1,25 @@
-import 'package:convergent/convergent.dart';
+import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import 'fugue_frontier.dart';
+
 /// Aggregates per-device causal frontiers from the server, computes the
-/// per-author causal-stability boundary, and prunes every Fugue
-/// [Sequence]'s tombstones that are dominated by that boundary.
+/// per-replica causal-stability boundary, and prunes every [Fugue] tree's
+/// fully-tombstoned blocks that are dominated by that boundary.
+///
+/// **Conservative by design.** The block model already makes tombstones
+/// cheap (a deleted paragraph is one block with a deleted range, not
+/// thousands of nodes), so GC is far less urgent than it was for the
+/// per-node Sequence. Under-pruning only costs a little memory;
+/// over-pruning breaks convergence. Every uncertain case therefore skips.
+///
+/// The frontier is a **version vector over Fugue dots** (`Map<replica,
+/// counter>`), not the old HLC [CausalContext]. A device reports the max
+/// counter it has observed per replica; an element `(counter, replica)` is
+/// stable once EVERY active device's report covers it. Boundaries are the
+/// per-replica min across the reporting devices — for replicas that appear
+/// in EVERY report. See [FugueFrontier] for the wire form and the
+/// fail-safe on an unrecognised (old-format) frontier.
 ///
 /// Owns three concerns the engine doesn't want to inline:
 ///   * Wall-clock throttle ([_lastRunAt] / [minInterval]) — the boundary
@@ -12,13 +28,13 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 ///   * Stale-device exclusion — a device head older than [staleHeadAge]
 ///     is treated as abandoned to keep one long-offline peer from
 ///     blocking GC forever.
-///   * Frontier intersection ([_minFrontier]) — set-theoretic min over
-///     per-author HLCs, with explicit handling of empty/unreported
+///   * Frontier intersection ([_minFrontier]) — per-replica min over the
+///     reported version vectors, with explicit handling of empty/unknown
 ///     frontiers.
 ///
-/// Idempotent: a tombstone that was once pruned simply isn't there to
-/// find on the next pass, and live entries are never dropped (their
-/// position metadata is required by their descendants).
+/// Idempotent: a block that was once pruned simply isn't there to find on
+/// the next pass, and blocks with any live element (or a live descendant)
+/// are never dropped.
 class CausalStabilityGc {
   CausalStabilityGc({
     required this.vaultId,
@@ -43,9 +59,9 @@ class CausalStabilityGc {
   final Duration minInterval;
 
   /// Trade-off documented at field doc on the engine: a device that
-  /// returns after its frontier expired can resurrect tombstones that
-  /// the quorum has already pruned (Sequence.join is set-union). The
-  /// default is sized so ordinary vacations / travel don't trigger it.
+  /// returns after its frontier expired can resurrect blocks that the
+  /// quorum has already pruned (Fugue.join is union). The default is sized
+  /// so ordinary vacations / travel don't trigger it.
   final Duration staleHeadAge;
 
   DateTime _lastRunAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -72,88 +88,89 @@ class CausalStabilityGc {
     }
 
     final frontier = _minFrontier(heads.heads);
-    if (frontier.entries.isEmpty) return;
+    if (frontier.isEmpty) return;
 
     var prunedFiles = 0;
-    var droppedTombstones = 0;
+    var droppedElements = 0;
     for (final fileId in fugueStore.fileIds.toList()) {
-      final seq = await fugueStore.get(fileId);
-      if (seq == null || seq.entries.isEmpty) continue;
+      final f = await fugueStore.get(fileId);
+      if (f == null || f.elementCount == 0) continue;
 
-      final stable = <Hlc>{};
-      for (final id in seq.entries.keys) {
-        final boundary = frontier[id.nodeId];
+      // Stable = every dot whose per-replica boundary dominates its counter.
+      final stable = <Dot>{};
+      for (final d in f.dots) {
+        final boundary = frontier[d.replica];
         if (boundary == null) continue;
-        if (id <= boundary) stable.add(id);
+        if (d.counter <= boundary) stable.add(d);
       }
       if (stable.isEmpty) continue;
 
-      final pruned = seq.prune(DotSet.from(stable));
-      if (identical(pruned, seq)) continue;
+      final before = f.elementCount;
+      final pruned = f.prune(stable);
+      final after = pruned.elementCount;
+      if (after == before) continue; // nothing was droppable
 
       fugueStore.set(fileId, pruned);
       await fugueStore.persistOne(fileId);
       prunedFiles += 1;
-      droppedTombstones += seq.entries.length - pruned.entries.length;
+      droppedElements += before - after;
     }
 
     swTotal.stop();
     if (prunedFiles > 0 || swTotal.elapsedMilliseconds > 100) {
       _onInfo(
-        'Fugue GC: dropped $droppedTombstones tombstones across '
+        'Fugue GC: dropped $droppedElements element(s) across '
         '$prunedFiles file(s) (heads=${heads.heads.length}, '
         'total=${swTotal.elapsedMilliseconds}ms)',
       );
     }
   }
 
-  /// Element-wise min over the supplied [DeviceHead]s' frontiers.
+  /// Per-replica min over the supplied [DeviceHead]s' version vectors.
   ///
-  /// A dot `d=(ms, cnt, X)` is causally stable iff every device has
-  /// observed it — i.e., every device's frontier dominates `d` on
-  /// author X. For each author X present in EVERY frontier, returns
-  /// the min HLC across all devices. If any device has not reported a
-  /// frontier yet (empty string) or hasn't observed author X at all,
-  /// X is dropped — the boundary collapses to zero for that author
-  /// until every peer checks in. Devices whose `updatedAtMs` is older
-  /// than [staleHeadAge] are skipped entirely.
-  CausalContext _minFrontier(List<DeviceHead> heads) {
-    if (heads.isEmpty) return const CausalContext.empty();
+  /// A dot `(counter, X)` is causally stable iff every active device has
+  /// observed it — i.e. every device's frontier reports replica X with a
+  /// counter ≥ `counter`. For each replica X present in EVERY frontier,
+  /// returns the min counter across all devices. A replica missing from any
+  /// device's report is dropped from the result — its boundary collapses to
+  /// "unknown" (no pruning) until every peer confirms it.
+  ///
+  /// **Fail-safe.** A device whose `frontierPacked` is empty, unrecognised
+  /// (old HLC format), or corrupt is treated as reporting an EMPTY vector:
+  /// it shares no replica with anyone, so the intersection collapses and
+  /// nothing is pruned during a mixed-version rollout. Devices whose
+  /// `updatedAtMs` is older than [staleHeadAge] are skipped entirely.
+  Map<String, int> _minFrontier(List<DeviceHead> heads) {
+    if (heads.isEmpty) return const <String, int>{};
     final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
     final staleMs = staleHeadAge.inMilliseconds;
     final active = heads
         .where((h) => nowMs - h.updatedAtMs < staleMs)
         .toList();
-    if (active.isEmpty) return const CausalContext.empty();
-    final ctxs = <CausalContext>[];
+    if (active.isEmpty) return const <String, int>{};
+
+    final vvs = <Map<String, int>>[];
     for (final h in active) {
-      if (h.frontierPacked.isEmpty) {
-        ctxs.add(const CausalContext.empty());
-        continue;
-      }
-      try {
-        ctxs.add(CausalContext.unpack(h.frontierPacked));
-      } catch (_) {
-        ctxs.add(const CausalContext.empty());
-      }
+      // Unknown/old-format/corrupt → empty VV (fail-safe: blocks pruning).
+      vvs.add(FugueFrontier.unpack(h.frontierPacked) ?? const <String, int>{});
     }
+
     Set<String>? common;
-    for (final ctx in ctxs) {
-      final ids = ctx.entries.keys.toSet();
+    for (final vv in vvs) {
+      final ids = vv.keys.toSet();
       common = common == null ? ids : common.intersection(ids);
     }
-    if (common == null || common.isEmpty) {
-      return const CausalContext.empty();
-    }
-    final out = <String, Hlc>{};
-    for (final id in common) {
-      Hlc? min;
-      for (final ctx in ctxs) {
-        final h = ctx[id]!;
-        if (min == null || h < min) min = h;
+    if (common == null || common.isEmpty) return const <String, int>{};
+
+    final out = <String, int>{};
+    for (final replica in common) {
+      int? min;
+      for (final vv in vvs) {
+        final c = vv[replica]!;
+        if (min == null || c < min) min = c;
       }
-      out[id] = min!;
+      out[replica] = min!;
     }
-    return CausalContext.from(out);
+    return out;
   }
 }

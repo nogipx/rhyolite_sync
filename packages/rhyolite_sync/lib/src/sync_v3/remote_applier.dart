@@ -1,6 +1,7 @@
 import 'dart:convert';
 
-import 'package:convergent/convergent.dart';
+import 'package:convergent/convergent.dart' hide Dot;
+import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
@@ -294,7 +295,14 @@ class RemoteApplier {
     final chunkedIO = _newChunkedIO();
     if (chunkedIO == null) return;
 
-    final sequences = <Sequence<String>>[];
+    // Real (non-tombstone, content-bearing) concurrent values we must
+    // account for. If any of these can't be downloaded, resolving now
+    // would drop that side.
+    final realValues = joined.allValues
+        .where((s) => !s.tombstone && s.blobRef.isNotEmpty)
+        .toList(growable: false);
+
+    final sequences = <Fugue<String>>[];
     String? path;
     for (final state in joined.allValues) {
       if (state.path.isNotEmpty) path = state.path;
@@ -309,15 +317,43 @@ class RemoteApplier {
       // decode is sync compute; yield before each so multi-version
       // conflicts don't pin the main thread.
       await Future<void>.delayed(Duration.zero);
-      sequences.add(
-        reconciler.tryDecodeFugueBlob(bytes) ??
-            FugueTextSync.seedFromText(
-              utf8.decode(bytes, allowMalformed: true),
-            ),
-      );
+      final decoded = reconciler.tryDecodeFugueBlob(bytes);
+      if (decoded != null) {
+        sequences.add(decoded);
+      } else if (FugueStore.isLegacySequenceBlob(bytes)) {
+        // A concurrent side still in the old Sequence format (peer not yet
+        // upgraded). We cannot merge it losslessly. Leave it out — the
+        // `sequences.length < realValues.length` guard below then defers the
+        // whole conflict, keeping the register multi-valued so no side is
+        // dropped until every blob is reachable in the new format.
+        _log.warning(
+          'Deferring text conflict for $fileId: legacy Sequence blob present',
+        );
+        continue;
+      } else {
+        // Genuine plain-text blob — seed deterministically.
+        sequences.add(
+          FugueTextSync.seedFromText(utf8.decode(bytes, allowMalformed: true)),
+        );
+      }
     }
 
     final winnerPath = path ?? joined.allValues.first.path;
+
+    // A concurrent side whose blob we could not retrieve must never be
+    // collapsed away: sealing the surviving subset (or tombstoning when
+    // every real blob is unreachable) would drop it permanently. Leave the
+    // register multi-valued so a later pull — once the blob is reachable —
+    // resolves it losslessly. This mirrors the binary resolver's
+    // no-silent-loss guarantee on the text path.
+    if (sequences.length < realValues.length) {
+      _log.warning(
+        'Deferring text conflict for $fileId: '
+        '${realValues.length - sequences.length}/${realValues.length} '
+        'concurrent blob(s) unreachable — register kept multi-valued',
+      );
+      return;
+    }
 
     if (sequences.isEmpty) {
       // All surviving values are tombstones (or all blobs unreachable).
@@ -333,7 +369,7 @@ class RemoteApplier {
           tombstone: true,
         ),
       );
-      fugueStore.set(fileId, Sequence<String>.empty());
+      fugueStore.set(fileId, Fugue<String>());
       await fugueStore.persistOne(fileId);
       final fullPath = '$vaultPath/$winnerPath';
       if (winnerPath.isNotEmpty && await io.fileExists(fullPath)) {
@@ -421,25 +457,31 @@ class RemoteApplier {
   /// True when the concurrent text [seqs] genuinely share causal history (a
   /// real common base) and can be char-merged losslessly via Fugue join.
   ///
-  /// Signal: they must share at least one dot id AND no shared dot id may
+  /// Signal: they must share at least one element [Dot] AND no shared dot may
   /// carry differing character values. A seed collision — the same positional
   /// `('seed')` dot holding different chars on two devices — is exactly the
-  /// divergent-no-history case and trips the value check. Tombstoned entries
-  /// keep their original `value`, so a concurrent delete-vs-keep on the same
-  /// dot (same char) is NOT a false conflict. Returns false when there is no
-  /// overlap at all (disjoint sequences → also no shared history).
-  static bool _sharesGenuineHistory(List<Sequence<String>> seqs) {
-    final seen = <Hlc, String>{};
+  /// divergent-no-history case and trips the value check. Tombstoned elements
+  /// keep their original value (Fugue never discards a run's values), so a
+  /// concurrent delete-vs-keep on the same dot (same char) is NOT a false
+  /// conflict. Returns false when there is no overlap at all (disjoint trees →
+  /// also no shared history).
+  static bool _sharesGenuineHistory(List<Fugue<String>> seqs) {
+    final seen = <Dot, String>{};
     var overlap = false;
     for (final seq in seqs) {
-      for (final e in seq.entries.entries) {
-        final dot = e.key;
-        final value = e.value.value;
-        if (seen.containsKey(dot)) {
-          overlap = true;
-          if (seen[dot] != value) return false;
-        } else {
-          seen[dot] = value;
+      // rawBlocks yields (start, parent, side, values, delRanges): element k
+      // of a run has dot (start.counter + k, start.replica) and value
+      // values[k] — enumerable whether or not it is tombstoned.
+      for (final (start, _, _, values, _) in seq.rawBlocks) {
+        for (var k = 0; k < values.length; k++) {
+          final dot = Dot(start.counter + k, start.replica);
+          final value = values[k];
+          if (seen.containsKey(dot)) {
+            overlap = true;
+            if (seen[dot] != value) return false;
+          } else {
+            seen[dot] = value;
+          }
         }
       }
     }
@@ -459,8 +501,13 @@ class RemoteApplier {
       store.recordSyncedBlobRef(state.fileId, '');
       return;
     }
-    await reconciler.writeFileToDisk(state);
-    store.recordSyncedBlobRef(state.fileId, state.blobRef);
+    // Record the synced LCA ONLY if the content actually landed on disk.
+    // A failed blob download writes nothing; recording the ref anyway
+    // would trip the already-synced short-circuit on every later pull and
+    // leave the file permanently missing (no retry). Leaving the LCA
+    // untouched lets a subsequent pull/verify re-attempt the write.
+    final wrote = await reconciler.writeFileToDisk(state);
+    if (wrote) store.recordSyncedBlobRef(state.fileId, state.blobRef);
   }
 
   Future<void> _applyOutcome(
@@ -531,24 +578,7 @@ class RemoteApplier {
         :final loser,
         :final suggestedCopyPath,
       ):
-        // loser.blobRef is a manifest hash — read it through ChunkedBlobIO
-        // so the conflict-copy file gets the real file content, not the
-        // manifest JSON.
-        Uint8List? loserBytes;
-        final chunkedIO = _newChunkedIO();
-        if (chunkedIO != null) {
-          try {
-            loserBytes = await chunkedIO.download(loser.blobRef);
-          } catch (e) {
-            _log.warning('Conflict-copy chunked download failed: $e');
-          }
-        }
-        loserBytes ??= await blobStore.read(loser.blobRef, vaultId: vaultId);
-        if (loserBytes != null) {
-          final fullCopyPath = '$vaultPath/$suggestedCopyPath';
-          changeProvider.suppress(suggestedCopyPath);
-          await io.writeFile(fullCopyPath, loserBytes);
-        }
+        await _writeConflictCopyFile(loser, suggestedCopyPath);
         // Materialise winner content + register-collapse via applyLocal.
         await _materialise(winner);
         store.applyLocal(winner);
@@ -589,6 +619,73 @@ class RemoteApplier {
             winnerBlobRef: winner.blobRef,
           ),
         );
+      case StateMergeMultiConflict(:final winner, :final parts):
+        // N>2 concurrent divergence. Preserve every non-canonical value —
+        // conflict-copy the recoverable ones, surface a loss for any whose
+        // bytes are unreachable — then materialise and seal the winner once.
+        for (final part in parts) {
+          switch (part) {
+            case StateMergeConflictCopy(:final loser, :final suggestedCopyPath):
+              await _writeConflictCopyFile(loser, suggestedCopyPath);
+            case StateMergeWinnerOnlyLossy(
+                :final lostBlobRef,
+                :final lostNodeId,
+                :final reason,
+              ):
+              _log.warning('Data loss sealing $fileId via LWW (N>2): $reason');
+              _emit(
+                SyncDataLoss(
+                  fileId: fileId,
+                  path: winner.path,
+                  lostBlobRef: lostBlobRef,
+                  lostNodeId: lostNodeId,
+                  reason: reason,
+                ),
+              );
+            case StateMergeMerged():
+            case StateMergeMultiConflict():
+              // The fold only ever collects ConflictCopy / WinnerOnlyLossy.
+              break;
+          }
+        }
+        await _materialise(winner);
+        store.applyLocal(winner);
+        _emit(SyncFileModified(winner.path));
+        _emit(
+          SyncConflictResolved(
+            fileId: fileId,
+            strategy: 'multi-conflict-copy',
+            winnerBlobRef: winner.blobRef,
+          ),
+        );
+    }
+  }
+
+  /// Reads a conflict loser's real content (through ChunkedBlobIO, falling
+  /// back to the local cache) and writes it as a conflict-copy file. No-op
+  /// when the bytes are unreachable — the caller decides whether that is a
+  /// surfaced loss (it never is for a `StateMergeConflictCopy`, whose
+  /// recoverability the resolver pre-verified).
+  Future<void> _writeConflictCopyFile(
+    FileState loser,
+    String copyPath,
+  ) async {
+    // loser.blobRef is a manifest hash — read it through ChunkedBlobIO so the
+    // conflict-copy file gets the real file content, not the manifest JSON.
+    Uint8List? loserBytes;
+    final chunkedIO = _newChunkedIO();
+    if (chunkedIO != null) {
+      try {
+        loserBytes = await chunkedIO.download(loser.blobRef);
+      } catch (e) {
+        _log.warning('Conflict-copy chunked download failed: $e');
+      }
+    }
+    loserBytes ??= await blobStore.read(loser.blobRef, vaultId: vaultId);
+    if (loserBytes != null) {
+      final fullCopyPath = '$vaultPath/$copyPath';
+      changeProvider.suppress(copyPath);
+      await io.writeFile(fullCopyPath, loserBytes);
     }
   }
 }

@@ -46,10 +46,34 @@ Future<void> main(List<String> args) async {
   final wasmB64 = base64Encode(wasmBytes);
   final mainJs = File(p.join(outDir, 'rhyolite-sync', 'main.js'));
   final mainJsContent = await mainJs.readAsString();
+
+  // dart2js cannot subclass a JS class, so the side-panel view (an
+  // Obsidian `ItemView` subclass) is authored here in JS and exposed to
+  // the Dart side via a global constructor. onOpen/onClose delegate to
+  // Dart callbacks installed by SyncPanel.register(). `require` is made
+  // global by the plugin wrapper (build_common.dart), so `require('obsidian')`
+  // resolves here too.
+  const panelShim = '''
+(function () {
+  const obs = require('obsidian');
+  if (!obs || !obs.ItemView) return;
+  class RhyoliteSyncPanelView extends obs.ItemView {
+    constructor(leaf) { super(leaf); }
+    getViewType() { return 'rhyolite-sync-panel'; }
+    getDisplayText() { return 'Rhyolite Sync'; }
+    getIcon() { return 'refresh-cw'; }
+    async onOpen() { const f = globalThis.__rhyolitePanelOnOpen; if (f) await f(this); }
+    async onClose() { const f = globalThis.__rhyolitePanelOnClose; if (f) await f(this); }
+  }
+  globalThis.__rhyoliteSyncPanelViewCtor = RhyoliteSyncPanelView;
+})();
+''';
+
   await mainJs.writeAsString(
-    '$mainJsContent\nglobalThis.__rhyoliteWasmB64="$wasmB64";',
+    '$mainJsContent\nglobalThis.__rhyoliteWasmB64="$wasmB64";\n$panelShim',
   );
   print('Inlined sqlite3mc.wasm (${wasmBytes.length} bytes) into main.js');
+  print('Injected side-panel ItemView shim into main.js');
 
   print('Build complete → $outDir/rhyolite-sync/');
 }

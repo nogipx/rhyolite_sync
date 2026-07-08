@@ -50,11 +50,16 @@ class ContentDefinedChunker {
 
   static int _buildMask(int bits) => (1 << bits) - 1;
 
+  /// Yield to the event loop after roughly this many bytes so a large-file
+  /// chunk+hash pass (pure main-thread compute, fully synchronous in dart2js)
+  /// doesn't freeze the UI. Keeps each synchronous slice in the low-ms range.
+  static const int _yieldEveryBytes = 4 * 1024 * 1024;
+
   /// Splits [data] into content-defined chunks and returns a [BlobManifest]
   /// plus a map of chunkHash -> chunkBytes.
-  ({BlobManifest manifest, Map<String, Uint8List> chunks}) call(
+  Future<({BlobManifest manifest, Map<String, Uint8List> chunks})> call(
     Uint8List data,
-  ) {
+  ) async {
     if (data.isEmpty) {
       return (
         manifest: const BlobManifest(chunks: [], totalSize: 0),
@@ -66,6 +71,7 @@ class ContentDefinedChunker {
     final chunkMap = <String, Uint8List>{};
     var offset = 0;
     var order = 0;
+    var lastYield = 0;
 
     while (offset < data.length) {
       final remaining = data.length - offset;
@@ -85,6 +91,12 @@ class ContentDefinedChunker {
 
       offset = chunkEnd;
       order++;
+
+      // Cooperative yield so a large file doesn't block the UI thread.
+      if (offset - lastYield >= _yieldEveryBytes) {
+        lastYield = offset;
+        await Future<void>.delayed(Duration.zero);
+      }
     }
 
     return (

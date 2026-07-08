@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:convergent/convergent.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:uuid/uuid.dart';
@@ -66,6 +68,23 @@ class SettingsStore {
     final ms = wallMs ?? DateTime.now().millisecondsSinceEpoch;
     final base = _ownLatestHlc ?? Hlc(ms, 0, deviceId);
     _ownLatestHlc = base.receive(remote, ms);
+  }
+
+  /// Approximate on-disk footprint of the synced settings — the JSON byte
+  /// length of every stored settings record. Cheap (reads local records, no
+  /// decode); a rough proxy for a UI stat, not an exact figure. 0 when settings
+  /// sync has never run for this vault.
+  Future<int> approxTotalBytes() async {
+    final records = await _client.listAllRecords(collection: _storeCol);
+    var total = 0;
+    for (final r in records) {
+      try {
+        total += utf8.encode(jsonEncode(r.payload)).length;
+      } catch (_) {
+        /* skip a record that won't encode */
+      }
+    }
+    return total;
   }
 
   Future<void> load() async {

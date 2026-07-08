@@ -23,3 +23,17 @@ String canonicalJson(Object? value) => jsonEncode(_canonicalize(value));
 /// Canonical JSON encoded as UTF-8 bytes.
 Uint8List canonicalJsonBytes(Object? value) =>
     Uint8List.fromList(utf8.encode(canonicalJson(value)));
+
+/// True when [a] and [b] are the same JSON value up to object key order and
+/// insignificant whitespace — i.e. they differ only in formatting. Used to
+/// decide whether writing our canonical render over a file would actually
+/// change anything, so Obsidian's own natural-order format is left in place
+/// when nothing changed. Returns false if either side is not valid JSON.
+bool jsonCanonicalEqual(Uint8List a, Uint8List b) {
+  try {
+    return canonicalJson(jsonDecode(utf8.decode(a))) ==
+        canonicalJson(jsonDecode(utf8.decode(b)));
+  } catch (_) {
+    return false;
+  }
+}

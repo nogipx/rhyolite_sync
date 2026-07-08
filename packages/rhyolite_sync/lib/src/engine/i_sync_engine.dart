@@ -1,3 +1,6 @@
+import '../crypto/i_vault_cipher.dart';
+import '../use_cases/conflict_list_use_case.dart';
+import '../use_cases/vault_stats_use_case.dart';
 import 'vault_config.dart';
 import 'sync_engine_event.dart';
 
@@ -9,12 +12,26 @@ import 'sync_engine_event.dart';
 abstract interface class ISyncEngine {
   Stream<SyncEngineEvent> get events;
 
+  /// The engine's current session config/cipher. Exposed as getters so
+  /// host UI (e.g. the settings tab) can read the LIVE values after a vault
+  /// switch instead of a snapshot captured at registration time.
+  VaultConfig get config;
   set config(VaultConfig config);
-  set cipher(covariant dynamic cipher);
+  IVaultCipher? get cipher;
+  set cipher(covariant IVaultCipher? cipher);
 
   Future<void> start();
   Future<void> stop();
   Future<void> dispose();
+
+  /// Read-only aggregate snapshot of the local store (file/blob counts, size,
+  /// server cursor). Null when the engine has no store yet (not started).
+  /// Cheap — in-memory, safe to poll from UI.
+  VaultStats? statsSnapshot();
+
+  /// Files whose register currently has more than one surviving value —
+  /// i.e. an unresolved multi-value conflict. Empty when not started.
+  List<ConflictedFile> conflictSnapshot();
 
   Future<void> triggerPull();
   Future<void> triggerReset();

@@ -16,10 +16,15 @@ class HistoryContractNames {
   static const deleteEvents = 'deleteEvents';
   static const reportHistoryHead = 'reportHistoryHead';
   static const getHistoryHeads = 'getHistoryHeads';
+  static const forgetDevice = 'forgetDevice';
 }
 
 class HistoryContractCodecs {
   const HistoryContractCodecs._();
+  static const codecForgetDeviceRequest =
+      RpcCodec<ForgetDeviceRequest>.withDecoder(ForgetDeviceRequest.fromJson);
+  static const codecForgetDeviceResponse =
+      RpcCodec<ForgetDeviceResponse>.withDecoder(ForgetDeviceResponse.fromJson);
   static const codecGetHistoryHeadsRequest =
       RpcCodec<GetHistoryHeadsRequest>.withDecoder(
         GetHistoryHeadsRequest.fromJson,
@@ -118,6 +123,20 @@ class HistoryContractCaller extends RpcCallerContract
       context: context,
     );
   }
+
+  @override
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<ForgetDeviceRequest, ForgetDeviceResponse>(
+      methodName: HistoryContractNames.forgetDevice,
+      requestCodec: HistoryContractCodecs.codecForgetDeviceRequest,
+      responseCodec: HistoryContractCodecs.codecForgetDeviceResponse,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class HistoryContractResponder extends RpcResponderContract
@@ -155,6 +174,12 @@ abstract class HistoryContractResponder extends RpcResponderContract
       handler: getHistoryHeads,
       requestCodec: HistoryContractCodecs.codecGetHistoryHeadsRequest,
       responseCodec: HistoryContractCodecs.codecGetHistoryHeadsResponse,
+    );
+    addUnaryMethod<ForgetDeviceRequest, ForgetDeviceResponse>(
+      methodName: HistoryContractNames.forgetDevice,
+      handler: forgetDevice,
+      requestCodec: HistoryContractCodecs.codecForgetDeviceRequest,
+      responseCodec: HistoryContractCodecs.codecForgetDeviceResponse,
     );
   }
 }

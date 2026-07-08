@@ -2,6 +2,7 @@ import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import 'fugue_frontier.dart';
 import 'state_record_codec.dart';
 
 /// Push-side mechanics for one sync session.
@@ -46,6 +47,12 @@ class StatePusher {
   final void Function(Iterable<String> fileIds) _clearPending;
   final LogScope _log;
 
+  /// Files the server rejected per-item, keyed by fileId → the exact blobRef
+  /// that was rejected. Skipped by [_collectDirty] so we don't re-push the same
+  /// over-limit record every cycle; a new version (different blobRef) retries.
+  final Map<String, ({String blobRef, StatePutRejection rejection})> _rejected =
+      {};
+
   /// Push every dirty file as one Δ-state TaggedValue per file.
   Future<void> push({RpcContext? context}) async {
     final caller = stateCaller;
@@ -80,8 +87,26 @@ class StatePusher {
       return;
     }
 
+    // Correlate per-item outcomes. A rejected item was NOT written server-side
+    // (e.g. its record exceeds the size cap): it must not be reported as pushed
+    // and must stop being re-pushed until the file changes.
+    final byId = {for (final r in response.results) r.fileId: r};
+    final accepted = <String>[];
     for (final entry in dirty) {
       final state = entry.state;
+      final result = byId[state.fileId];
+      if (result != null && result.rejected) {
+        _rejected[state.fileId] =
+            (blobRef: state.blobRef, rejection: result.rejection!);
+        _log.warning(
+          'Push: server rejected ${state.path} '
+          '(${result.rejection!.code} '
+          '${result.rejection!.current}>${result.rejection!.limit}) — not '
+          'synced; will retry only when the file changes',
+        );
+        continue;
+      }
+      _rejected.remove(state.fileId);
       // Push does NOT update lastSyncedBlobRef. The field is consumed
       // by StateConflictResolver as the 3-way-merge BASE (= LCA across
       // devices), and a push doesn't establish convergence with anyone.
@@ -101,8 +126,9 @@ class StatePusher {
       } else {
         _emit(SyncFilePushed(state.path));
       }
+      accepted.add(state.fileId);
     }
-    _clearPending(dirty.map((d) => d.state.fileId));
+    _clearPending(accepted);
 
     // IMPORTANT: do NOT advance store.serverCursor to response.cursor here.
     // response.cursor is the server's max seq, which includes records
@@ -130,12 +156,22 @@ class StatePusher {
 
   Future<void> _reportFrontier({required int headSeq}) async {
     try {
+      // The frontier is a version vector over FUGUE dots, not the HLC
+      // ownContext (which tracks FileState registers, a different clock).
+      // This conservative report carries only this device's own-replica
+      // boundary — a correct lower bound that the GC intersects across all
+      // devices. It's cheap (no per-file scan) and never over-prunes; a
+      // fuller cross-replica vector is a safe future enhancement.
+      final counter = store.fugueClockCounter;
+      final frontier = counter > 0
+          ? FugueFrontier.pack({store.deviceId: counter})
+          : '';
       await historyCaller.reportHistoryHead(
         ReportHistoryHeadRequest(
           vaultId: vaultId,
           deviceId: store.deviceId,
           headSeq: headSeq,
-          frontierPacked: store.ownContext.pack(),
+          frontierPacked: frontier,
         ),
       );
     } catch (e) {
@@ -163,6 +199,12 @@ class StatePusher {
       final isModified = synced != null && synced != state.blobRef;
       final isTombstoneToCommit = state.tombstone && synced != null;
       if (isNew || isModified || isTombstoneToCommit) {
+        // Skip a file the server already rejected for this exact content —
+        // don't re-push the same over-limit record every cycle. A new version
+        // (different blobRef) clears the stale block and is retried.
+        final blocked = _rejected[fileId];
+        if (blocked != null && blocked.blobRef == state.blobRef) continue;
+        _rejected.remove(fileId);
         dirty.add((state: state, contextAtWrite: tv.context));
       }
     }

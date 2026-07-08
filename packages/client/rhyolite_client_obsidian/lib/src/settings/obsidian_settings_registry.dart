@@ -56,7 +56,16 @@ class ObsidianSettingsRegistry {
     final segs = rel.split('/');
 
     // --- denylist: always wins ---
-    if (rel == 'workspace.json' || rel == 'workspace-mobile.json') return null;
+    // `workspace.json` (current layout) AND `workspaces.json` (the Workspaces
+    // core plugin's saved named layouts) are both device-specific — pane
+    // sizes, active leaves, float positions — and change on every interaction.
+    // Field-merging + canonical rewrite fought Obsidian's own natural-order
+    // format on every write, causing a constant settings re-sync loop.
+    if (rel == 'workspace.json' ||
+        rel == 'workspaces.json' ||
+        rel == 'workspace-mobile.json') {
+      return null;
+    }
     if (segs.first == 'plugins' &&
         segs.length >= 2 &&
         segs[1] == selfPluginId) {

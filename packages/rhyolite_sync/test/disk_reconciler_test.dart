@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rhyolite_sync/src/sync_v3/disk_reconciler.dart';
@@ -124,7 +125,7 @@ typedef _Fixture = ({
   String Function(String) fileIdFor,
 });
 
-Future<_Fixture> _newFixture() async {
+Future<_Fixture> _newFixture({int? Function()? maxFileSizeBytes}) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
 
@@ -162,6 +163,7 @@ Future<_Fixture> _newFixture() async {
     },
     fileIdFor: fileIdFor,
     emit: events.add,
+    maxFileSizeBytes: maxFileSizeBytes,
   );
 
   return (
@@ -180,6 +182,72 @@ Future<_Fixture> _newFixture() async {
 Uint8List _bytes(String s) => Uint8List.fromList(utf8.encode(s));
 
 void main() {
+  group('DiskReconciler — size admission', () {
+    test('a file over the per-file limit is skipped and surfaced, not uploaded',
+        () async {
+      final f = await _newFixture(maxFileSizeBytes: () => 100);
+      f.io.files['$_vaultPath/big.bin'] = Uint8List(500); // 500 > 100
+
+      final changed = await f.reconciler.reconcileWithDisk('big.bin');
+
+      expect(changed, isFalse, reason: 'over-limit file produces no state');
+      expect(f.store.get(f.fileIdFor('big.bin')), isNull,
+          reason: 'no FileState is created for a blocked file');
+      expect(f.remote.store, isEmpty, reason: 'nothing was uploaded');
+      final blocked = f.events.whereType<SyncFileSizeBlocked>().toList();
+      expect(blocked, hasLength(1));
+      expect(blocked.single.path, 'big.bin');
+      expect(blocked.single.sizeBytes, 500);
+      expect(blocked.single.limitBytes, 100);
+    });
+
+    test('a file under the limit syncs normally', () async {
+      final f = await _newFixture(maxFileSizeBytes: () => 1000);
+      f.io.files['$_vaultPath/ok.bin'] = _bytes('small');
+      final changed = await f.reconciler.reconcileWithDisk('ok.bin');
+      expect(changed, isTrue);
+      expect(f.store.get(f.fileIdFor('ok.bin')), isNotNull);
+      expect(f.events.whereType<SyncFileSizeBlocked>(), isEmpty);
+    });
+
+    test('deleting a blocked file emits SyncFileSizeUnblocked once', () async {
+      final f = await _newFixture(maxFileSizeBytes: () => 100);
+      f.io.files['$_vaultPath/big.bin'] = Uint8List(500);
+      await f.reconciler.reconcileWithDisk('big.bin'); // blocked
+      expect(f.events.whereType<SyncFileSizeBlocked>(), hasLength(1));
+
+      f.io.files.remove('$_vaultPath/big.bin'); // deleted from disk
+      await f.reconciler.reconcileWithDisk('big.bin');
+
+      final unblocked = f.events.whereType<SyncFileSizeUnblocked>().toList();
+      expect(unblocked, hasLength(1));
+      expect(unblocked.single.path, 'big.bin');
+    });
+
+    test('a blocked file shrinking under the limit unblocks and syncs',
+        () async {
+      final f = await _newFixture(maxFileSizeBytes: () => 100);
+      f.io.files['$_vaultPath/big.bin'] = Uint8List(500);
+      await f.reconciler.reconcileWithDisk('big.bin'); // blocked
+
+      f.io.files['$_vaultPath/big.bin'] = _bytes('now small');
+      final changed = await f.reconciler.reconcileWithDisk('big.bin');
+
+      expect(f.events.whereType<SyncFileSizeUnblocked>(), hasLength(1));
+      expect(changed, isTrue);
+      expect(f.store.get(f.fileIdFor('big.bin')), isNotNull);
+    });
+
+    test('a never-blocked file never emits SyncFileSizeUnblocked', () async {
+      final f = await _newFixture(maxFileSizeBytes: () => 1000);
+      f.io.files['$_vaultPath/ok.bin'] = _bytes('small');
+      await f.reconciler.reconcileWithDisk('ok.bin');
+      // reconcile again (no change) — still no spurious unblock event
+      await f.reconciler.reconcileWithDisk('ok.bin');
+      expect(f.events.whereType<SyncFileSizeUnblocked>(), isEmpty);
+    });
+  });
+
   group('DiskReconciler — binary reconcile', () {
     test('new binary file on disk -> creates FileState with manifest', () async {
       final f = await _newFixture();
@@ -268,6 +336,39 @@ void main() {
       expect(changed, isTrue);
       final seq = (await f.fugueStore.get(f.fileIdFor('note.md')))!;
       expect(seq.values.join(), 'hello world');
+    });
+
+    test('edit against peer-ahead content lands at the requested index',
+        () async {
+      // Regression for the clock-skew misplacement: a peer whose clock ran
+      // ahead authored the existing content, so its dots carry LARGER
+      // counters than a fresh local edit would. Combined with a tombstoned
+      // gap this misroutes the insert unless the reconciler first lifts the
+      // local Fugue clock above the content (store.observeDots).
+      final f = await _newFixture();
+      final fileId = f.fileIdFor('note.md');
+
+      // Adversarial base authored with far-ahead counters: visible "ba",
+      // where 't' is a tombstoned right-side element between 'b' and 'a'.
+      final peer = LamportClock('peer', 1000000);
+      final base = Fugue<String>();
+      base.insert(0, 'a', peer.tick()); // "a"
+      base.insert(0, 'b', peer.tick()); // "ba"
+      base.insert(1, 't', peer.tick()); // "bta"
+      base.delete(1); // tombstone 't' -> 'b' has a tombstoned right
+      expect(base.values.join(), 'ba');
+
+      f.fugueStore.set(fileId, base);
+      await f.fugueStore.persistOne(fileId);
+
+      // Local user inserts "XYZ" between b and a.
+      f.io.files['$_vaultPath/note.md'] = _bytes('bXYZa');
+      await f.reconciler.reconcileWithDisk('note.md');
+
+      final seq = (await f.fugueStore.get(fileId))!;
+      expect(seq.values.join(), 'bXYZa',
+          reason: 'edit must land at the requested index despite '
+              'peer-ahead content ids');
     });
 
     test('text file deleted -> tombstone + fugueStore.remove', () async {
@@ -392,7 +493,7 @@ void main() {
         f.fileIdFor('new.md'),
         'new.md',
       );
-      expect(seq.entries, isEmpty);
+      expect(seq.elementCount, 0);
     });
 
     test(

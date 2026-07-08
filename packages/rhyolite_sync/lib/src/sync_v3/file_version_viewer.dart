@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
@@ -16,17 +17,20 @@ import 'path_normalize.dart';
 class FileVersionViewer {
   FileVersionViewer({
     required this.browser,
-    required this.remoteBlobStorage,
-    required this.localBlobStore,
+    required ChunkedBlobIO? Function() chunkedIOBuilder,
     required this.io,
     required this.changeProvider,
     required this.vaultPath,
     required this.vaultId,
-  });
+  }) : _chunkedIOBuilder = chunkedIOBuilder;
 
   final HistoryBrowser browser;
-  final IBlobStorage remoteBlobStorage;
-  final LocalBlobStore localBlobStore;
+
+  /// Builds a [ChunkedBlobIO] over the live connection. History content lives
+  /// as a chunk manifest (blobRef = manifest hash), so content MUST be
+  /// assembled through this — reading the manifest blob directly hands back its
+  /// JSON, not the file. Null when there's no connection (no content then).
+  final ChunkedBlobIO? Function() _chunkedIOBuilder;
   final IPlatformIO io;
   final IChangeProvider changeProvider;
   final String vaultPath;
@@ -39,21 +43,48 @@ class FileVersionViewer {
   Future<List<HistoryEntry>> versionsOf(String relPath) =>
       browser.list(fileId: _fileIdFor(relPath));
 
-  /// Fetch the plain bytes for a particular version. Returns null if the
-  /// blob can't be located locally or remotely (retention dropped it).
+  /// Materialise a past version to the actual file bytes: assemble the chunk
+  /// manifest, then — for text files — project the Fugue tree to plain text
+  /// (text content is stored as the CRDT serialization, not the raw document).
+  /// Returns null if the blob is gone (retention) or there's no live
+  /// connection. Pure read — never mutates the live Fugue tree.
   Future<Uint8List?> contentAt(HistoryEntry entry) async {
     if (entry.blobRef.isEmpty) return null;
-    final cached = await localBlobStore.read(entry.blobRef, vaultId: vaultId);
-    if (cached != null) return cached;
+    final chunkedIO = _chunkedIOBuilder();
+    if (chunkedIO == null) return null;
+    Uint8List? bytes;
     try {
-      final downloaded = await remoteBlobStorage.download([entry.blobRef]);
-      final bytes = downloaded[entry.blobRef];
-      if (bytes != null) {
-        await localBlobStore.write(bytes, entry.blobRef, vaultId: vaultId);
-        return bytes;
+      bytes = await chunkedIO.download(entry.blobRef);
+    } catch (_) {
+      return null;
+    }
+    if (bytes == null) return null;
+
+    if (const FileTypeDetector().isText(entry.path)) {
+      final fugue = FugueStore.tryDecodeBlob(bytes);
+      if (fugue != null) {
+        return Uint8List.fromList(utf8.encode(fugue.values.join()));
       }
-    } catch (_) {}
-    return null;
+      // A pre-Fugue Sequence blob is not document text — decoding it here
+      // would show CBOR/JSON garbage. Report the version as unavailable.
+      if (FugueStore.isLegacySequenceBlob(bytes)) return null;
+      // Otherwise a genuine pre-Fugue plain-text blob → already the
+      // document; fall through and return the bytes as-is.
+    }
+    return bytes;
+  }
+
+  /// Current on-disk bytes for [relPath], or null when the file no longer
+  /// exists (e.g. deleted). Lets the UI diff a past version against what's
+  /// live on disk ("what restoring would change").
+  Future<Uint8List?> currentContent(String relPath) async {
+    final fullPath = '$vaultPath/$relPath';
+    try {
+      if (!await io.fileExists(fullPath)) return null;
+      return await io.readFile(fullPath);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Restore the file content of [entry] to disk at its recorded path.

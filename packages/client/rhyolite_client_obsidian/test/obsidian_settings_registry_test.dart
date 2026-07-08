@@ -15,6 +15,13 @@ void main() {
     test('workspace files are device-specific and excluded', () {
       expect(c('workspace.json'), isNull);
       expect(c('workspace-mobile.json'), isNull);
+      // The Workspaces core plugin's SAVED layouts (plural) are just as
+      // device-specific — pane sizes, active leaves, float positions — and
+      // must not sync. Field-merging + canonical rewrite (sorted/minified)
+      // fought Obsidian's own format on every write, so settings re-synced
+      // constantly.
+      expect(c('workspaces.json'), isNull);
+      expect(c('.obsidian/workspaces.json'), isNull);
     });
 
     test('local artefacts excluded', () {

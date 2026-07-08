@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../contract/state_sync_contract.dart';
 import '../crypto/i_vault_cipher.dart';
+import 'canonical_json.dart';
 import 'resource_crdt_codec.dart';
 import 'settings_store.dart';
 
@@ -54,6 +55,14 @@ class SettingsSync {
   bool _started = false;
 
   static const _uuid = Uuid();
+
+  /// Per-session id stamped on every push as `sourceClientId`. The server
+  /// echoes it in the notify payload, so the config-sync notify handler can
+  /// recognise and ignore the echo of its OWN push instead of pulling its
+  /// own change back (a re-upload otherwise self-notified once per file).
+  /// A fresh id per instance is enough: the push and its echo always share
+  /// one live [SettingsSync].
+  final String clientId = _uuid.v4();
 
   /// Server record key for [resourceId]. The raw `.obsidian` path must NEVER be
   /// the server key: `fileId` travels in cleartext, so a path key would leak the
@@ -133,6 +142,23 @@ class SettingsSync {
   /// pulled version to disk, so the next scan recognises it as already synced.
   Future<void> recordSourceSig(String resourceId, String sig) =>
       _store.setSig(resourceId, sig);
+
+  /// True when [diskBytes] already represent the same content as the
+  /// resource's current merged state, so writing our canonical render would
+  /// only reformat the file (reorder keys, minify) without changing anything.
+  ///
+  /// Lets the pull-write leave Obsidian's own natural-order format in place
+  /// when the content matches — otherwise every synced file was rewritten to
+  /// canonical form on each pull, fought Obsidian's format, and churned.
+  bool diskMatchesRendered(String resourceId, Uint8List diskBytes) {
+    final rendered = renderResource(resourceId);
+    if (rendered == null) return false;
+    if (_bytesEqual(diskBytes, rendered)) return true;
+    // Opaque whole-file resources (CSS, plugin data.json) are compared byte
+    // for byte — there is no canonical JSON form to fall back to.
+    if (_kindOf(resourceId) == SettingsCrdtKind.wholeFile) return false;
+    return jsonCanonicalEqual(diskBytes, rendered);
+  }
 
   /// Canonical rendered bytes for a resource, or null if unknown/empty.
   Uint8List? renderResource(String resourceId) {
@@ -246,7 +272,9 @@ class SettingsSync {
   /// and pushes every enabled resource from scratch (see
   /// `ObsidianConfigSync.resetFromThisDevice`). Mirrors the notes "re-upload".
   Future<void> wipeServerAndLocal() async {
-    await _remote.wipeVault(StateWipeRequest(vaultId: vaultId));
+    await _remote.wipeVault(
+      StateWipeRequest(vaultId: vaultId, sourceClientId: clientId),
+    );
     _state.clear();
     await _store.wipeAll();
     _log?.call('settings: wiped server keyspace + local store');
@@ -295,8 +323,11 @@ class SettingsSync {
     }
     if (items.isEmpty) return;
     // Cursor is intentionally NOT advanced here — the next pull re-reads our
-    // own write idempotently and advances the cursor then.
-    await _remote.putStates(StatePutRequest(vaultId: vaultId, items: items));
+    // own write idempotently and advances the cursor then. [clientId] lets the
+    // server-echoed notify be recognised as our own (skipped, not pulled).
+    await _remote.putStates(
+      StatePutRequest(vaultId: vaultId, items: items, sourceClientId: clientId),
+    );
   }
 
   Future<void> _persist(String resourceId, {String? sig}) async {

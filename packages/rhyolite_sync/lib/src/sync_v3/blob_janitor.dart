@@ -25,12 +25,30 @@ class BlobJanitor {
     required this.blobStorage,
     required this.store,
     required this.vaultId,
+    this.maintenanceCaller,
   });
 
   final IHistoryContract historyCaller;
   final IBlobStorage blobStorage;
   final FileStateStore store;
   final String vaultId;
+
+  /// Server-side maintenance RPC for the orphan sweep. Null when the engine
+  /// isn't connected; [sweepOrphans] then returns null.
+  final IVaultMaintenanceContract? maintenanceCaller;
+
+  /// Reclaims blobs referenced by nothing on the server — the residue the
+  /// age/window cleanup can't see (failed uploads, blobs stranded when a prior
+  /// cleanup deleted an event but not its blob). The server computes the live
+  /// set authoritatively (its own state + history), so this is safe against a
+  /// stale local view. [dryRun] (default) only reports; pass false to delete.
+  Future<SweepOrphanBlobsResponse?> sweepOrphans({bool dryRun = true}) async {
+    final caller = maintenanceCaller;
+    if (caller == null) return null;
+    return caller.sweepOrphanBlobs(
+      SweepOrphanBlobsRequest(vaultId: vaultId, dryRun: dryRun),
+    );
+  }
 
   /// Maximum events fetched per scan. For typical Obsidian vaults a
   /// single batch is sufficient. Larger vaults would need pagination —
@@ -47,11 +65,11 @@ class BlobJanitor {
     required int olderThanDays,
     int deviceTtlDays = 30,
   }) async {
-    if (olderThanDays < 1) {
+    if (olderThanDays < 0) {
       throw ArgumentError.value(
         olderThanDays,
         'olderThanDays',
-        'must be at least 1',
+        'must be >= 0 (0 = delete all history the device-safety head allows)',
       );
     }
 
@@ -162,35 +180,53 @@ class BlobJanitor {
     );
   }
 
-  /// Execute the plan: delete orphan blobs from backend, then events.
+  /// Max blob ids per delete RPC. A big orphan set (a video's many chunks +
+  /// every historical version) in one call risks a rejected/rate-limited
+  /// request; batching keeps each request small and lets partial progress
+  /// through.
+  static const int _deleteBatchSize = 500;
+
+  /// Execute the plan: delete orphan blobs, then — ONLY if that fully
+  /// succeeded — the history events. Deleting an event whose blob delete
+  /// failed would strand the blob with no reference at all (an invisible
+  /// orphan the janitor can never find again), so on any blob-delete failure
+  /// the events are kept for a retry and the failure is surfaced.
   Future<JanitorResult> execute(JanitorPlan plan) async {
     var deletedBlobs = 0;
-    var deletedEvents = 0;
+    var failedBlobs = 0;
+    Object? firstError;
 
-    if (plan.blobIds.isNotEmpty) {
+    for (var i = 0; i < plan.blobIds.length; i += _deleteBatchSize) {
+      final end = (i + _deleteBatchSize) < plan.blobIds.length
+          ? i + _deleteBatchSize
+          : plan.blobIds.length;
+      final batch = plan.blobIds.sublist(i, end);
       try {
-        await blobStorage.deleteMany(plan.blobIds);
-        deletedBlobs = plan.blobIds.length;
+        await blobStorage.deleteMany(batch);
+        deletedBlobs += batch.length;
       } catch (e) {
-        // Best-effort: report what we attempted, continue to events.
-        deletedBlobs = 0;
+        failedBlobs += batch.length;
+        firstError ??= e;
       }
     }
 
-    if (plan.eventIds.isNotEmpty) {
+    var deletedEvents = 0;
+    if (failedBlobs == 0 && plan.eventIds.isNotEmpty) {
       try {
         final response = await historyCaller.deleteEvents(
           HistoryDeleteEventsRequest(vaultId: vaultId, eventIds: plan.eventIds),
         );
         deletedEvents = response.deleted;
-      } catch (_) {
-        deletedEvents = 0;
+      } catch (e) {
+        firstError ??= e;
       }
     }
 
     return JanitorResult(
       deletedBlobs: deletedBlobs,
       deletedEvents: deletedEvents,
+      failedBlobs: failedBlobs,
+      firstError: firstError?.toString(),
     );
   }
 }
@@ -253,8 +289,21 @@ class JanitorResult {
   final int deletedBlobs;
   final int deletedEvents;
 
+  /// Blob ids the backend refused to delete. When > 0 the history events were
+  /// deliberately kept (see [BlobJanitor.execute]) so a re-run can retry
+  /// instead of stranding those blobs as unreferenced.
+  final int failedBlobs;
+
+  /// First backend error encountered (blob or event delete), for surfacing to
+  /// the user. Null on full success.
+  final String? firstError;
+
   const JanitorResult({
     required this.deletedBlobs,
     required this.deletedEvents,
+    this.failedBlobs = 0,
+    this.firstError,
   });
+
+  bool get hadFailures => failedBlobs > 0 || firstError != null;
 }

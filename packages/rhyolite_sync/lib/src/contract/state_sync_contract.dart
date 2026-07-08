@@ -108,31 +108,81 @@ class StatePutRequest implements IRpcSerializable {
       };
 }
 
+/// Why the server refused a single putStates item.
+///
+/// Carried per-item in [StatePutResult] so one over-limit record does not fail
+/// the whole batch. Machine-readable so the client can surface it and stop
+/// re-pushing until the file changes.
+class StatePutRejection implements IRpcSerializable {
+  const StatePutRejection({
+    required this.code,
+    required this.current,
+    required this.limit,
+  });
+
+  /// Reason code, e.g. `state_size` (record exceeds the server's size cap).
+  final String code;
+
+  /// The offending value (e.g. the encrypted record's byte size).
+  final int current;
+
+  /// The limit that was exceeded.
+  final int limit;
+
+  factory StatePutRejection.fromJson(Map<String, dynamic> json) =>
+      StatePutRejection(
+        code: json['code'] as String,
+        current: (json['current'] as num).toInt(),
+        limit: (json['limit'] as num).toInt(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'code': code,
+        'current': current,
+        'limit': limit,
+      };
+}
+
 /// Per-file outcome of a putStates call.
 ///
-/// CRDT puts cannot be rejected — there is no OCC anymore (doc §5.1).
-/// Only the assigned [serverSeq] is reported back.
+/// A successful CRDT put reports the assigned [serverSeq]. A put can also be
+/// REJECTED per-item (e.g. the record exceeds the server's size cap): the rest
+/// of the batch still succeeds, and this item carries a [rejection] with a
+/// machine-readable reason instead of being written. The client must NOT treat
+/// a rejected item as synced.
 class StatePutResult implements IRpcSerializable {
   const StatePutResult({
     required this.fileId,
     required this.serverSeq,
+    this.rejection,
   });
 
   final String fileId;
 
   /// Monotonic cursor assigned to this newly-stored TaggedValue; clients
-  /// filter pulls by cursor > sinceCursor.
+  /// filter pulls by cursor > sinceCursor. Zero when [rejection] is set.
   final int serverSeq;
+
+  /// Non-null when the server refused to store this item.
+  final StatePutRejection? rejection;
+
+  bool get rejected => rejection != null;
 
   factory StatePutResult.fromJson(Map<String, dynamic> json) => StatePutResult(
         fileId: json['fileId'] as String,
         serverSeq: json['serverSeq'] as int,
+        rejection: json['rejection'] == null
+            ? null
+            : StatePutRejection.fromJson(
+                json['rejection'] as Map<String, dynamic>),
       );
 
   @override
   Map<String, dynamic> toJson() => {
         'fileId': fileId,
         'serverSeq': serverSeq,
+        if (rejection != null) 'rejection': rejection!.toJson(),
       };
 }
 

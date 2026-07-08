@@ -126,6 +126,12 @@ class _FakeHistory implements IHistoryContract {
     GetHistoryHeadsRequest req, {
     RpcContext? context,
   }) async => const GetHistoryHeadsResponse(heads: []);
+
+  @override
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest req, {
+    RpcContext? context,
+  }) async => const ForgetDeviceResponse(removed: false);
 }
 
 String _meta(String path, int size) =>
@@ -158,6 +164,7 @@ void main() {
   late _NoopChangeProvider changes;
   late FileVersionViewer viewer;
   late HistoryBrowser browser;
+  late ChunkedBlobIO cio;
   const vaultPath = '/vault';
 
   setUp(() {
@@ -166,6 +173,11 @@ void main() {
     localStore = LocalBlobStore(InMemoryBlobRepository());
     io = _MemIO();
     changes = _NoopChangeProvider();
+    cio = ChunkedBlobIO(
+      blobStore: localStore,
+      remoteBlobStorage: remote,
+      vaultId: _v,
+    );
     browser = HistoryBrowser(
       historyCaller: fakeHistory,
       cipher: _FakeCipher(),
@@ -173,8 +185,7 @@ void main() {
     );
     viewer = FileVersionViewer(
       browser: browser,
-      remoteBlobStorage: remote,
-      localBlobStore: localStore,
+      chunkedIOBuilder: () => cio,
       io: io,
       changeProvider: changes,
       vaultPath: vaultPath,
@@ -183,6 +194,29 @@ void main() {
   });
 
   String fid(String path) => const Uuid().v5(_v, path);
+
+  /// Stores [bytes] the way the engine does — as a chunk manifest — and
+  /// returns the blobRef (manifest hash) a history entry would carry.
+  Future<String> putBinary(Uint8List bytes) async =>
+      (await cio.upload(bytes, {})).manifestHash;
+
+  /// Stores [text] as a Fugue tree blob (what the engine persists for text
+  /// files), returning the blobRef. contentAt must project this back to text.
+  Future<String> putText(String text) async {
+    final blob = FugueStore.encodeBlob(FugueTextSync.seedFromText(text));
+    return (await cio.upload(blob, {})).manifestHash;
+  }
+
+  HistoryEntry entryFor(String path, String blobRef) => HistoryEntry(
+        eventId: 'e',
+        fileId: fid(path),
+        path: path,
+        sizeBytes: 0,
+        blobRef: blobRef,
+        operation: HistoryOperation.modify,
+        createdAt: DateTime.now(),
+        hlc: Hlc(1, 0, 'A'),
+      );
 
   test('versionsOf returns events only for the given path', () async {
     fakeHistory.events.add(
@@ -228,80 +262,54 @@ void main() {
     expect(v.last.eventId, 'a');
   });
 
-  test('contentAt downloads from remote when not in local cache', () async {
-    final body = Uint8List.fromList(utf8.encode('hello world'));
-    remote.store['sha-x'] = body;
-    final entry = HistoryEntry(
-      eventId: 'e',
-      fileId: 'f1',
-      path: 'a.md',
-      sizeBytes: 11,
-      blobRef: 'sha-x',
-      operation: HistoryOperation.modify,
-      createdAt: DateTime.now(),
-      hlc: Hlc(1, 0, 'A'),
+  test('contentAt assembles binary content from the chunk manifest', () async {
+    // 3 MiB of varied bytes → forces a multi-chunk manifest, so this proves
+    // we assemble through ChunkedBlobIO rather than handing back the manifest.
+    final body = Uint8List.fromList(
+      List.generate(3 * 1024 * 1024, (i) => (i * 31 + 7) & 0xff),
     );
+    final ref = await putBinary(body);
 
-    final result = await viewer.contentAt(entry);
+    final result = await viewer.contentAt(entryFor('photo.bin', ref));
     expect(result, isNotNull);
-    expect(utf8.decode(result!), 'hello world');
+    expect(result!.length, body.length);
+    expect(result, orderedEquals(body));
+  });
 
-    // Also self-heals into the local cache for next time.
-    final cached = await localStore.read('sha-x', vaultId: _v);
-    expect(cached, isNotNull);
+  test('contentAt projects a text version to plain text, not Fugue JSON',
+      () async {
+    // The exact reported bug: a .md version restored as raw serialization.
+    final ref = await putText('# Title\n\nhello world\n');
+
+    final result = await viewer.contentAt(entryFor('notes/a.md', ref));
+    expect(result, isNotNull);
+    final text = utf8.decode(result!);
+    expect(text, '# Title\n\nhello world\n');
+    // Must NOT be the raw CRDT/manifest envelope.
+    expect(text, isNot(contains('"chars"')));
+    expect(text, isNot(contains('"chunks"')));
   });
 
   test('contentAt returns null when blob is gone everywhere', () async {
-    final entry = HistoryEntry(
-      eventId: 'e',
-      fileId: 'f1',
-      path: 'a.md',
-      sizeBytes: 1,
-      blobRef: 'sha-missing',
-      operation: HistoryOperation.modify,
-      createdAt: DateTime.now(),
-      hlc: Hlc(1, 0, 'A'),
-    );
-    final result = await viewer.contentAt(entry);
+    final result =
+        await viewer.contentAt(entryFor('a.md', 'sha-missing-manifest'));
     expect(result, isNull);
   });
 
-  test(
-    'restore writes the version content to disk at the recorded path',
-    () async {
-      final v1 = Uint8List.fromList(utf8.encode('original'));
-      remote.store['sha-v1'] = v1;
-      // Disk currently has a different version.
-      io.files['$vaultPath/note.md'] = Uint8List.fromList(utf8.encode('newer'));
+  test('restore writes the projected version content to disk', () async {
+    final ref = await putText('original body');
+    // Disk currently has a different version.
+    io.files['$vaultPath/note.md'] = Uint8List.fromList(utf8.encode('newer'));
 
-      final entry = HistoryEntry(
-        eventId: 'e',
-        fileId: fid('note.md'),
-        path: 'note.md',
-        sizeBytes: 8,
-        blobRef: 'sha-v1',
-        operation: HistoryOperation.modify,
-        createdAt: DateTime.now(),
-        hlc: Hlc(1, 0, 'A'),
-      );
+    await viewer.restore(entryFor('note.md', ref));
 
-      await viewer.restore(entry);
-
-      expect(utf8.decode(io.files['$vaultPath/note.md']!), 'original');
-    },
-  );
+    expect(utf8.decode(io.files['$vaultPath/note.md']!), 'original body');
+  });
 
   test('restore throws when blob is no longer available', () async {
-    final entry = HistoryEntry(
-      eventId: 'e',
-      fileId: fid('x.md'),
-      path: 'x.md',
-      sizeBytes: 1,
-      blobRef: 'sha-gone',
-      operation: HistoryOperation.modify,
-      createdAt: DateTime.now(),
-      hlc: Hlc(1, 0, 'A'),
+    expect(
+      () => viewer.restore(entryFor('x.md', 'sha-gone')),
+      throwsStateError,
     );
-    expect(() => viewer.restore(entry), throwsStateError);
   });
 }

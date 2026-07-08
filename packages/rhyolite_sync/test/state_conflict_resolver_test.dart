@@ -96,6 +96,34 @@ void main() {
     });
   });
 
+  group('StateConflictResolver — N>2 preserves every value (L1-5)', () {
+    test('three concurrent divergent values -> all preserved, none dropped',
+        () async {
+      final refA = await _writeBlob(blobStore, 'content A');
+      final refB = await _writeBlob(blobStore, 'content B');
+      final refC = await _writeBlob(blobStore, 'content C');
+      final a = _state('f1', blobRef: refA, hlc: Hlc(100, 0, 'A'));
+      final b = _state('f1', blobRef: refB, hlc: Hlc(200, 0, 'B'));
+      final c = _state('f1', blobRef: refC, hlc: Hlc(300, 0, 'C'));
+
+      // No baseRef -> no 3-way merge; every pair is a genuine conflict.
+      final outcome = await resolver.resolve([a, b, c]);
+
+      expect(outcome, isA<StateMergeMultiConflict>(),
+          reason: 'N>2 conflict must not collapse to one copy and drop the '
+              'rest of the divergent versions');
+      final m = outcome as StateMergeMultiConflict;
+      expect(m.winner.blobRef, refC, reason: 'canonical winner is max-HLC');
+      final preserved = m.parts
+          .whereType<StateMergeConflictCopy>()
+          .map((p) => p.loser.blobRef)
+          .toSet();
+      expect(preserved, containsAll(<String>{refA, refB}),
+          reason: 'both non-winning versions must be retained as conflict '
+              'copies, not silently dropped');
+    });
+  });
+
   group('StateConflictResolver — 3-way text merge', () {
     test('non-overlapping edits merge cleanly', () async {
       final baseRef = await _writeBlob(blobStore, 'line A\nline B\nline C\n');

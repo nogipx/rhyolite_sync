@@ -67,6 +67,7 @@ class ChunkedBlobIO {
     Uint8List bytes,
     Set<String> knownChunks, {
     RpcContext? context,
+    void Function(int sent, int total)? onProgress,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
@@ -75,8 +76,7 @@ class ChunkedBlobIO {
     // dart2js, fully synchronous. Without this yield N back-to-back
     // uploads keep the JS thread pinned and the Obsidian UI frozen
     // through the whole burst.
-    await Future<void>.delayed(Duration.zero);
-    final result = _chunker(bytes);
+    final result = await _chunker(bytes);
     final manifest = result.manifest;
     final chunkBytes = result.chunks;
     final orderedHashes = manifest.chunks
@@ -101,22 +101,55 @@ class ChunkedBlobIO {
     await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
 
     // Upload only chunks the server hasn't already got. The manifest is
-    // freshly content-addressed for this version, so always upload it
-    // unless the exact same manifest already exists (very rare — same
-    // content + same chunk layout).
-    final toUpload = <(Uint8List, String)>[];
-    for (final entry in chunkBytes.entries) {
-      if (knownChunks.contains(entry.key)) continue;
-      toUpload.add((entry.value, entry.key));
+    // uploaded LAST (after every chunk it references is on the server) so a
+    // partial upload can never leave a manifest pointing at absent chunks.
+    final total = manifest.totalSize;
+    final chunksToUpload = <(Uint8List, String)>[];
+    var done = 0;
+    for (final c in manifest.chunks) {
+      if (knownChunks.contains(c.hash)) {
+        done += c.size; // already on the server (dedup) — counts instantly
+      } else {
+        chunksToUpload.add((chunkBytes[c.hash]!, c.hash));
+      }
     }
-    if (!knownChunks.contains(manifestHash)) {
-      toUpload.add((manifestPlain, manifestHash));
+    onProgress?.call(done > total ? total : done, total);
+
+    // Chunks in byte-bounded batches so a large file reports moving progress
+    // instead of jumping 0→100 after one giant call. Each batch is a complete,
+    // content-addressed, idempotent upload — splitting is safe.
+    const batchLimitBytes = 2 * 1024 * 1024;
+    final sizeOf = {for (final c in manifest.chunks) c.hash: c.size};
+    var batch = <(Uint8List, String)>[];
+    var batchWire = 0;
+    var batchContent = 0;
+    Future<void> flush() async {
+      if (batch.isEmpty) return;
+      token?.throwIfCancelled();
+      await remoteBlobStorage.upload(batch, context: context);
+      done += batchContent;
+      onProgress?.call(done > total ? total : done, total);
+      batch = <(Uint8List, String)>[];
+      batchWire = 0;
+      batchContent = 0;
     }
 
-    if (toUpload.isNotEmpty) {
-      token?.throwIfCancelled();
-      await remoteBlobStorage.upload(toUpload, context: context);
+    for (final (bytes, id) in chunksToUpload) {
+      batch.add((bytes, id));
+      batchWire += bytes.length;
+      batchContent += sizeOf[id] ?? bytes.length;
+      if (batchWire >= batchLimitBytes) await flush();
     }
+    await flush();
+
+    if (!knownChunks.contains(manifestHash)) {
+      token?.throwIfCancelled();
+      await remoteBlobStorage.upload(
+        [(manifestPlain, manifestHash)],
+        context: context,
+      );
+    }
+    onProgress?.call(total, total);
 
     return (manifestHash: manifestHash, chunkHashes: orderedHashes);
   }
@@ -127,6 +160,7 @@ class ChunkedBlobIO {
   Future<Uint8List?> download(
     String manifestHash, {
     RpcContext? context,
+    void Function(int sent, int total)? onProgress,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
@@ -156,26 +190,50 @@ class ChunkedBlobIO {
 
     final cached = <String, Uint8List>{};
     final missing = <String>[];
+    var localBytes = 0;
     for (final ref in chunkRefs) {
       final bytes = await blobStore.read(ref.hash, vaultId: vaultId);
       if (bytes != null) {
         cached[ref.hash] = bytes;
+        localBytes += ref.size;
       } else {
         missing.add(ref.hash);
       }
     }
+    // Chunks already in the local cache count instantly; fetch the rest in
+    // byte-bounded batches so a large file reports moving progress.
+    onProgress?.call(localBytes > size ? size : localBytes, size);
 
     if (missing.isNotEmpty) {
-      token?.throwIfCancelled();
-      final downloaded = await remoteBlobStorage.download(
-        missing,
-        context: context,
-      );
-      for (final entry in downloaded.entries) {
-        cached[entry.key] = entry.value;
-        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+      final sizeOf = {for (final ref in chunkRefs) ref.hash: ref.size};
+      const batchLimitBytes = 2 * 1024 * 1024;
+      var batch = <String>[];
+      var batchBytes = 0;
+      Future<void> fetch() async {
+        if (batch.isEmpty) return;
+        token?.throwIfCancelled();
+        final downloaded = await remoteBlobStorage.download(
+          batch,
+          context: context,
+        );
+        for (final entry in downloaded.entries) {
+          cached[entry.key] = entry.value;
+          await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+          localBytes += sizeOf[entry.key] ?? entry.value.length;
+        }
+        onProgress?.call(localBytes > size ? size : localBytes, size);
+        batch = <String>[];
+        batchBytes = 0;
       }
+
+      for (final h in missing) {
+        batch.add(h);
+        batchBytes += sizeOf[h] ?? 0;
+        if (batchBytes >= batchLimitBytes) await fetch();
+      }
+      await fetch();
     }
+    onProgress?.call(size, size);
 
     final builder = BytesBuilder(copy: false);
     for (final ref in chunkRefs) {

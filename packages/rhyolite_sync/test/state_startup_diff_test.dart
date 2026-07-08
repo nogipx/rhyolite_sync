@@ -185,7 +185,7 @@ void main() {
 
       // Build the state the way reconciler would: actually chunk and
       // record the resulting hashes.
-      final chunked = ContentDefinedChunker()(big);
+      final chunked = await ContentDefinedChunker()(big);
       final chunkHashes = chunked.manifest.chunks
           .map((c) => c.hash)
           .toList(growable: false);
@@ -224,12 +224,12 @@ void main() {
 
       // Store chunk hashes computed with the SAME keyed hasher (as a real
       // keyed upload would have produced).
-      final chunked = ContentDefinedChunker(blobIdHasher: hasher)(bytes);
+      final chunked = await ContentDefinedChunker(blobIdHasher: hasher)(bytes);
       final chunkHashes =
           chunked.manifest.chunks.map((c) => c.hash).toList(growable: false);
       expect(chunkHashes.length, greaterThan(1));
       // These are HMAC ids, not the plain sha256 the old code would compute.
-      final plain = ContentDefinedChunker()(bytes);
+      final plain = await ContentDefinedChunker()(bytes);
       expect(chunkHashes.first,
           isNot(plain.manifest.chunks.first.hash));
 
@@ -257,7 +257,7 @@ void main() {
 
       // Single-chunk hash: ContentDefinedChunker on 100 bytes (< min
       // chunk size) yields one chunk = whole file.
-      final chunked = ContentDefinedChunker()(bytes);
+      final chunked = await ContentDefinedChunker()(bytes);
       expect(chunked.manifest.chunks.length, 1);
       f.store.upsert(FileState(
         fileId: f.fileIdFor('file.bin'),
@@ -299,7 +299,7 @@ void main() {
       final big = _randomBytes(10 * 1024 * 1024, 5);
       f.io.files['$_vaultPath/file.bin'] = big;
 
-      final chunked = ContentDefinedChunker()(big);
+      final chunked = await ContentDefinedChunker()(big);
       final chunkHashes = chunked.manifest.chunks
           .map((c) => c.hash)
           .toList(growable: false);

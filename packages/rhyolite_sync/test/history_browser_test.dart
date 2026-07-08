@@ -56,6 +56,12 @@ class _FakeHistory implements IHistoryContract {
     GetHistoryHeadsRequest request, {
     RpcContext? context,
   }) async => const GetHistoryHeadsResponse(heads: []);
+
+  @override
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest request, {
+    RpcContext? context,
+  }) async => const ForgetDeviceResponse(removed: false);
 }
 
 String _encMeta(String path, int size, {bool tombstone = false}) {

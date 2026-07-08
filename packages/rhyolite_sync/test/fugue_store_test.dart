@@ -1,4 +1,7 @@
-import 'package:convergent/convergent.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/src/sync_v3/fugue_store.dart';
 import 'package:rhyolite_sync/src/sync_v3/fugue_text_sync.dart';
 import 'package:rpc_data/rpc_data.dart';
@@ -12,7 +15,10 @@ Future<FugueStore> _newStore(IDataClient client, {int cacheMax = 50}) async {
   return store;
 }
 
-Sequence<String> _seedABCD() => FugueTextSync.seedFromText('abcd');
+Fugue<String> _seedABCD() => FugueTextSync.seedFromText('abcd');
+
+// Fugue has no value `==`; compare through the deterministic wire codec.
+List<int> _blob(Fugue<String> f) => FugueStore.encodeBlob(f).toList();
 
 void main() {
   group('FugueStore in-memory', () {
@@ -62,8 +68,8 @@ void main() {
 
       final b = await _newStore(env.client);
       expect((await b.get('f1'))?.values.join(), 'abcd');
-      expect(await b.get('f1'), await a.get('f1'),
-          reason: 'reloaded sequence must equal originally persisted one');
+      expect(_blob((await b.get('f1'))!), _blob((await a.get('f1'))!),
+          reason: 'reloaded tree must equal originally persisted one');
     });
 
     test('persistOne with null entry deletes the persisted row', () async {
@@ -75,7 +81,7 @@ void main() {
       await a.persistOne('f1');
 
       // Removing from the cache + persistOne should drop the row.
-      a.set('f1', Sequence<String>.empty()); // cleared but still cached
+      a.set('f1', Fugue<String>()); // cleared but still cached
       await a.remove('f1');
 
       final b = await _newStore(env.client);
@@ -120,12 +126,35 @@ void main() {
   });
 
   group('FugueStore wire codec', () {
-    test('encodeForBlob → decodeFromBlob round-trips the sequence', () {
+    test('encodeForBlob → decodeFromBlob round-trips the tree (JSON)', () {
       final original = FugueTextSync.seedFromText('round trip');
       final encoded = FugueStore.encodeForBlob(original);
       final restored = FugueStore.decodeFromBlob(encoded);
-      expect(restored, original);
+      expect(_blob(restored), _blob(original));
       expect(restored.values, original.values);
+    });
+
+    test('encodeBlob → tryDecodeBlob round-trips the tree (binary)', () {
+      final original = FugueTextSync.seedFromText('round trip');
+      final restored = FugueStore.tryDecodeBlob(FugueStore.encodeBlob(original));
+      expect(restored, isNotNull);
+      expect(restored!.values.join(), 'round trip');
+      expect(_blob(restored), _blob(original));
+    });
+
+    test('tryDecodeBlob rejects non-magic bytes, isLegacy flags old blobs',
+        () {
+      // Plain text is neither a new-format blob nor a legacy Sequence blob.
+      final plain = Uint8List.fromList('just some text'.codeUnits);
+      expect(FugueStore.tryDecodeBlob(plain), isNull);
+      expect(FugueStore.isLegacySequenceBlob(plain), isFalse);
+
+      // A legacy JSON Sequence envelope is positively detected.
+      final legacy = Uint8List.fromList(
+        utf8.encode('{"v":1,"chars":[]}'),
+      );
+      expect(FugueStore.tryDecodeBlob(legacy), isNull);
+      expect(FugueStore.isLegacySequenceBlob(legacy), isTrue);
     });
   });
 

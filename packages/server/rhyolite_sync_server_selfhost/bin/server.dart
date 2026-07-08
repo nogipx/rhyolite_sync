@@ -66,9 +66,6 @@ Future<void> main() async {
       SharedSecretAuthInterceptor(sharedSecret: sharedSecret),
       UserIdSpanInterceptor(userIdKey: RhyoliteAuthKeys.userId),
       rateLimiter,
-      // OOM guard — protects the process from oversized ciphertext
-      // records. Not a billing gate; applies in every edition.
-      const StateRecordSizeInterceptor(),
     ],
     config: RpcAppConfig(
       env: env,

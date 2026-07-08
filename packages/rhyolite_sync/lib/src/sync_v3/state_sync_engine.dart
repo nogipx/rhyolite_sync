@@ -60,7 +60,9 @@ class StateSyncEngine implements ISyncEngine {
     RemoteBlobStorageBuilder? blobStorageBuilder,
     required ITaskScheduler scheduler,
     this.startupUploadConcurrency = 4,
+    int? Function()? maxFileSizeBytes,
   }) : _scheduler = scheduler,
+       _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
        _log = logger ?? LogScope.noop,
        _resolverFactory = resolverFactory,
        _rejections = ServerRejectionMapper(factory: rejectionFactory),
@@ -94,6 +96,18 @@ class StateSyncEngine implements ISyncEngine {
   final ServerRejectionMapper _rejections;
   final SyncConnectionFactory _connectionFactory;
   final RemoteBlobStorageBuilder _blobStorageBuilder;
+
+  /// Current per-file upload size limit in bytes (null = unlimited). Threaded
+  /// into the reconciler + startup diff so an over-limit file is never
+  /// read/chunked/uploaded. The host provides it from the subscription's
+  /// PlanCapabilities (managed) or leaves it null (self-host / BYO storage).
+  final int? Function() _maxFileSizeBytes;
+
+  /// Paths currently skipped for exceeding the size limit. Shared between the
+  /// startup diff (seeds it) and the reconciler (clears it + emits
+  /// [SyncFileSizeUnblocked] when a blocked path is deleted or shrinks). Lives
+  /// for the engine's lifetime so the "too large" list stays consistent.
+  final Set<String> _sizeBlockedPaths = {};
 
   FileStateStore? _store;
   FugueStore? _fugueStore;
@@ -190,6 +204,20 @@ class StateSyncEngine implements ISyncEngine {
   @override
   Stream<SyncEngineEvent> get events => _eventsController.stream;
 
+  @override
+  VaultStats? statsSnapshot() {
+    final store = _store;
+    if (store == null) return null;
+    return VaultStatsUseCase(store).call();
+  }
+
+  @override
+  List<ConflictedFile> conflictSnapshot() {
+    final store = _store;
+    if (store == null) return const [];
+    return ConflictListUseCase(store).call();
+  }
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
@@ -249,6 +277,8 @@ class StateSyncEngine implements ISyncEngine {
         knownChunks: _collectKnownChunks,
         fileIdFor: _deterministicFileId,
         emit: _emit,
+        maxFileSizeBytes: _maxFileSizeBytes,
+        sizeBlocked: _sizeBlockedPaths,
         sigStore: _sigStore,
         logger: _log,
       );
@@ -284,6 +314,7 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         isFatalRejection: _rejections.isFatal,
         log: _log,
+        clientName: () => config.clientName ?? '',
       );
       _pusher = StatePusher(
         stateCaller: conn.stateCaller,
@@ -362,6 +393,7 @@ class StateSyncEngine implements ISyncEngine {
         writeClock: (_) {},
         logger: _log,
         sigStore: _sigStore,
+        maxFileSizeBytes: _maxFileSizeBytes,
         uploadConcurrency: startupUploadConcurrency,
         // Same keyed scheme for BOTH the binary upload and its change
         // detection; otherwise stored (HMAC) chunk ids never match the
@@ -394,6 +426,19 @@ class StateSyncEngine implements ISyncEngine {
         'Startup diff: ${diff.newFiles} new, ${diff.modifiedFiles} modified, ${diff.missingFileIds.length} missing',
       );
 
+      // Surface files skipped for exceeding the size limit and seed the shared
+      // blocked-set so the reconciler can later emit SyncFileSizeUnblocked when
+      // one is deleted or shrinks. Re-emitted every startup → the UI's list is
+      // rebuilt from truth rather than lost across restarts.
+      for (final b in diff.blocked) {
+        _sizeBlockedPaths.add(b.path);
+        _emit(SyncFileSizeBlocked(
+          path: b.path,
+          sizeBytes: b.sizeBytes,
+          limitBytes: b.limitBytes,
+        ));
+      }
+
       final swStartupPush = Stopwatch()..start();
       await _push();
       await _store!.persistMeta();
@@ -424,19 +469,15 @@ class StateSyncEngine implements ISyncEngine {
     } catch (e) {
       _log.error('StateSyncEngine start error: $e');
       final rejected = _rejections.fromException(e);
-      if (rejected != null) {
-        _emit(rejected);
-        // Fatal rejection (policy/auth) — tear down so we don't keep
-        // background-trying on a server state that won't change without
-        // user action. The plugin's event handler decides how to surface
-        // it (banner / re-auth modal / "configure external storage").
-        if (rejected.code.startsWith('auth.') ||
-            rejected.code.startsWith('app_policy.')) {
-          await stop();
-        }
-      } else {
-        _emit(SyncError(e.toString()));
-      }
+      _emit(rejected ?? SyncError(e.toString()));
+      // Start is atomic: on ANY failure tear down fully so the engine
+      // returns to a clean idle state. A partial start (e.g. connected +
+      // store loaded, but notify / typing / reconnect-watch never wired) is
+      // a zombie that healthCheck would still report as healthy — blocking
+      // the host's health-gated restart and leaving sync silently dead.
+      // The host decides how to surface the error (banner / re-auth modal /
+      // "configure external storage") and when to retry start().
+      await stop();
     }
   }
 
@@ -466,6 +507,12 @@ class StateSyncEngine implements ISyncEngine {
     _recordCodec = null;
     _puller = null;
     _pusher = null;
+    // Drop cipher-derived session state so the next start() re-derives it
+    // from the current cipher. Without this, swapping the cipher (vault
+    // switch / passphrase change) and restarting reuses the OLD vault's
+    // blob-id key, so recomputed blob ids diverge from what is stored.
+    _blobIdKey = null;
+    _blobIdKeyResolved = false;
     _textDebounce.cancelAll();
     _userActiveTimer?.cancel();
     _userActiveTimer = null;
@@ -615,13 +662,30 @@ class StateSyncEngine implements ISyncEngine {
 
     // Delete local files so they don't shadow what server tells us.
     final allFiles = await io.listFiles(vaultPath);
+    final failedDeletes = <String>[];
     for (final absPath in allFiles) {
       final rel = absPath.substring(vaultPath.length + 1);
       if (rel.split('/').any((s) => s.startsWith('.'))) continue;
       try {
         changeProvider.suppress(rel);
         await io.deleteFile(absPath);
-      } catch (_) {}
+      } catch (e) {
+        // A file we can't delete stays and shadows the server copy — the
+        // exact corruption the user clicked Restore to fix. Never swallow
+        // this: collect and surface it.
+        _log.warning('Restore: failed to delete local file $rel: $e');
+        failedDeletes.add(rel);
+      }
+    }
+    if (failedDeletes.isNotEmpty) {
+      _emit(
+        SyncError(
+          'Restore could not remove ${failedDeletes.length} local file(s) '
+          'that may still shadow the server copy: '
+          '${failedDeletes.take(5).join(', ')}'
+          '${failedDeletes.length > 5 ? ', …' : ''}',
+        ),
+      );
     }
     await start();
   }
@@ -1031,9 +1095,17 @@ class StateSyncEngine implements ISyncEngine {
     if (_epochRestoreInFlight) return;
     _epochRestoreInFlight = true;
     _emit(SyncVaultReset());
+    // Restore is detached on purpose: it stop()s the scheduler group this
+    // handler was invoked from (the pull task), so it cannot be awaited
+    // inline without self-cancelling. But detached means its failure would
+    // be an unobserved async error — and SyncVaultReset was already emitted,
+    // so the UI would think the reset succeeded. Observe and surface it.
     Future<void>.microtask(() async {
       try {
         await triggerRestoreFromServer();
+      } catch (e) {
+        _log.error('Epoch restore failed: $e');
+        _emit(SyncError('Vault reset/restore failed: $e'));
       } finally {
         _epochRestoreInFlight = false;
       }
@@ -1060,7 +1132,7 @@ class StateSyncEngine implements ISyncEngine {
     _notifyCoordinator = NotifyCoordinator(
       endpoint: endpoint,
       topic: 'vault:${config.vaultId}',
-      onNotify: () {
+      onNotify: (_) {
         _log.info('Notify received — triggering pull');
         triggerPull();
       },
@@ -1158,8 +1230,9 @@ class StateSyncEngine implements ISyncEngine {
     if (browser == null || remote == null) return null;
     return FileVersionViewer(
       browser: browser,
-      remoteBlobStorage: remote,
-      localBlobStore: blobStore,
+      // Assemble past versions through the chunk manifest (and, for text,
+      // project the Fugue tree) — same path the runtime write uses.
+      chunkedIOBuilder: _newChunkedIO,
       io: io,
       changeProvider: changeProvider,
       vaultPath: vaultPath,
@@ -1189,11 +1262,27 @@ class StateSyncEngine implements ISyncEngine {
     final remote = _getRemoteBlobStorage();
     final s = _store;
     if (history == null || remote == null || s == null) return null;
+    final endpoint = _conn?.endpoint;
     return BlobJanitor(
       historyCaller: history,
       blobStorage: remote,
       store: s,
       vaultId: config.vaultId,
+      maintenanceCaller:
+          endpoint != null ? VaultMaintenanceContractCaller(endpoint) : null,
+    );
+  }
+
+  /// Builds a [DeviceRegistryUseCase] wired to the current connection. UI
+  /// calls this to list/forget devices. Null when not connected.
+  DeviceRegistryUseCase? createDeviceRegistry() {
+    final history = _conn?.historyCaller;
+    final s = _store;
+    if (history == null || s == null) return null;
+    return DeviceRegistryUseCase(
+      historyCaller: history,
+      vaultId: config.vaultId,
+      thisDeviceId: s.deviceId,
     );
   }
 

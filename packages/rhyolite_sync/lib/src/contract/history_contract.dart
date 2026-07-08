@@ -213,6 +213,7 @@ class DeviceHead implements IRpcSerializable {
     required this.headSeq,
     required this.updatedAtMs,
     this.frontierPacked = '',
+    this.deviceName = '',
   });
 
   final String deviceId;
@@ -226,11 +227,18 @@ class DeviceHead implements IRpcSerializable {
   /// boundary down to nothing.
   final String frontierPacked;
 
+  /// Human-readable label the device reports (e.g. "Obsidian/desktop").
+  /// Purely cosmetic — used by the device-management UI so a user can
+  /// tell devices apart by something other than an opaque id. Empty for
+  /// legacy clients that don't report a name.
+  final String deviceName;
+
   factory DeviceHead.fromJson(Map<String, dynamic> json) => DeviceHead(
         deviceId: json['deviceId'] as String,
         headSeq: json['headSeq'] as int,
         updatedAtMs: json['updatedAtMs'] as int,
         frontierPacked: (json['frontierPacked'] as String?) ?? '',
+        deviceName: (json['deviceName'] as String?) ?? '',
       );
 
   @override
@@ -239,6 +247,7 @@ class DeviceHead implements IRpcSerializable {
         'headSeq': headSeq,
         'updatedAtMs': updatedAtMs,
         if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
+        if (deviceName.isNotEmpty) 'deviceName': deviceName,
       };
 }
 
@@ -248,6 +257,7 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
     required this.deviceId,
     required this.headSeq,
     this.frontierPacked = '',
+    this.deviceName = '',
   });
 
   final String vaultId;
@@ -260,12 +270,17 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
   /// accepted but excluded from min-aggregation.
   final String frontierPacked;
 
+  /// Human-readable device label (e.g. "Obsidian/desktop") persisted with
+  /// the head so the device-management UI can show it. Cosmetic.
+  final String deviceName;
+
   factory ReportHistoryHeadRequest.fromJson(Map<String, dynamic> json) =>
       ReportHistoryHeadRequest(
         vaultId: json['vaultId'] as String,
         deviceId: json['deviceId'] as String,
         headSeq: json['headSeq'] as int,
         frontierPacked: (json['frontierPacked'] as String?) ?? '',
+        deviceName: (json['deviceName'] as String?) ?? '',
       );
 
   @override
@@ -274,6 +289,7 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
         'deviceId': deviceId,
         'headSeq': headSeq,
         if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
+        if (deviceName.isNotEmpty) 'deviceName': deviceName,
       };
 }
 
@@ -317,6 +333,46 @@ class GetHistoryHeadsResponse implements IRpcSerializable {
 }
 
 // ---------------------------------------------------------------------------
+// FORGET DEVICE (user-triggered device management)
+// ---------------------------------------------------------------------------
+
+/// Drops a device's head record so it stops holding back cleanup. Used when
+/// the user knows a device is gone. The removed device, if it ever
+/// reconnects, simply reports a fresh head — nothing here deletes content.
+class ForgetDeviceRequest implements IRpcSerializable {
+  const ForgetDeviceRequest({required this.vaultId, required this.deviceId});
+
+  final String vaultId;
+  final String deviceId;
+
+  factory ForgetDeviceRequest.fromJson(Map<String, dynamic> json) =>
+      ForgetDeviceRequest(
+        vaultId: json['vaultId'] as String,
+        deviceId: json['deviceId'] as String,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'vaultId': vaultId,
+        'deviceId': deviceId,
+      };
+}
+
+class ForgetDeviceResponse implements IRpcSerializable {
+  const ForgetDeviceResponse({required this.removed});
+
+  /// True when a head row was actually removed (false = unknown deviceId;
+  /// idempotent, callers can re-run safely).
+  final bool removed;
+
+  factory ForgetDeviceResponse.fromJson(Map<String, dynamic> json) =>
+      ForgetDeviceResponse(removed: (json['removed'] as bool?) ?? false);
+
+  @override
+  Map<String, dynamic> toJson() => {'removed': removed};
+}
+
+// ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
 
@@ -343,6 +399,12 @@ abstract class IHistoryContract {
   @RpcMethod.unary(name: 'getHistoryHeads')
   Future<GetHistoryHeadsResponse> getHistoryHeads(
     GetHistoryHeadsRequest request, {
+    RpcContext? context,
+  });
+
+  @RpcMethod.unary(name: 'forgetDevice')
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest request, {
     RpcContext? context,
   });
 }

@@ -49,6 +49,51 @@ class SyncFilePushed extends SyncEngineEvent {
   final String path;
 }
 
+/// A file was skipped because it exceeds the plan's per-file size limit. It is
+/// not read/chunked/uploaded and stays local-only until it shrinks below the
+/// limit (or the tier's limit rises).
+class SyncFileSizeBlocked extends SyncEngineEvent {
+  SyncFileSizeBlocked({
+    required this.path,
+    required this.sizeBytes,
+    required this.limitBytes,
+  });
+
+  final String path;
+  final int sizeBytes;
+  final int limitBytes;
+}
+
+/// A previously size-blocked file is no longer blocked: it was deleted, shrank
+/// below the limit, or the tier's limit rose. Paired with [SyncFileSizeBlocked]
+/// so UI can drop it from the "too large" list instead of leaving it stuck.
+class SyncFileSizeUnblocked extends SyncEngineEvent {
+  SyncFileSizeUnblocked({required this.path});
+
+  final String path;
+}
+
+/// Live per-file blob transfer progress, for an "active transfers" monitor.
+/// Emitted as a file's content blob is uploaded or downloaded through
+/// [ChunkedBlobIO]. [sentBytes]/[totalBytes] are coarse (dedup-skipped chunks
+/// count instantly), so the bar can jump; [done] marks the transfer finished
+/// (success or failure) so the UI drops it from the active list.
+class SyncBlobTransfer extends SyncEngineEvent {
+  SyncBlobTransfer({
+    required this.path,
+    required this.upload,
+    required this.sentBytes,
+    required this.totalBytes,
+    required this.done,
+  });
+
+  final String path;
+  final bool upload;
+  final int sentBytes;
+  final int totalBytes;
+  final bool done;
+}
+
 /// Emitted immediately before the engine fires a putStates RPC.
 /// Indicator surfaces this so a hung push is visually distinguishable
 /// from idle.

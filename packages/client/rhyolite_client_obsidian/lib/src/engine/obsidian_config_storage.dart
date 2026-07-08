@@ -4,23 +4,19 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_client_account/rhyolite_client_account.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
-/// Deep-converts a JS object tree to Dart Maps/Lists.
-/// Obsidian's loadData() returns JS objects; shallow Map.from()
-/// leaves nested objects as opaque JSObjects that fail type casts.
-Map<String, dynamic> _deepConvert(Map map) {
-  final result = <String, dynamic>{};
-  for (final entry in map.entries) {
-    final key = entry.key.toString();
-    final value = entry.value;
-    if (value is Map) {
-      result[key] = _deepConvert(value);
-    } else if (value is List) {
-      result[key] = value.map((e) => e is Map ? _deepConvert(e) : e).toList();
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
+import 'data_json_writer.dart';
+
+/// Adapts the Obsidian [PluginHandle] to the testable [RawDataStore] seam.
+class _PluginRawDataStore implements RawDataStore {
+  _PluginRawDataStore(this._plugin);
+
+  final PluginHandle _plugin;
+
+  @override
+  Future<Object?> load() => _plugin.loadData();
+
+  @override
+  Future<void> save(Map<String, dynamic> data) => _plugin.saveData(data);
 }
 
 /// Account service configuration — stored in plaintext plugin data.
@@ -55,9 +51,14 @@ class AuthConfig {
 }
 
 class ObsidianConfigStorage {
-  const ObsidianConfigStorage(this._plugin);
+  ObsidianConfigStorage(this._plugin)
+      : _data = DataJsonWriter(_PluginRawDataStore(_plugin));
 
   final PluginHandle _plugin;
+
+  /// All data.json reads/writes funnel through here so concurrent writers
+  /// can't clobber each other and nested keys round-trip intact.
+  final DataJsonWriter _data;
 
   static const _configKey = 'vaultConfig';
   static const _selfHostKey = 'selfHost';
@@ -72,29 +73,39 @@ class ObsidianConfigStorage {
   // ---------------------------------------------------------------------------
 
   Future<VaultConfig?> tryLoad() async {
-    final data = await _plugin.loadData();
-    if (data == null) return null;
     try {
-      final map = data as Map<Object?, Object?>;
-      final config = map[_configKey];
+      final config = (await _data.read())[_configKey];
       if (config == null) return null;
-      return VaultConfig.fromJson(_deepConvert(config as Map));
+      // _data.read() already deep-converted, so this is a Dart map.
+      return VaultConfig.fromJson(Map<String, dynamic>.from(config as Map));
     } catch (_) {
       return null;
     }
   }
 
-  /// Attempts to unlock the vault cipher without a passphrase (remembered key).
-  /// Returns null if no key is remembered.
-  Future<VaultCipher?> tryUnlockFromStorage() async {
+  /// Attempts to unlock the vault cipher without a passphrase (remembered
+  /// key), verifying it against [verificationToken] before use. Returns null
+  /// when no valid key is stored — the caller then prompts for the passphrase.
+  ///
+  /// The keychain secret is per Obsidian vault, so this is a single key; the
+  /// verification guards the one case that key can be stale: switching the
+  /// rhyolite vault within one Obsidian vault without re-remembering. Boot
+  /// previously used the stored key blind, which would then fail to decrypt.
+  Future<VaultCipher?> tryUnlockFromStorage(String verificationToken) async {
     final rawKeyB64 = await _secrets.getSecret(_rawKeySecret);
     if (rawKeyB64 == null) return null;
+    final VaultCipher cipher;
     try {
-      return VaultCipher.fromRawKey(base64Decode(rawKeyB64));
+      cipher = VaultCipher.fromRawKey(base64Decode(rawKeyB64));
     } catch (_) {
       await _secrets.deleteSecret(_rawKeySecret);
       return null;
     }
+    if (verificationToken.isNotEmpty &&
+        !await cipher.verifyToken(verificationToken)) {
+      return null;
+    }
+    return cipher;
   }
 
   /// Enables E2EE on an existing vault (migration). Preserves vaultId and other settings.
@@ -132,12 +143,8 @@ class ObsidianConfigStorage {
   // Save
   // ---------------------------------------------------------------------------
 
-  Future<void> save(VaultConfig config) async {
-    final raw = await _plugin.loadData();
-    final map = Map<String, dynamic>.from(raw as Map? ?? {});
-    map[_configKey] = config.toJson();
-    await _plugin.saveData(map);
-  }
+  Future<void> save(VaultConfig config) =>
+      _data.update((m) => m[_configKey] = config.toJson());
 
   // ---------------------------------------------------------------------------
   // Self-host mode: point the plugin at a self-hosted sync server with a
@@ -146,15 +153,12 @@ class ObsidianConfigStorage {
   // ---------------------------------------------------------------------------
 
   Future<({bool enabled, String syncUrl})> loadSelfHost() async {
-    final data = await _plugin.loadData();
-    if (data is Map) {
-      final sh = _deepConvert(data)[_selfHostKey];
-      if (sh is Map) {
-        return (
-          enabled: sh['enabled'] == true,
-          syncUrl: (sh['syncUrl'] as String?) ?? '',
-        );
-      }
+    final sh = (await _data.read())[_selfHostKey];
+    if (sh is Map) {
+      return (
+        enabled: sh['enabled'] == true,
+        syncUrl: (sh['syncUrl'] as String?) ?? '',
+      );
     }
     return (enabled: false, syncUrl: '');
   }
@@ -162,12 +166,10 @@ class ObsidianConfigStorage {
   Future<void> saveSelfHost({
     required bool enabled,
     required String syncUrl,
-  }) async {
-    final raw = await _plugin.loadData();
-    final map = Map<String, dynamic>.from(raw as Map? ?? {});
-    map[_selfHostKey] = {'enabled': enabled, 'syncUrl': syncUrl};
-    await _plugin.saveData(map);
-  }
+  }) =>
+      _data.update(
+        (m) => m[_selfHostKey] = {'enabled': enabled, 'syncUrl': syncUrl},
+      );
 
   Future<String?> loadSelfHostToken() =>
       _secrets.getSecret(_selfHostTokenSecret);
@@ -180,12 +182,18 @@ class ObsidianConfigStorage {
 
   /// Persists the `.obsidian` settings-sync preferences under their own
   /// data.json key, preserving all other keys.
-  Future<void> saveSettingsSync(Map<String, Object?> json) async {
-    final raw = await _plugin.loadData();
-    final map = Map<String, dynamic>.from(raw as Map? ?? {});
-    map['settingsSync'] = json;
-    await _plugin.saveData(map);
-  }
+  Future<void> saveSettingsSync(Map<String, Object?> json) =>
+      _data.update((m) => m['settingsSync'] = json);
+
+  /// User-requested sync pause (from the side panel). When true, boot skips
+  /// the initial `engine.start()`; sync stays off until the user resumes.
+  /// Survives restarts. Explicit user actions (sign-in, config change) still
+  /// start the engine and are expected to clear this flag.
+  Future<bool> loadPaused() async =>
+      (await _data.read())['syncPaused'] == true;
+
+  Future<void> savePaused(bool paused) =>
+      _data.update((m) => m['syncPaused'] = paused);
 
   // ---------------------------------------------------------------------------
   // Remember passphrase
@@ -202,10 +210,7 @@ class ObsidianConfigStorage {
   /// Clears vault config and remembered key — "disconnect from vault".
   /// Auth config and session are not touched.
   Future<void> disconnectVault() async {
-    final raw = await _plugin.loadData();
-    final map = Map<String, dynamic>.from(raw as Map? ?? {});
-    map.remove(_configKey);
-    await _plugin.saveData(map);
+    await _data.update((m) => m.remove(_configKey));
     await _secrets.deleteSecret(_rawKeySecret);
   }
 

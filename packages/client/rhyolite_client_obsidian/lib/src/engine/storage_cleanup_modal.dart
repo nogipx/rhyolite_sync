@@ -1,8 +1,10 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import 'device_management_modal.dart';
+
 const _defaultDays = 30;
-const _minDays = 1;
+const _minDays = 0; // 0 = delete all history the device-safety head allows
 const _maxDays = 365;
 
 /// Storage cleanup flow: scan → confirm → delete. Implemented as two
@@ -38,15 +40,24 @@ Future<void> showStorageCleanupModal(
     return;
   }
 
-  final confirmed = await _confirmDeletion(plugin, plan);
+  final confirmed = await _confirmDeletion(plugin, engine, plan);
   if (confirmed != true) return;
 
   try {
     final result = await janitor.execute(plan);
-    showNotice(
-      'Cleanup done: ${result.deletedEvents} history entries and '
-      '${result.deletedBlobs} blobs deleted.',
-    );
+    if (result.hadFailures) {
+      showNotice(
+        'Cleanup incomplete: ${result.deletedBlobs} blobs deleted, '
+        '${result.failedBlobs} failed — history kept so a re-run can retry.'
+        '${result.firstError != null ? '\n${result.firstError}' : ''}',
+        timeoutMs: 12000,
+      );
+    } else {
+      showNotice(
+        'Cleanup done: ${result.deletedEvents} history entries and '
+        '${result.deletedBlobs} blobs deleted.',
+      );
+    }
   } catch (e) {
     showNotice('Storage cleanup failed: $e');
   }
@@ -69,7 +80,11 @@ Future<int?> _askDays(PluginHandle plugin) {
       );
       ctx.spaceVertical(px: 12);
 
-      ctx.createEl('p', text: 'Delete events older than (days):');
+      ctx.createEl(
+        'p',
+        text: 'Delete events older than (days) — use 0 to clear all history '
+            'that every active device has already synced:',
+      );
       final input = ctx.input(
         type: 'number',
         placeholder: '$_defaultDays',
@@ -97,7 +112,11 @@ Future<int?> _askDays(PluginHandle plugin) {
   );
 }
 
-Future<bool?> _confirmDeletion(PluginHandle plugin, JanitorPlan plan) {
+Future<bool?> _confirmDeletion(
+  PluginHandle plugin,
+  ISyncEngine engine,
+  JanitorPlan plan,
+) {
   return showModalWith<bool>(
     plugin,
     build: (ctx) {
@@ -196,6 +215,12 @@ Future<bool?> _confirmDeletion(PluginHandle plugin, JanitorPlan plan) {
           () => ctx.close(true),
           variant: ButtonVariant.destructive,
         ),
+        // Jump to device management to forget a stale device that's pinning
+        // events, then re-run cleanup.
+        ButtonSpec('Manage devices…', () async {
+          ctx.close(false);
+          await showDeviceManagementModal(plugin, engine);
+        }),
         ButtonSpec('Cancel', () => ctx.close(false)),
       ]);
       ctx.onEscape(() => ctx.close(false));

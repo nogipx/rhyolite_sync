@@ -68,6 +68,23 @@ class StateMergeWinnerOnlyLossy extends StateMergeOutcome {
   });
 }
 
+/// More than two concurrent values could not all be merged into one. The
+/// [winner] is the single canonical value (max-HLC) the engine materialises
+/// and seals the register with; [parts] carries one entry per non-canonical
+/// value so none is dropped — each is either a [StateMergeConflictCopy] (the
+/// engine writes the loser's content as a conflict-copy file) or a
+/// [StateMergeWinnerOnlyLossy] (the loser's bytes are unreachable and the
+/// engine surfaces an explicit data-loss event).
+///
+/// This exists because the pairwise fold that resolves N>2 values used to
+/// return on the first unmergeable pair, silently dropping every later
+/// concurrent version.
+class StateMergeMultiConflict extends StateMergeOutcome {
+  final FileState winner;
+  final List<StateMergeOutcome> parts;
+  StateMergeMultiConflict({required this.winner, required this.parts});
+}
+
 /// Strategy interface for collapsing a multi-value
 /// `MvRegister<FileState>` back to a single chosen value (doc §6).
 ///
@@ -153,12 +170,19 @@ class StateConflictResolver implements IStateConflictResolver {
     // Pairwise reduce. The fold is deterministic across replicas because
     // every replica sees the same register (CRDT) and folds in the same
     // hlc-sorted order.
+    //
+    // Unmergeable pairs do NOT stop the fold: each one's loser is collected
+    // so it can be preserved (conflict-copy or surfaced loss), and folding
+    // continues so the final `acc` is the true canonical winner across ALL
+    // values. Previously the fold returned on the first conflict, silently
+    // dropping every later concurrent version.
     final sorted = [...values]..sort((a, b) => a.hlc.compareTo(b.hlc));
     StateMergeOutcome last = StateMergeMerged(
       merged: sorted.first,
       newBlobRef: sorted.first.blobRef,
     );
     var acc = sorted.first;
+    final losers = <StateMergeOutcome>[];
     for (var i = 1; i < sorted.length; i++) {
       final outcome = await _pair(
         local: acc,
@@ -169,18 +193,43 @@ class StateConflictResolver implements IStateConflictResolver {
         case StateMergeMerged(:final merged):
           acc = merged;
           last = outcome;
-        case StateMergeConflictCopy():
-          // Stop reducing — return the conflict-copy outcome for the pair
-          // that couldn't auto-merge. (Tail values are dropped at this
-          // step; in practice N=2 is the only realistic case.)
-          return outcome;
-        case StateMergeWinnerOnlyLossy():
-          // Same idea as ConflictCopy: this pair couldn't be merged
-          // and the loser is gone. Stop reducing and surface the loss.
-          return outcome;
+        case StateMergeConflictCopy(:final winner):
+          acc = winner;
+          losers.add(outcome);
+        case StateMergeWinnerOnlyLossy(:final winner):
+          acc = winner;
+          losers.add(outcome);
+        case StateMergeMultiConflict():
+          // _pair never produces a compound outcome; unreachable.
+          break;
       }
     }
-    return last;
+
+    if (losers.isEmpty) return last;
+
+    // Exactly one conflict across the whole fold: keep the existing N=2
+    // outcome shape, but rebind the winner to the final `acc` (a later pair
+    // may have merged the winner forward).
+    if (losers.length == 1) {
+      final only = losers.first;
+      if (only is StateMergeConflictCopy) {
+        return StateMergeConflictCopy(
+          winner: acc,
+          loser: only.loser,
+          suggestedCopyPath: only.suggestedCopyPath,
+        );
+      }
+      final l = only as StateMergeWinnerOnlyLossy;
+      return StateMergeWinnerOnlyLossy(
+        winner: acc,
+        lostBlobRef: l.lostBlobRef,
+        lostHlc: l.lostHlc,
+        lostNodeId: l.lostNodeId,
+        reason: l.reason,
+      );
+    }
+
+    return StateMergeMultiConflict(winner: acc, parts: losers);
   }
 
   Future<StateMergeOutcome> _pair({

@@ -21,24 +21,24 @@ void main() {
   });
 
   group('ContentDefinedChunker', () {
-    test('empty input produces empty manifest', () {
-      final result = chunker.call(Uint8List(0));
+    test('empty input produces empty manifest', () async {
+      final result = await chunker.call(Uint8List(0));
       expect(result.manifest.chunks, isEmpty);
       expect(result.manifest.totalSize, 0);
       expect(result.chunks, isEmpty);
     });
 
-    test('data smaller than minChunkSize produces one chunk', () {
+    test('data smaller than minChunkSize produces one chunk', () async {
       final data = _randomBytes(512);
-      final result = chunker.call(data);
+      final result = await chunker.call(data);
       expect(result.manifest.chunks, hasLength(1));
       expect(result.manifest.totalSize, 512);
       expect(result.chunks.values.first, equals(data));
     });
 
-    test('all chunks are within size bounds', () {
+    test('all chunks are within size bounds', () async {
       final data = _randomBytes(256 * 1024);
-      final result = chunker.call(data);
+      final result = await chunker.call(data);
 
       for (final chunk in result.manifest.chunks) {
         // Last chunk may be smaller than min.
@@ -57,9 +57,9 @@ void main() {
       }
     });
 
-    test('chunks reassemble to original data', () {
+    test('chunks reassemble to original data', () async {
       final data = _randomBytes(200 * 1024);
-      final result = chunker.call(data);
+      final result = await chunker.call(data);
 
       final reassembled = BytesBuilder();
       for (final ref in result.manifest.chunks) {
@@ -68,9 +68,9 @@ void main() {
       expect(reassembled.toBytes(), equals(data));
     });
 
-    test('totalSize matches input size', () {
+    test('totalSize matches input size', () async {
       final data = _randomBytes(100 * 1024);
-      final result = chunker.call(data);
+      final result = await chunker.call(data);
       expect(result.manifest.totalSize, data.length);
 
       final summedSize = result.manifest.chunks.fold<int>(
@@ -80,29 +80,29 @@ void main() {
       expect(summedSize, data.length);
     });
 
-    test('chunk order is sequential starting from 0', () {
+    test('chunk order is sequential starting from 0', () async {
       final data = _randomBytes(128 * 1024);
-      final result = chunker.call(data);
+      final result = await chunker.call(data);
       for (var i = 0; i < result.manifest.chunks.length; i++) {
         expect(result.manifest.chunks[i].order, i);
       }
     });
 
-    test('identical input produces identical manifest', () {
+    test('identical input produces identical manifest', () async {
       final data = _randomBytes(64 * 1024);
-      final r1 = chunker.call(data);
-      final r2 = chunker.call(data);
+      final r1 = await chunker.call(data);
+      final r2 = await chunker.call(data);
       expect(r1.manifest, equals(r2.manifest));
     });
 
-    test('small edit only affects nearby chunks', () {
+    test('small edit only affects nearby chunks', () async {
       final data = _randomBytes(256 * 1024);
-      final r1 = chunker.call(data);
+      final r1 = await chunker.call(data);
 
       // Flip one byte in the middle.
       final modified = Uint8List.fromList(data);
       modified[128 * 1024] ^= 0xFF;
-      final r2 = chunker.call(modified);
+      final r2 = await chunker.call(modified);
 
       // Most chunks should be unchanged.
       final oldHashes = r1.manifest.chunkHashes.toSet();
@@ -119,9 +119,9 @@ void main() {
       );
     });
 
-    test('append at end only adds new chunks', () {
+    test('append at end only adds new chunks', () async {
       final data = _randomBytes(64 * 1024);
-      final r1 = chunker.call(data);
+      final r1 = await chunker.call(data);
 
       final extended = Uint8List(data.length + 32 * 1024);
       extended.setRange(0, data.length, data);
@@ -130,7 +130,7 @@ void main() {
         extended.length,
         _randomBytes(32 * 1024, 99),
       );
-      final r2 = chunker.call(extended);
+      final r2 = await chunker.call(extended);
 
       // All original chunk hashes should still be present.
       final oldHashes = r1.manifest.chunkHashes.toSet();
@@ -145,13 +145,13 @@ void main() {
       );
     });
 
-    test('manifest diff shows only changed chunks', () {
+    test('manifest diff shows only changed chunks', () async {
       final data = _randomBytes(256 * 1024);
-      final r1 = chunker.call(data);
+      final r1 = await chunker.call(data);
 
       final modified = Uint8List.fromList(data);
       modified[128 * 1024] ^= 0xFF;
-      final r2 = chunker.call(modified);
+      final r2 = await chunker.call(modified);
 
       final diff = const DiffManifestsUseCase()(
         oldManifest: r1.manifest,
@@ -169,10 +169,10 @@ void main() {
       );
     });
 
-    test('works with default production-sized parameters', () {
+    test('works with default production-sized parameters', () async {
       final prodChunker = ContentDefinedChunker();
       final data = _randomBytes(10 * 1024 * 1024); // 10MB
-      final result = prodChunker.call(data);
+      final result = await prodChunker.call(data);
 
       expect(result.manifest.chunks.length, greaterThan(1));
       expect(result.manifest.totalSize, data.length);
@@ -185,9 +185,9 @@ void main() {
       expect(reassembled.toBytes(), equals(data));
     });
 
-    test('data exactly at minChunkSize produces one chunk', () {
+    test('data exactly at minChunkSize produces one chunk', () async {
       final data = _randomBytes(chunker.minChunkSize);
-      final result = chunker.call(data);
+      final result = await chunker.call(data);
       // Could be 1 chunk (if no boundary found) or possibly more.
       // At min size, it should always be 1 chunk.
       expect(result.manifest.chunks, hasLength(1));

@@ -20,9 +20,11 @@ class _MemBlobStorage implements IBlobStorage {
   Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
       {for (final id in blobIds) if (store.containsKey(id)) id};
   final List<String> deletedLog = [];
+  bool failDelete = false;
 
   @override
   Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
+    if (failDelete) throw StateError('backend refused delete');
     deletedLog.addAll(blobIds);
     for (final id in blobIds) {
       store.remove(id);
@@ -109,6 +111,12 @@ class _FakeHistoryCaller implements IHistoryContract {
     GetHistoryHeadsRequest request, {
     RpcContext? context,
   }) async => GetHistoryHeadsResponse(heads: List.of(heads));
+
+  @override
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest request, {
+    RpcContext? context,
+  }) async => const ForgetDeviceResponse(removed: false);
 }
 
 HistoryEvent _evt({
@@ -270,8 +278,32 @@ void main() {
       },
     );
 
-    test('rejects olderThanDays < 1', () async {
-      expect(() => janitor.scan(olderThanDays: 0), throwsArgumentError);
+    test('rejects negative olderThanDays', () async {
+      expect(() => janitor.scan(olderThanDays: -1), throwsArgumentError);
+    });
+
+    test('olderThanDays: 0 deletes recent history a 30-day window would keep',
+        () async {
+      historyCaller.seed(
+        _evt(
+          id: 'yesterday',
+          fileId: 'f1',
+          blobRef: 'blob-recent',
+          hlcMs: 1,
+          createdAtMs: _daysAgoMs(1),
+        ),
+      );
+      // No active heads → nothing pins → device-safety allows deletion.
+      expect(
+        (await janitor.scan(olderThanDays: 30)).eventsToDelete,
+        0,
+        reason: 'a 1-day-old event is within a 30-day window',
+      );
+      expect(
+        (await janitor.scan(olderThanDays: 0)).eventsToDelete,
+        1,
+        reason: 'days=0 clears everything the device head allows',
+      );
     });
 
     test('isEmpty true when nothing to do', () async {
@@ -408,6 +440,31 @@ void main() {
       final result = await janitor.execute(plan);
       expect(result.deletedBlobs, 0);
       expect(result.deletedEvents, 0);
+    });
+
+    test('blob delete failure keeps events (no invisible orphans)', () async {
+      historyCaller.seed(
+        _evt(
+          id: 'old',
+          fileId: 'f1',
+          blobRef: 'blob-OLD',
+          hlcMs: 1,
+          createdAtMs: _daysAgoMs(60),
+        ),
+      );
+      blobs.store['blob-OLD'] = Uint8List.fromList([1, 2, 3]);
+      blobs.failDelete = true;
+
+      final plan = await janitor.scan(olderThanDays: 30);
+      final result = await janitor.execute(plan);
+
+      expect(result.failedBlobs, greaterThan(0));
+      expect(result.hadFailures, isTrue);
+      expect(result.deletedEvents, 0,
+          reason: 'events must NOT be deleted while their blobs remain — '
+              'that would strand the blob as an unfindable orphan');
+      expect(historyCaller.deletedEventIds, isEmpty);
+      expect(historyCaller.events, isNotEmpty, reason: 'event kept for retry');
     });
   });
 }

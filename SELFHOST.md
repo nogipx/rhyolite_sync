@@ -9,25 +9,6 @@ the **self-host server**, and the **Obsidian client**. The managed multi-tenant
 server, account/billing server, and promo server are proprietary and not
 included here.
 
-## Repository layout
-
-```
-packages/
-  rhyolite_sync/                       # Δ-state CRDT sync engine (pure Dart)
-  rhyolite_sync_server/                # pure sync responders (policy-free)
-  server/
-    rhyolite_sync_server_runtime/      # shared server composition (Postgres/MinIO/WS)
-    rhyolite_sync_server_selfhost/     # self-host edition entry point
-    rhyolite_observability/            # OpenTelemetry helpers
-  client/
-    rhyolite_client_obsidian/          # Obsidian plugin
-    rhyolite_client_account/           # auth / subscription client contracts
-    rpc_promo/                         # promo-code client contracts
-docker-compose.yml                     # self-host stack (server + Postgres + MinIO + Caddy)
-Caddyfile                              # TLS termination for wss://
-.env.example
-```
-
 ## Self-host the server
 
 The server image is prebuilt and pulled from GHCR — nothing compiles locally.

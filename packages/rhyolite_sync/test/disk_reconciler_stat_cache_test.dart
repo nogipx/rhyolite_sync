@@ -219,7 +219,6 @@ void main() {
       f.io.mtimes['$_vaultPath/note.md'] = 1;
 
       await f.reconciler.reconcileWithDisk('note.md');
-      final firstUploads = f.remote.uploads;
 
       // Same size but new mtime (mimics a touch that rewrote identical
       // content — rare but possible with editors that "save unchanged").

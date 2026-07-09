@@ -392,7 +392,7 @@ class RemoteApplier {
     // deterministic line-union VIEW over the retained multi-value register.
     // The register is NOT collapsed: it stays a CRDT MV-register and
     // converges; the union is its single-file projection.
-    if (sequences.length >= 2 && !_sharesGenuineHistory(sequences)) {
+    if (sequences.length >= 2 && !sharesGenuineHistory(sequences)) {
       final union = deterministicLineUnion([
         for (final s in sequences) s.values.join(),
       ]);
@@ -465,7 +465,12 @@ class RemoteApplier {
   /// concurrent delete-vs-keep on the same dot (same char) is NOT a false
   /// conflict. Returns false when there is no overlap at all (disjoint trees →
   /// also no shared history).
-  static bool _sharesGenuineHistory(List<Fugue<String>> seqs) {
+  ///
+  /// Package-public (not `_`-prefixed) so the invariant it guards — two
+  /// independently-seeded divergent versions must NOT be char-joined — is
+  /// unit-testable directly; it is otherwise an internal detail of the
+  /// text-conflict resolver.
+  static bool sharesGenuineHistory(List<Fugue<String>> seqs) {
     final seen = <Dot, String>{};
     var overlap = false;
     for (final seq in seqs) {

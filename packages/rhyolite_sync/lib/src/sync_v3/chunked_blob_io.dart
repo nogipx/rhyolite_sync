@@ -165,6 +165,12 @@ class ChunkedBlobIO {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
     var manifestPlain = await blobStore.read(manifestHash, vaultId: vaultId);
+    // A cached manifest that no longer content-addresses to its id is corrupt
+    // (bit-rot; the plain-byte cache has no MAC). Evict it and re-fetch.
+    if (manifestPlain != null && _hasher(manifestPlain) != manifestHash) {
+      await blobStore.deleteBlobs([manifestHash], vaultId: vaultId);
+      manifestPlain = null;
+    }
     if (manifestPlain == null) {
       final got = await remoteBlobStorage.download(
         [manifestHash],
@@ -172,6 +178,9 @@ class ChunkedBlobIO {
       );
       manifestPlain = got[manifestHash];
       if (manifestPlain == null) return null;
+      // A backend that returns the wrong bytes for a content-addressed id is
+      // corrupt or hostile — reject rather than parse garbage as a manifest.
+      if (_hasher(manifestPlain) != manifestHash) return null;
       await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
     }
 
@@ -191,13 +200,27 @@ class ChunkedBlobIO {
     final cached = <String, Uint8List>{};
     final missing = <String>[];
     var localBytes = 0;
+    var verifiedSinceYield = 0;
     for (final ref in chunkRefs) {
       final bytes = await blobStore.read(ref.hash, vaultId: vaultId);
-      if (bytes != null) {
+      // Verify every cached chunk against its content-address. The local cache
+      // holds PLAIN bytes, so the E2EE MAC never covers it — a bit-rotted entry
+      // would otherwise be assembled into the file silently. A mismatch is
+      // treated as a miss: evict the bad copy so the re-download below heals it.
+      if (bytes != null && _hasher(bytes) == ref.hash) {
         cached[ref.hash] = bytes;
         localBytes += ref.size;
       } else {
+        if (bytes != null) {
+          await blobStore.deleteBlobs([ref.hash], vaultId: vaultId);
+        }
         missing.add(ref.hash);
+      }
+      // Hashing every chunk is O(bytes); yield periodically so a many-chunk
+      // download doesn't pin the dart2js main thread (mirrors the chunker).
+      if (++verifiedSinceYield >= 16) {
+        verifiedSinceYield = 0;
+        await Future<void>.delayed(Duration.zero);
       }
     }
     // Chunks already in the local cache count instantly; fetch the rest in
@@ -217,6 +240,11 @@ class ChunkedBlobIO {
           context: context,
         );
         for (final entry in downloaded.entries) {
+          // Verify the fetched chunk against the id we asked for. A mismatch
+          // means the backend returned the wrong bytes — drop it (leaving the
+          // chunk absent, so assembly returns null) instead of caching and
+          // assembling corruption.
+          if (_hasher(entry.value) != entry.key) continue;
           cached[entry.key] = entry.value;
           await blobStore.write(entry.value, entry.key, vaultId: vaultId);
           localBytes += sizeOf[entry.key] ?? entry.value.length;

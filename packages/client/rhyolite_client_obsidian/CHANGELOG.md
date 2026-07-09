@@ -1,3 +1,10 @@
+## [3.1.2] - 2026-07-09
+
+### Fixed
+
+- Downloaded file data is now verified against its content hash before it is written, so a corrupted download or a damaged local cache can no longer silently corrupt a note — the affected file is re-fetched and repairs itself automatically (core).
+
+
 ## [3.1.1] - 2026-07-08
 
 ### Changed

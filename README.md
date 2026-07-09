@@ -2,7 +2,7 @@
 
 Syncs your vault across devices using end-to-end encryption.
 
-[Telegram](https://t.me/rhyolite_sync) • [Site](https://rhyolite.nogipx.ru)
+[Telegram](https://t.me/rhyolite_sync) • [Site](https://rhyolite.nogipx.dev)
 
 > **An account is required for full access.**
 > **Payment is required for full access** (subscription).

@@ -16,10 +16,14 @@ import 'canonical_json.dart';
 ///   *different* leaves both survive.
 /// - [orSet] — an unordered set of strings (enabled plugins / snippets).
 ///   Concurrent enables on different devices both survive.
-/// - [wholeFile] — an opaque blob merged last-write-wins
-///   (theme/snippet CSS, plugin `data.json` whose schema we do not know and
-///   must never field-merge).
-enum SettingsCrdtKind { fieldMap, orSet, wholeFile }
+/// - [wholeFile] — an opaque blob merged last-write-wins (theme/snippet CSS,
+///   whose exact bytes are meaningful and must not be normalized).
+/// - [jsonWholeFile] — a JSON file whose schema we do not field-merge (plugin
+///   `data.json`) but which we store in CANONICAL form (keys sorted, whitespace
+///   normalized). Unlike [wholeFile] this ignores formatting + key order, so
+///   Obsidian re-serializing a data.json (insertion order, platform-dependent
+///   indentation) is a no-op instead of a phantom change.
+enum SettingsCrdtKind { fieldMap, orSet, wholeFile, jsonWholeFile }
 
 /// Bytes <-> convergent CRDT state for one resource kind, plus the
 /// snapshot-diffing that turns a freshly-read file into CRDT mutations.
@@ -37,6 +41,8 @@ abstract class ResourceCrdtCodec {
         return const OrSetResourceCodec();
       case SettingsCrdtKind.wholeFile:
         return const WholeFileCodec();
+      case SettingsCrdtKind.jsonWholeFile:
+        return const JsonWholeFileCodec();
     }
   }
 
@@ -285,5 +291,65 @@ class WholeFileCodec extends ResourceCrdtCodec {
     final value = reg.value;
     if (reg.isEmpty || value == null) return Uint8List(0);
     return base64Decode(value as String);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// jsonWholeFile: LwwRegister<canonical JSON text>
+// ---------------------------------------------------------------------------
+
+/// Last-write-wins over a JSON file's CANONICAL form (keys sorted recursively,
+/// whitespace normalized). For JSON configs we don't field-merge (plugin
+/// `data.json`). Storing the canonical text means two devices that produce the
+/// same value in different formats (insertion order, indentation, platform)
+/// converge on identical CRDT state — no format/reorder churn, and no LWW
+/// flip-flop between equivalent renderings.
+class JsonWholeFileCodec extends ResourceCrdtCodec {
+  const JsonWholeFileCodec();
+
+  static final _codec = LwwRegisterCodec<Object?>(const JsonCodec<Object?>());
+
+  LwwRegister<Object?> _cast(Object s) => s as LwwRegister<Object?>;
+
+  @override
+  Object emptyState() => LwwRegister<Object?>.empty();
+
+  @override
+  Object decodeState(Object? json) => _codec.decode(json);
+
+  @override
+  Object? encodeState(Object state) => _codec.encode(_cast(state));
+
+  @override
+  Object joinStates(Object a, Object b) => _cast(a).join(_cast(b));
+
+  @override
+  Object diffApply(Object state, Uint8List newFileBytes, Hlc Function() tick) {
+    final reg = _cast(state);
+    final String canon;
+    try {
+      canon = canonicalJson(jsonDecode(utf8.decode(newFileBytes)));
+    } catch (_) {
+      // Not valid JSON (e.g. a transient half-write) — leave the CRDT untouched
+      // rather than pushing garbage; a later scan of the valid file wins.
+      return reg;
+    }
+    if (reg.value == canon) return reg;
+    var ctx = const CausalContext.empty();
+    for (final tv in reg.inner.values) {
+      ctx = ctx.advance(tv.hlc);
+    }
+    return reg.set(canon, tick(), ctx);
+  }
+
+  @override
+  Uint8List renderState(Object state) {
+    final reg = _cast(state);
+    final value = reg.value;
+    if (reg.isEmpty || value is! String || value.isEmpty) return Uint8List(0);
+    // Value is already canonical JSON text. Obsidian re-pretties it on its next
+    // save; diskMatchesRendered (canonical compare) keeps us from overwriting an
+    // equivalent on-disk copy in the meantime.
+    return Uint8List.fromList(utf8.encode(value));
   }
 }

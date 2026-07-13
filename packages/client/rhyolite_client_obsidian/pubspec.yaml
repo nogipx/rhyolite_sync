@@ -1,6 +1,6 @@
 name: rhyolite_client_obsidian
 description: Obsidian plugin implementation for rhyolite_sync.
-version: 3.1.2
+version: 3.2.0
 publish_to: none
 
 resolution: workspace
@@ -19,7 +19,6 @@ dependencies:
   rpc_dart_compression: any
   rpc_data: any
   rpc_data_sqlite: any
-  rpc_promo: any
   rpc_blob: any
   rpc_blob_sqlite: any
 

@@ -166,6 +166,28 @@ class UpdateVaultMetaResponse implements IRpcSerializable {
   Map<String, dynamic> toJson() => const {};
 }
 
+class DeleteVaultRequest implements IRpcSerializable {
+  const DeleteVaultRequest({required this.vaultId});
+
+  final String vaultId;
+
+  factory DeleteVaultRequest.fromJson(Map<String, dynamic> json) =>
+      DeleteVaultRequest(vaultId: json['vault_id'] as String);
+
+  @override
+  Map<String, dynamic> toJson() => {'vault_id': vaultId};
+}
+
+class DeleteVaultResponse implements IRpcSerializable {
+  const DeleteVaultResponse();
+
+  factory DeleteVaultResponse.fromJson(Map<String, dynamic> _) =>
+      const DeleteVaultResponse();
+
+  @override
+  Map<String, dynamic> toJson() => const {};
+}
+
 // --- Contract ---
 
 /// Vault management contract — JWT required.
@@ -192,6 +214,16 @@ abstract class IVaultContract {
   @RpcMethod.unary(name: 'updateVaultMeta')
   Future<UpdateVaultMetaResponse> updateVaultMeta(
     UpdateVaultMetaRequest request, {
+    RpcContext? context,
+  });
+
+  /// Removes the vault registration from the account. Called last in the
+  /// delete flow, after the vault's data (states, blobs, history) has been
+  /// wiped from the sync server and any external blob storage — while the
+  /// registration exists the vault is still considered live.
+  @RpcMethod.unary(name: 'deleteVault')
+  Future<DeleteVaultResponse> deleteVault(
+    DeleteVaultRequest request, {
     RpcContext? context,
   });
 }

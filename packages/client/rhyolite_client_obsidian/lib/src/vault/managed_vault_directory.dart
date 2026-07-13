@@ -44,5 +44,9 @@ class ManagedVaultDirectory implements IVaultDirectory {
       );
 
   @override
+  Future<void> deleteVault({required String vaultId}) =>
+      _client.deleteVault(vaultId: vaultId);
+
+  @override
   IVaultMetaStorage get metaStorage => AccountVaultMetaStorage(_client);
 }

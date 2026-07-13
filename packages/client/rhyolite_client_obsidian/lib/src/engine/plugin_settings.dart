@@ -1,20 +1,21 @@
+// ignore_for_file: deprecated_member_use
+import 'dart:js_util' as jsu;
+
 import 'package:obsidian_dart/obsidian_dart.dart';
-import 'package:rhyolite_client_account/rhyolite_client_account.dart';
-import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:rhyolite_client_account/rhyolite_client_account.dart'
+    hide VaultInfo;
 import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
 import 'package:rhyolite_client_obsidian/src/vault/managed_vault_directory.dart';
 import 'package:rhyolite_client_obsidian/src/vault/vault_directory.dart';
-
-import 'db_recovery.dart';
-import 'self_host_modal.dart';
+import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:uuid/uuid.dart';
 
 import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
+import 'db_recovery.dart';
 import 'modal_lock.dart';
 import 'obsidian_config_storage.dart';
-import 'payment_modal.dart';
-import 'sign_in_modal.dart';
-import 'sign_up_modal.dart';
+import 'self_host_modal.dart';
 
 /// Registers the settings tab. The tab rebuilds its UI on every open so that
 /// auth and vault state are always up to date.
@@ -30,12 +31,19 @@ void Function() registerSettingsTab({
   required RpcAccountClient accountClient,
   required Future<({int usedBytes, int quotaBytes})?> Function() onFetchUsage,
   required void Function(String url) openUrl,
+  // Public site base URL. Browser-auth ("Sign in") opens
+  // `$authWebUrl/auth?client=plugin` and the site redirects back via the
+  // obsidian://rhyolite-auth protocol handler.
+  required String authWebUrl,
   required void Function(VaultConfig updated) onConfigChanged,
   required void Function(AuthConfig updated, RpcAccountClient client)
   onAuthChanged,
   required void Function() onSignOut,
   required void Function() onDisconnectVault,
   required void Function(VaultConfig config, VaultCipher cipher) onVaultChanged,
+  // Permanently delete a vault's server data + registration. Shown as a
+  // per-vault "Delete" button in the vault picker.
+  required Future<void> Function(VaultInfo vault) onDeleteVault,
   required void Function() onSubscribed,
   required Future<void> Function() onResetVault,
   required Future<void> Function() onRestoreFromServer,
@@ -64,11 +72,62 @@ void Function() registerSettingsTab({
   // VPS + cheap external blobs is a real win). On managed it's a Pro-tier
   // feature: hidden for free (no capability), set from plan caps on display.
   var externalStorageAllowed = selfHostEnabled;
+  // Owned-vault cap from the plan (managed only). null = no cap (self-host /
+  // not yet fetched). Refreshed from getSubscription in buildAsync and passed
+  // to the vault picker so a user at their limit isn't offered "+ Create".
+  int? maxVaultCount;
   // Open/closed state of the collapsed settings-sync block; survives the tab
   // rebuilds that every toggle triggers.
   var settingsSyncExpanded = false;
 
   late PluginSettingsTab tab;
+
+  // ---- Browser-auth (single sign-in method) --------------------------------
+  // "Sign in" opens the web login; once authenticated the site redirects back
+  // to obsidian://rhyolite-auth?code=...&state=.... We match the state nonce,
+  // redeem the one-time code for a session, and light auth up exactly like a
+  // modal sign-in did. The web/Telegram surface is only the channel — the
+  // session belongs to the email account the code is bound to.
+  String? pendingAuthState;
+
+  void beginBrowserAuth() {
+    final state = const Uuid().v4();
+    pendingAuthState = state;
+    openUrl(
+      '$authWebUrl/auth?client=plugin&state=${Uri.encodeComponent(state)}',
+    );
+  }
+
+  // Shared tail for every sign-in path (browser callback + hidden code modal):
+  // the account client already holds a live session here — persist it, adopt
+  // it, notify the engine, re-render.
+  Future<void> applySignedIn() async {
+    final session = accountClient.session;
+    if (session != null) {
+      await configStorage.saveAuthSession(session);
+    }
+    currentAuthClient = accountClient;
+    onAuthChanged(currentAuthConfig, accountClient);
+    tab.show();
+  }
+
+  // Open the site's account page already signed in as the current user: mint a
+  // one-time code and hand it to /auth/web, which sets the web session and
+  // lands on /account. Subscription purchase + management live on the site's
+  // proven flow, so the plugin just does this handoff.
+  Future<void> openAccountOnSite() async {
+    final client = currentAuthClient;
+    if (client == null) return;
+    try {
+      final code = await client.issueSessionLoginCode();
+      openUrl(
+        '$authWebUrl/auth/web?code=${Uri.encodeComponent(code)}'
+        '&next=${Uri.encodeComponent('/account')}',
+      );
+    } catch (e) {
+      showNotice('Could not open the account page: $e');
+    }
+  }
 
   void build(PluginSettingsTab t) {
     void addSignOutButton(PluginSettingsTab t, String userEmail) => t.addButton(
@@ -204,7 +263,13 @@ void Function() registerSettingsTab({
         if (currentConfig.vaultId.isNotEmpty) return;
 
         final result = await withModalLock(
-          () => showVaultPickerModal(plugin, dir!, configStorage),
+          () => showVaultPickerModal(
+            plugin,
+            dir!,
+            configStorage,
+            onDeleteVault: onDeleteVault,
+            maxVaultCount: selfHostEnabled ? null : maxVaultCount,
+          ),
         );
         if (result != null) {
           currentConfig = result.$1;
@@ -236,63 +301,21 @@ void Function() registerSettingsTab({
       );
     }
 
-    void addSignInButton(PluginSettingsTab t) => t.addButton(
+    // Single sign-in entry point: hand off to the web login and let the site
+    // redirect back through the obsidian://rhyolite-auth protocol handler.
+    // Both sign-in and account creation happen in the browser, so there is no
+    // in-plugin email/password form to maintain (RF law also bars the site
+    // from acting as anything but our own email/password authorizer).
+    void addBrowserSignInButton(PluginSettingsTab t) => t.addButton(
       name: 'Sign in',
-      description: 'Sign in to Supabase to enable authenticated sync.',
+      description:
+          'Sign in or create an account in your browser. Rhyolite opens the '
+          'web login and brings you back here automatically.',
       buttonText: 'Sign In',
       primary: true,
-      onClick: () async {
+      onClick: () {
         if (!currentAuthConfig.isConfigured) return;
-        final client = await withModalLock(
-          () => showSignInModal(plugin, client: accountClient),
-        );
-        if (client == null) return;
-        final session = client.session;
-        if (session != null) {
-          await configStorage.saveAuthSession(session);
-        }
-        currentAuthClient = client;
-        onAuthChanged(currentAuthConfig, client);
-        tab.show();
-      },
-    );
-
-    void addSignUpButton(PluginSettingsTab t) => t.addButton(
-      name: 'Create account',
-      description: 'New to Rhyolite Sync? Create a free account.',
-      buttonText: 'Create Account',
-      onClick: () async {
-        if (!currentAuthConfig.isConfigured) return;
-        final result = await withModalLock(
-          () => showSignUpModal(plugin, client: accountClient),
-        );
-        if (result == null) return;
-        if (result.emailConfirmationRequired) {
-          await showModalWith<void>(
-            plugin,
-            build: (ctx) {
-              ctx.h3('Check your email');
-              ctx.spaceVertical(px: 12);
-              ctx.createEl(
-                'p',
-                text:
-                    'A confirmation link has been sent to your email address. '
-                    'Please confirm it and then sign in.',
-              );
-              ctx.spaceVertical(px: 16);
-              ctx.buttonRow([ButtonSpec('OK', () => ctx.close(null))]);
-            },
-          );
-          return;
-        }
-        final client = result.client!;
-        final session = client.session;
-        if (session != null) {
-          await configStorage.saveAuthSession(session);
-        }
-        currentAuthClient = client;
-        onAuthChanged(currentAuthConfig, client);
-        tab.show();
+        beginBrowserAuth();
       },
     );
 
@@ -306,23 +329,21 @@ void Function() registerSettingsTab({
           s.setName('Active until $day.$month.$year');
           s.setDesc('Your subscription is active.');
         });
+        t.addButton(
+          name: 'Manage subscription',
+          description: 'Open your account page in the browser (signed in).',
+          buttonText: 'Manage on site',
+          onClick: openAccountOnSite,
+        );
       } else {
         t.addButton(
           name: 'Subscribe',
-          description: 'Sync across all your devices.',
+          description:
+              'Subscribe on the site to sync across all your devices. '
+              'Opens your account page in the browser, already signed in.',
           buttonText: 'Subscribe',
-          onClick: () async {
-            final client = currentAuthClient;
-            if (client == null) return;
-            final paid = await showPaymentModal(
-              plugin,
-              authClient: client,
-              openUrl: openUrl,
-            );
-            if (paid) {
-              onSubscribed();
-            }
-          },
+          primary: true,
+          onClick: openAccountOnSite,
         );
         t.addButton(
           name: 'Already paid?',
@@ -379,8 +400,7 @@ void Function() registerSettingsTab({
         }
         addSubscriptionSection(t, subscriptionEnd);
       } else {
-        addSignInButton(t);
-        addSignUpButton(t);
+        addBrowserSignInButton(t);
       }
     }
 
@@ -468,7 +488,9 @@ void Function() registerSettingsTab({
           if (!confirmed) return;
           try {
             await onRestoreSettings();
-            showNotice('Settings download finished — restart Obsidian to apply.');
+            showNotice(
+              'Settings download finished — restart Obsidian to apply.',
+            );
           } catch (e) {
             showNotice('Settings download failed: $e');
           }
@@ -482,6 +504,7 @@ void Function() registerSettingsTab({
     DateTime? fetched;
     // Self-host always allows BYO; on managed it's gated on the plan caps.
     var fetchedExternalAllowed = selfHostEnabled;
+    int? fetchedMaxVaultCount;
     if (client != null && client.isSignedIn) {
       // One getSubscription call yields both the period end and the plan
       // capabilities.
@@ -492,10 +515,13 @@ void Function() registerSettingsTab({
                 sub.currentPeriodEnd! * 1000,
               ).toLocal()
             : null;
-        fetchedExternalAllowed = sub.capabilities?.canUseExternalStorage ?? false;
+        fetchedExternalAllowed =
+            sub.capabilities?.canUseExternalStorage ?? false;
+        fetchedMaxVaultCount = sub.capabilities?.maxVaultCount;
       } catch (_) {
         fetched = null;
         fetchedExternalAllowed = false;
+        fetchedMaxVaultCount = null;
       }
     }
 
@@ -505,12 +531,14 @@ void Function() registerSettingsTab({
       fetchedUsage = await onFetchUsage();
     }
 
-    final needsRefresh = fetched != subscriptionEnd ||
+    final needsRefresh =
+        fetched != subscriptionEnd ||
         fetchedUsage != vaultUsage ||
         fetchedExternalAllowed != externalStorageAllowed;
     subscriptionEnd = fetched;
     vaultUsage = fetchedUsage;
     externalStorageAllowed = fetchedExternalAllowed;
+    maxVaultCount = fetchedMaxVaultCount;
     if (needsRefresh) {
       tab.show();
     }
@@ -524,6 +552,39 @@ void Function() registerSettingsTab({
   );
   build(tab); // initial sync build
   plugin.addSettingTab(tab.handle.raw);
+
+  // Managed edition only: self-host has no account service, so browser-auth
+  // and the code fallback don't apply. Registered once here (registerSettingsTab
+  // runs once per plugin load); Obsidian clears both on unload.
+  if (!selfHostEnabled) {
+    // Web login redirects the browser to obsidian://rhyolite-auth?code=...&state=...
+    // which Obsidian dispatches here. Validate the state we minted, redeem the
+    // one-time code for a session, and sign in.
+    jsu.callMethod<void>(plugin.raw, 'registerObsidianProtocolHandler', [
+      'rhyolite-auth',
+      jsu.allowInterop((params) {
+        final code = (jsu.getProperty<String?>(params, 'code') ?? '').trim();
+        final state = jsu.getProperty<String?>(params, 'state') ?? '';
+        if (code.isEmpty) {
+          return;
+        }
+        if (pendingAuthState == null || state != pendingAuthState) {
+          showNotice('This sign-in link is not for this device. Try again.');
+          return;
+        }
+        pendingAuthState = null;
+        () async {
+          try {
+            await accountClient.redeemLoginCode(code);
+            await applySignedIn();
+            showNotice('Signed in');
+          } catch (e) {
+            showNotice('Sign-in failed: $e');
+          }
+        }();
+      }),
+    ]);
+  }
 
   return tab.show; // caller can trigger a refresh
 }

@@ -17,12 +17,15 @@ class VaultRegistryContractNames {
   static const updateVerificationToken = 'updateVerificationToken';
   static const getVaultMeta = 'getVaultMeta';
   static const setVaultMeta = 'setVaultMeta';
+  static const deleteVault = 'deleteVault';
 }
 
 class VaultRegistryContractCodecs {
   const VaultRegistryContractCodecs._();
   static const codecCreateVaultRequest =
       RpcCodec<CreateVaultRequest>.withDecoder(CreateVaultRequest.fromJson);
+  static const codecDeleteVaultRequest =
+      RpcCodec<DeleteVaultRequest>.withDecoder(DeleteVaultRequest.fromJson);
   static const codecListVaultsRequest = RpcCodec<ListVaultsRequest>.withDecoder(
     ListVaultsRequest.fromJson,
   );
@@ -128,6 +131,20 @@ class VaultRegistryContractCaller extends RpcCallerContract
       context: context,
     );
   }
+
+  @override
+  Future<VaultAck> deleteVault(
+    DeleteVaultRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<DeleteVaultRequest, VaultAck>(
+      methodName: VaultRegistryContractNames.deleteVault,
+      requestCodec: VaultRegistryContractCodecs.codecDeleteVaultRequest,
+      responseCodec: VaultRegistryContractCodecs.codecVaultAck,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class VaultRegistryContractResponder extends RpcResponderContract
@@ -170,6 +187,12 @@ abstract class VaultRegistryContractResponder extends RpcResponderContract
       methodName: VaultRegistryContractNames.setVaultMeta,
       handler: setVaultMeta,
       requestCodec: VaultRegistryContractCodecs.codecSetVaultMetaRequest,
+      responseCodec: VaultRegistryContractCodecs.codecVaultAck,
+    );
+    addUnaryMethod<DeleteVaultRequest, VaultAck>(
+      methodName: VaultRegistryContractNames.deleteVault,
+      handler: deleteVault,
+      requestCodec: VaultRegistryContractCodecs.codecDeleteVaultRequest,
       responseCodec: VaultRegistryContractCodecs.codecVaultAck,
     );
   }

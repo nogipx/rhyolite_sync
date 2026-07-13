@@ -5,7 +5,8 @@ import 'dart:js_interop';
 import 'dart:js_util' as jsu;
 
 import 'package:obsidian_dart/obsidian_dart.dart';
-import 'package:rhyolite_client_account/rhyolite_client_account.dart';
+import 'package:rhyolite_client_account/rhyolite_client_account.dart'
+    hide VaultInfo;
 import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
@@ -15,7 +16,6 @@ import 'package:rhyolite_client_obsidian/src/engine/modal_lock.dart';
 import 'package:rhyolite_client_obsidian/src/engine/orphan_sweep_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/self_host_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/server_rejections.dart';
-import 'package:rhyolite_client_obsidian/src/engine/sign_in_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_cleanup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_overview_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_panel.dart';
@@ -132,6 +132,56 @@ Future<void> _scheduleBoot(Future<void> Function() body) {
 /// instance first. No-op when disabled, before the engine has an endpoint, or
 /// before a vault key is available. The config caller reuses the engine's live
 /// connection via a distinct service name.
+/// Debounce for the "settings changed — reload" prompt: a burst of synced
+/// resources coalesces into a single notice.
+Timer? _settingsReloadDebounce;
+
+void _scheduleSettingsReloadNotice(PluginHandle plugin) {
+  _settingsReloadDebounce?.cancel();
+  _settingsReloadDebounce = Timer(const Duration(seconds: 3), () {
+    _showReloadNotice(
+      plugin,
+      'Settings synced from another device. Reload to apply them.',
+    );
+  });
+}
+
+/// Persistent notice with a clickable "Reload" that runs Obsidian's reload
+/// command. Falls back to a plain notice if the DOM/command wiring is
+/// unavailable (e.g. mobile has no app:reload).
+void _showReloadNotice(PluginHandle plugin, String message) {
+  try {
+    final obsidian = jsu.callMethod<Object?>(
+      jsu.globalThis,
+      'require',
+      ['obsidian'],
+    );
+    final noticeCtor = jsu.getProperty<Object?>(obsidian!, 'Notice');
+    // timeout 0 = stays until dismissed or the app reloads.
+    final notice = jsu.callConstructor<Object?>(noticeCtor!, [message, 0])!;
+    final el = jsu.getProperty<Object?>(notice, 'noticeEl');
+    if (el == null) return;
+    final btn = jsu.callMethod<Object?>(
+      el,
+      'createEl',
+      ['button', jsu.jsify({'text': ' Reload', 'cls': 'mod-cta'})],
+    )!;
+    jsu.setProperty(btn, 'style', 'margin-left: 8px;');
+    jsu.callMethod<void>(btn, 'addEventListener', [
+      'click',
+      jsu.allowInterop((_) {
+        final commands = jsu.getProperty<Object?>(plugin.app.raw, 'commands');
+        if (commands != null) {
+          jsu.callMethod<void>(commands, 'executeCommandById', ['app:reload']);
+        }
+        jsu.callMethod<void>(notice, 'hide', []);
+      }),
+    ]);
+  } catch (_) {
+    showNotice(message);
+  }
+}
+
 Future<void> _launchConfigSync({
   required ISyncEngine engine,
   required IDataClient dataClient,
@@ -166,6 +216,10 @@ Future<void> _launchConfigSync({
     notifyEndpoint: endpoint,
     notifyTopic: 'vault:${vaultId}_config',
     onActivity: (active) => _syncIndicator?.setSettingsActivity(active),
+    // Obsidian doesn't hot-apply config files from disk, so a settings change
+    // synced from another device lands on disk but isn't live until a reload.
+    // Prompt one (debounced, one notice per burst).
+    onRemoteApplied: () => _scheduleSettingsReloadNotice(plugin),
     log: _log.info,
     // Share the note engine's connection-fair scheduler: settings sync runs
     // as low-priority background work that yields to interactive note sync
@@ -196,6 +250,30 @@ void _stopConfigSync() {
 void _setEngineAuth(ISyncEngine engine, RpcAccountClient? client) {
   if (engine is! StateSyncEngine) return;
   engine.metaStorage = client != null ? AccountVaultMetaStorage(client) : null;
+}
+
+/// Opens [url] in the user's real system browser, not Obsidian's in-app Web
+/// Viewer. Browser-auth depends on this: the site's `obsidian://rhyolite-auth`
+/// callback only reaches the protocol handler when login happens in the
+/// external browser — inside the in-app WebView the redirect is swallowed and
+/// Electron throws a detached-webview error ("getWebContentsId"). Uses
+/// Electron's `shell.openExternal` on desktop, falling back to `window.open`
+/// on mobile (no Electron), where that already opens the system browser.
+void _openExternalUrl(String url) {
+  try {
+    final electron =
+        jsu.callMethod<Object?>(jsu.globalThis, 'require', ['electron']);
+    if (electron != null) {
+      final shell = jsu.getProperty<Object?>(electron, 'shell');
+      if (shell != null) {
+        jsu.callMethod<void>(shell, 'openExternal', [url]);
+        return;
+      }
+    }
+  } catch (_) {
+    // No Electron (mobile) or require unavailable — fall through.
+  }
+  jsu.callMethod<void>(jsu.globalThis, 'open', [url]);
 }
 
 /// Returns true if [error] indicates a corrupted or incompatible SQLite database.
@@ -664,6 +742,55 @@ void main() {
             if (e is SyncConnected) _configSync?.handleReconnect();
           });
 
+          // Permanently delete a vault: wipe its data from the sync server
+          // (states, blobs, history), then remove the registration (last).
+          // The account/self-host token authorizes wiping any of the user's
+          // own vaults, so a short-lived connection works from the picker even
+          // with no vault connected. Local note files on disk are never
+          // touched; external (BYO) blobs stay in the user's own bucket (the
+          // confirmation warns to clear it separately).
+          Future<void> deleteVaultClosure(VaultInfo vault) async {
+            final dir = directory;
+            final tp = sessionTokenProvider;
+            if (dir == null || tp == null) {
+              throw StateError('Not signed in — cannot delete a vault.');
+            }
+            final vaultId = vault.vaultId;
+
+            final conn = WebSocketSyncConnection(
+              serverUrl: syncServerUrl,
+              tokenProvider: tp,
+              logger: _logController.scope('delete'),
+            );
+            try {
+              await conn.connect().timeout(const Duration(seconds: 15));
+              await conn.stateCaller.wipeVault(
+                StateWipeRequest(
+                  vaultId: vaultId,
+                  sourceClientId: cfg.clientName,
+                ),
+              );
+            } finally {
+              await conn.dispose();
+            }
+
+            // Registration LAST — while it exists the vault is still live.
+            await dir.deleteVault(vaultId: vaultId);
+
+            // If this device had that vault connected, clear its local state.
+            if (engine.config.vaultId == vaultId) {
+              engine.cipher = null;
+              await _scheduleBoot(() async {
+                await engine.stop();
+                try {
+                  await engine.wipeLocalState();
+                } catch (_) {}
+              });
+              await configStorage.disconnectVault();
+            }
+            _log.info('Vault deleted: $vaultId');
+          }
+
           late final void Function() refreshSettings;
           refreshSettings = _registerSettings(
             plugin: plugin,
@@ -675,6 +802,7 @@ void main() {
             engine: engine,
             buildConfig: buildConfig,
             settingsSyncPrefs: () => settingsPrefs,
+            onDeleteVault: deleteVaultClosure,
             selfHostEnabled: selfHostActive,
             selfHostUrl: selfHost.syncUrl,
             selfHostDirectory: selfHostActive ? directory : null,
@@ -1011,18 +1139,17 @@ void main() {
             // queue its own awaitModalClose + showSignInModal.
             if (_autoSignInInFlight) return;
             _autoSignInInFlight = true;
-            RpcAccountClient? newClient;
             try {
               if (isModalOpen) {
                 _log.info(
                   'Session expired — waiting for current modal '
-                  'to close before prompting sign-in',
+                  'to close before prompting re-auth',
                 );
                 await awaitModalClose();
                 // World may have moved on while we waited (user might
                 // have signed in via Settings, or refreshed the token
                 // through another flow). Try refresh once more; if it
-                // succeeds the prompt is no longer needed.
+                // succeeds no prompt is needed.
                 try {
                   final session = await accountClient.refreshSession();
                   await configStorage.saveAuthSession(session);
@@ -1036,25 +1163,28 @@ void main() {
                   );
                   return;
                 } catch (_) {
-                  // Still bad — fall through and show the modal.
+                  // Still bad — fall through and prompt.
                 }
               }
-              newClient = await withModalLock(
-                () => showSignInModal(plugin, client: accountClient),
+              // Browser-auth is the only sign-in method, so there is no
+              // credential modal to pop here. Point the user at Settings,
+              // where the "Sign in" button starts the browser handoff; its
+              // protocol handler re-auths the engine on return.
+              showNotice(
+                'Rhyolite: session expired. Open Settings → Rhyolite Sync '
+                'and press Sign In.',
               );
+              final setting = jsu.getProperty<Object?>(
+                plugin.app.raw,
+                'setting',
+              );
+              if (setting != null) {
+                jsu.callMethod<void>(setting, 'open', []);
+                jsu.callMethod<void>(setting, 'openTabById', ['rhyolite-sync']);
+              }
             } finally {
               _autoSignInInFlight = false;
             }
-            if (newClient == null) return;
-            final newSession = newClient.session;
-            if (newSession != null) {
-              await configStorage.saveAuthSession(newSession);
-            }
-            authClient = newClient;
-            _setEngineAuth(engine, newClient);
-            engine.config = buildConfig(cfg, newClient);
-            await _guardedStart(engine);
-            await relaunchConfigSync();
           });
         },
         (error, stack) {
@@ -1112,6 +1242,7 @@ void Function() _registerSettings({
   required VaultConfig Function(VaultConfig, RpcAccountClient?) buildConfig,
   required SettingsSyncPrefs Function() settingsSyncPrefs,
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
+  required Future<void> Function(VaultInfo vault) onDeleteVault,
   required bool selfHostEnabled,
   required String selfHostUrl,
   IVaultDirectory? selfHostDirectory,
@@ -1128,7 +1259,8 @@ void Function() _registerSettings({
         ? () async =>
               null // no managed quota on self-host / BYO
         : () => _fetchVaultUsage(engine, config.vaultId),
-    openUrl: (url) => jsu.callMethod<void>(jsu.globalThis, 'open', [url]),
+    openUrl: _openExternalUrl,
+    authWebUrl: kEnv.siteUrl,
     onConfigChanged: (updated) async {
       engine.config = buildConfig(updated, authClient);
       // Route the restart through the lifecycle lane so it can't overlap a
@@ -1178,6 +1310,7 @@ void Function() _registerSettings({
       });
       _log.info('Switched to vault ${newConfig.vaultId}');
     },
+    onDeleteVault: onDeleteVault,
     onSubscribed: () => _waitForSubscriptionAndStart(
       plugin: plugin,
       engine: engine,

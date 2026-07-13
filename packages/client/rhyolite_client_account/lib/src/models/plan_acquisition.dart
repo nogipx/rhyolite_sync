@@ -7,7 +7,6 @@ sealed class PlanAcquisition {
 
   static const String _kindPaid = 'paid';
   static const String _kindTrial = 'trial';
-  static const String _kindPromo = 'promo';
 
   String get kind;
 
@@ -20,13 +19,6 @@ sealed class PlanAcquisition {
         return const PaidAcquisition();
       case _kindTrial:
         return const TrialAcquisition();
-      case _kindPromo:
-        return PromoAcquisition(
-          requiredCode: json['requiredCode'] as String?,
-          eligibleEmails: ((json['eligibleEmails'] as List?) ?? const [])
-              .cast<String>()
-              .toSet(),
-        );
     }
     throw FormatException('Unknown PlanAcquisition kind: $kind');
   }
@@ -64,47 +56,3 @@ class TrialAcquisition extends PlanAcquisition {
   int get hashCode => 1;
 }
 
-/// Granted via a redemption flow: user enters a code in the plugin or
-/// matches one of the [eligibleEmails] on signup. Either gate is
-/// sufficient — empty [eligibleEmails] with a [requiredCode] means
-/// "anyone with the code", and an empty [requiredCode] with a
-/// non-empty allowlist means "anyone on the list, no code needed".
-class PromoAcquisition extends PlanAcquisition {
-  const PromoAcquisition({
-    this.requiredCode,
-    this.eligibleEmails = const {},
-  });
-
-  /// Code the user has to enter to redeem. Case-insensitive
-  /// comparison is the embedder's responsibility.
-  final String? requiredCode;
-
-  /// Allow-list of email addresses that may redeem without a code.
-  final Set<String> eligibleEmails;
-
-  @override
-  String get kind => PlanAcquisition._kindPromo;
-
-  @override
-  Map<String, dynamic> toJson() => {
-        'kind': kind,
-        if (requiredCode != null) 'requiredCode': requiredCode,
-        if (eligibleEmails.isNotEmpty)
-          'eligibleEmails': eligibleEmails.toList(),
-      };
-
-  @override
-  bool operator ==(Object other) =>
-      other is PromoAcquisition &&
-      requiredCode == other.requiredCode &&
-      _setEquals(eligibleEmails, other.eligibleEmails);
-
-  @override
-  int get hashCode =>
-      Object.hash(requiredCode, Object.hashAllUnordered(eligibleEmails));
-}
-
-bool _setEquals<T>(Set<T> a, Set<T> b) {
-  if (a.length != b.length) return false;
-  return a.containsAll(b);
-}

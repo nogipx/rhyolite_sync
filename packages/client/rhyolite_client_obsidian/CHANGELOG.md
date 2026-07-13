@@ -1,3 +1,21 @@
+## [3.2.0] - 2026-07-13
+
+### Sign-in & account
+
+- Sign in through your browser. Signing in now opens the website, you authenticate there, and the session is handed back to the plugin — the same single sign-in method used by the Telegram bot. Sign-in opens in your real browser rather than an in-app window (obsidian, account).
+- Manage your subscription on the website. Subscribing and plan management open the account page already signed in as you, instead of a separate in-plugin payment screen (obsidian, account).
+
+### Vaults
+
+- Delete a vault from the vault picker. This permanently removes that vault's data from the server — files, history, and blobs — while leaving your local note files on disk untouched. Deletion requires typing the vault name to confirm (obsidian, core, account).
+- The vault picker hides "Create vault" once you have reached your plan's vault limit (obsidian).
+
+### Settings sync
+
+- Settings no longer re-sync when a device merely reformats a JSON settings file. Plugin settings are now compared by their canonical content, so a different key order or indentation on another device no longer triggers a needless sync (core, obsidian).
+- When settings arrive from another device, the plugin prompts you to reload so they take effect (obsidian).
+
+
 ## [3.1.2] - 2026-07-09
 
 ### Fixed

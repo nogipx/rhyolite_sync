@@ -115,8 +115,11 @@ class ObsidianSettingsRegistry {
     if (segs.first == 'plugins' && segs.length >= 3) {
       final file = segs.last;
       if (file == 'data.json') {
+        // JSON we don't field-merge (unknown schema), but stored canonically so
+        // Obsidian re-serializing it (insertion-order keys, platform-dependent
+        // indentation) doesn't churn the sync. Opaque CSS below stays wholeFile.
         return const SettingsResourceClass(
-          SettingsCrdtKind.wholeFile,
+          SettingsCrdtKind.jsonWholeFile,
           SettingsCategory.communityPluginSettings,
         );
       }

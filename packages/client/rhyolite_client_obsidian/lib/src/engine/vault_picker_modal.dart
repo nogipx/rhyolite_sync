@@ -18,8 +18,14 @@ import 'setup_modal.dart';
 Future<(VaultConfig, VaultCipher)?> showVaultPickerModal(
   PluginHandle plugin,
   IVaultDirectory directory,
-  ObsidianConfigStorage configStorage,
-) async {
+  ObsidianConfigStorage configStorage, {
+  Future<void> Function(VaultInfo vault)? onDeleteVault,
+  // Owned-vault cap from the plan (`PlanCapabilities.maxVaultCount`). null =
+  // no managed-side cap (self-host / unknown) → creation always offered. When
+  // the count is reached the "+ Create" row is hidden (the account server is
+  // the real gate; this is a UX hint that avoids a doomed create attempt).
+  int? maxVaultCount,
+}) async {
   // Load vaults before showing the modal.
   List<VaultInfo> vaults;
   try {
@@ -28,7 +34,14 @@ Future<(VaultConfig, VaultCipher)?> showVaultPickerModal(
     vaults = [];
   }
 
-  return _showPickerModal(plugin, directory, configStorage, vaults: vaults);
+  return _showPickerModal(
+    plugin,
+    directory,
+    configStorage,
+    vaults: vaults,
+    onDeleteVault: onDeleteVault,
+    maxVaultCount: maxVaultCount,
+  );
 }
 
 Future<(VaultConfig, VaultCipher)?> _showPickerModal(
@@ -36,7 +49,11 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
   IVaultDirectory directory,
   ObsidianConfigStorage configStorage, {
   required List<VaultInfo> vaults,
+  Future<void> Function(VaultInfo vault)? onDeleteVault,
+  int? maxVaultCount,
 }) {
+  final atCapacity =
+      maxVaultCount != null && vaults.length >= maxVaultCount;
   return showModalWith<(VaultConfig, VaultCipher)?>(
     plugin,
     build: (ctx) {
@@ -62,6 +79,18 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
               );
               if (result != null) ctx.close(result);
             }, variant: ButtonVariant.primary),
+            if (onDeleteVault != null)
+              ButtonSpec('Delete', () async {
+                final confirmed = await _confirmDeleteVault(plugin, vault);
+                if (!confirmed) return;
+                try {
+                  await onDeleteVault(vault);
+                  showNotice('Vault "$label" deleted.');
+                  ctx.close(null);
+                } catch (e) {
+                  ctx.showError('Delete failed: $e');
+                }
+              }),
           ]);
           ctx.spaceVertical(px: 8);
         }
@@ -70,6 +99,26 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
       ctx.spaceVertical(px: 4);
       ctx.createEl('hr');
       ctx.spaceVertical(px: 8);
+
+      if (atCapacity) {
+        // Plan vault limit reached — creating another would be rejected by the
+        // account server, so offer no create form, just explain why.
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: maxVaultCount == 1
+              ? 'Your plan includes a single vault. Upgrade to add more.'
+              : 'You have reached your plan\'s vault limit ($maxVaultCount). '
+                    'Upgrade to add more.',
+        );
+        ctx.spaceVertical(px: 8);
+        ctx.buttonRow([
+          ButtonSpec('Cancel', () => ctx.close(null)),
+        ]);
+        ctx.onEscape(() => ctx.close(null));
+        return;
+      }
+
       ctx.createEl('p', cls: 'rhyolite-setting-desc', text: 'Create a new vault:');
       ctx.spaceVertical(px: 4);
 
@@ -96,6 +145,49 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
       ctx.onEscape(() => ctx.close(null));
     },
   );
+}
+
+/// Type-the-name confirmation for the irreversible vault delete.
+Future<bool> _confirmDeleteVault(PluginHandle plugin, VaultInfo vault) async {
+  final label =
+      vault.vaultName.isNotEmpty ? vault.vaultName : vault.vaultId;
+  final result = await showModalWith<bool>(
+    plugin,
+    build: (ctx) {
+      ctx.h3('Delete vault "$label"?');
+      ctx.spaceVertical(px: 8);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text:
+            'This permanently deletes all of this vault\'s data from the server '
+            '(files, history, blobs). Your local note files on disk are NOT '
+            'deleted. If this vault used your own S3/WebDAV storage, clear that '
+            'bucket separately. This cannot be undone.',
+      );
+      ctx.spaceVertical(px: 8);
+      ctx.createEl('p', text: 'Type the vault name to confirm:');
+      final input = ctx.input(placeholder: label)..focus();
+      ctx.spaceVertical(px: 12);
+
+      Future<void> confirm() async {
+        if (ctx.valueOf(input).trim() != label) {
+          ctx.showError('Name does not match.');
+          return;
+        }
+        ctx.close(true);
+      }
+
+      ctx.buttonRow([
+        ButtonSpec('Delete permanently', confirm),
+        ButtonSpec('Cancel', () => ctx.close(false)),
+      ]);
+      ctx
+        ..onEnter(input, confirm)
+        ..onEscape(() => ctx.close(false));
+    },
+  );
+  return result ?? false;
 }
 
 Future<(VaultConfig, VaultCipher)?> _connectToVault(

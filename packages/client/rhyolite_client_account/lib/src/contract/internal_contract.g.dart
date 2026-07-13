@@ -16,7 +16,6 @@ class InternalContractNames {
   static const createVaultForUser = 'createVaultForUser';
   static const checkSubscription = 'checkSubscription';
   static const getPlan = 'getPlan';
-  static const redeemPromo = 'redeemPromo';
 }
 
 class InternalContractCodecs {
@@ -51,10 +50,6 @@ class InternalContractCodecs {
   static const codecGetPlanResponse = RpcCodec<GetPlanResponse>.withDecoder(
     GetPlanResponse.fromJson,
   );
-  static const codecRedeemPromoRequest =
-      RpcCodec<RedeemPromoRequest>.withDecoder(RedeemPromoRequest.fromJson);
-  static const codecRedeemPromoResponse =
-      RpcCodec<RedeemPromoResponse>.withDecoder(RedeemPromoResponse.fromJson);
 }
 
 class InternalContractCaller extends RpcCallerContract
@@ -124,20 +119,6 @@ class InternalContractCaller extends RpcCallerContract
       context: context,
     );
   }
-
-  @override
-  Future<RedeemPromoResponse> redeemPromo(
-    RedeemPromoRequest request, {
-    RpcContext? context,
-  }) {
-    return callUnary<RedeemPromoRequest, RedeemPromoResponse>(
-      methodName: InternalContractNames.redeemPromo,
-      requestCodec: InternalContractCodecs.codecRedeemPromoRequest,
-      responseCodec: InternalContractCodecs.codecRedeemPromoResponse,
-      request: request,
-      context: context,
-    );
-  }
 }
 
 abstract class InternalContractResponder extends RpcResponderContract
@@ -175,12 +156,6 @@ abstract class InternalContractResponder extends RpcResponderContract
       handler: getPlan,
       requestCodec: InternalContractCodecs.codecGetPlanRequest,
       responseCodec: InternalContractCodecs.codecGetPlanResponse,
-    );
-    addUnaryMethod<RedeemPromoRequest, RedeemPromoResponse>(
-      methodName: InternalContractNames.redeemPromo,
-      handler: redeemPromo,
-      requestCodec: InternalContractCodecs.codecRedeemPromoRequest,
-      responseCodec: InternalContractCodecs.codecRedeemPromoResponse,
     );
   }
 }

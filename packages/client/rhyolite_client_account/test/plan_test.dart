@@ -46,19 +46,6 @@ void main() {
       expect(PlanAcquisition.fromJson(a.toJson()), equals(a));
     });
 
-    test('Promo round-trip with code', () {
-      const a = PromoAcquisition(requiredCode: 'BETA-2026');
-      expect(PlanAcquisition.fromJson(a.toJson()), equals(a));
-    });
-
-    test('Promo round-trip with email allow-list', () {
-      const a = PromoAcquisition(
-        eligibleEmails: {'a@example.com', 'b@example.com'},
-      );
-      final decoded = PlanAcquisition.fromJson(a.toJson());
-      expect(decoded, equals(a));
-    });
-
     test('fromJson rejects unknown kind', () {
       expect(
         () => PlanAcquisition.fromJson({'kind': 'invented'}),

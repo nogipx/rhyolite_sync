@@ -125,43 +125,6 @@ class GetPlanResponse implements IRpcSerializable {
       };
 }
 
-class RedeemPromoRequest implements IRpcSerializable {
-  const RedeemPromoRequest({required this.userId, required this.code});
-
-  final String userId;
-  final String code;
-
-  factory RedeemPromoRequest.fromJson(Map<String, dynamic> json) =>
-      RedeemPromoRequest(
-        userId: json['user_id'] as String,
-        code: json['code'] as String,
-      );
-
-  @override
-  Map<String, dynamic> toJson() => {'user_id': userId, 'code': code};
-}
-
-class RedeemPromoResponse implements IRpcSerializable {
-  const RedeemPromoResponse({required this.redeemed, this.planId});
-
-  /// True iff a subscription was created for this code.
-  final bool redeemed;
-
-  /// The plan id that was activated, if any.
-  final String? planId;
-
-  factory RedeemPromoResponse.fromJson(Map<String, dynamic> json) =>
-      RedeemPromoResponse(
-        redeemed: json['redeemed'] as bool,
-        planId: json['plan_id'] as String?,
-      );
-
-  @override
-  Map<String, dynamic> toJson() => {
-        'redeemed': redeemed,
-        if (planId != null) 'plan_id': planId,
-      };
-}
 
 // --- Contract ---
 
@@ -190,12 +153,6 @@ abstract class IInternalContract {
   @RpcMethod.unary(name: 'getPlan')
   Future<GetPlanResponse> getPlan(
     GetPlanRequest request, {
-    RpcContext? context,
-  });
-
-  @RpcMethod.unary(name: 'redeemPromo')
-  Future<RedeemPromoResponse> redeemPromo(
-    RedeemPromoRequest request, {
     RpcContext? context,
   });
 }

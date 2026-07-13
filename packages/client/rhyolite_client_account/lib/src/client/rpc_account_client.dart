@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:rhyolite_client_account/rhyolite_client_account.dart';
 import 'package:rpc_dart/rpc_dart.dart';
-import 'package:rpc_promo/rpc_promo.dart';
 
 /// RPC-based account client.
 ///
@@ -19,13 +18,11 @@ class RpcAccountClient {
   RpcAccountClient(RpcCallerEndpoint endpoint)
     : _auth = AuthContractCaller(endpoint),
       _vault = VaultContractCaller(endpoint),
-      _subscription = SubscriptionContractCaller(endpoint),
-      _discount = DiscountContractCaller(endpoint);
+      _subscription = SubscriptionContractCaller(endpoint);
 
   final AuthContractCaller _auth;
   final VaultContractCaller _vault;
   final SubscriptionContractCaller _subscription;
-  final DiscountContractCaller _discount;
 
   // ---------------------------------------------------------------------------
   // Session state
@@ -105,6 +102,30 @@ class RpcAccountClient {
     );
     await _setSession(session);
     return session;
+  }
+
+  /// Exchange a one-time login code (shown by the bot over the linked
+  /// Telegram chat) for a session. The code is our own credential —
+  /// Telegram only delivered it; identity is the email account it is
+  /// bound to. No password is typed.
+  Future<AuthSession> redeemLoginCode(String code) async {
+    final session = await _auth.redeemLoginCode(
+      RedeemLoginCodeRequest(code: code),
+    );
+    await _setSession(session);
+    return session;
+  }
+
+  /// Issues a one-time login code for the current session's user. The
+  /// site calls this after browser login, then hands the code to a client
+  /// (plugin via obsidian://, bot via t.me) to redeem via
+  /// [redeemLoginCode]. Requires an active session.
+  Future<String> issueSessionLoginCode() async {
+    final res = await _auth.issueSessionLoginCode(
+      const IssueSessionLoginCodeRequest(),
+      context: await _authContext(),
+    );
+    return res.code;
   }
 
   Future<AuthSession> refreshSession() async {
@@ -282,6 +303,15 @@ class RpcAccountClient {
     return vault.encryptedMeta;
   }
 
+  /// Removes the vault registration. Call last in the delete flow, after the
+  /// vault's data has been purged from the sync server + external storage.
+  Future<void> deleteVault({required String vaultId}) async {
+    await _vault.deleteVault(
+      DeleteVaultRequest(vaultId: vaultId),
+      context: await _authContext(),
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // Subscription
   // ---------------------------------------------------------------------------
@@ -321,36 +351,12 @@ class RpcAccountClient {
 
   /// Create a payment session. Returns the payment URL, or null if the
   /// subscription was activated without a redirect (e.g. dev simulation).
-  Future<String?> createPayment({
-    required String planId,
-    String? discountCode,
-  }) async {
+  Future<String?> createPayment({required String planId}) async {
     final response = await _subscription.createPayment(
-      CreatePaymentRequest(planId: planId, discountCode: discountCode),
+      CreatePaymentRequest(planId: planId),
       context: await _authContext(),
     );
     return response.paymentUrl;
-  }
-
-  /// Validates a discount code against the given plan + amount.
-  ///
-  /// Returns the discount preview when the code is valid; returns the
-  /// machine-readable rejection reason in [PreviewDiscountResponse.errorReason]
-  /// otherwise. Does not consume the code — that happens on payment
-  /// success.
-  Future<PreviewDiscountResponse> previewDiscount({
-    required String code,
-    required String planId,
-    required int originalKopecks,
-  }) async {
-    return _discount.preview(
-      PreviewDiscountRequest(
-        code: code,
-        planId: planId,
-        originalKopecks: originalKopecks,
-      ),
-      context: await _authContext(),
-    );
   }
 
   // ---------------------------------------------------------------------------

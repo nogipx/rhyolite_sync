@@ -170,6 +170,50 @@ class AuthSession implements IRpcSerializable {
   };
 }
 
+class RedeemLoginCodeRequest implements IRpcSerializable {
+  const RedeemLoginCodeRequest({required this.code});
+
+  final String code;
+
+  factory RedeemLoginCodeRequest.fromJson(Map<String, dynamic> json) =>
+      RedeemLoginCodeRequest(code: json['code'] as String);
+
+  @override
+  Map<String, dynamic> toJson() => {'code': code};
+}
+
+class IssueSessionLoginCodeRequest implements IRpcSerializable {
+  const IssueSessionLoginCodeRequest();
+
+  factory IssueSessionLoginCodeRequest.fromJson(Map<String, dynamic> _) =>
+      const IssueSessionLoginCodeRequest();
+
+  @override
+  Map<String, dynamic> toJson() => const {};
+}
+
+class IssueSessionLoginCodeResponse implements IRpcSerializable {
+  const IssueSessionLoginCodeResponse({
+    required this.code,
+    required this.expiresAt,
+  });
+
+  /// One-time code shown/handed to the client, redeemed via redeemLoginCode.
+  final String code;
+
+  /// Unix timestamp (seconds) when the code expires.
+  final int expiresAt;
+
+  factory IssueSessionLoginCodeResponse.fromJson(Map<String, dynamic> json) =>
+      IssueSessionLoginCodeResponse(
+        code: json['code'] as String,
+        expiresAt: (json['expires_at'] as num).toInt(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {'code': code, 'expires_at': expiresAt};
+}
+
 // --- Contract ---
 
 /// Public auth contract — no JWT required.
@@ -210,6 +254,28 @@ abstract class IAuthContract {
   @RpcMethod.unary(name: 'resendVerificationEmail')
   Future<ResendVerificationResponse> resendVerificationEmail(
     ResendVerificationRequest request, {
+    RpcContext? context,
+  });
+
+  /// Exchanges a one-time login code (minted for a browser-authenticated
+  /// user via `issueSessionLoginCode`) for a session. Public — the code is
+  /// the bearer proof. Our backend issued and validates it; the session is
+  /// minted for the email account the code is bound to. Redeemed by the
+  /// plugin (obsidian:// handoff) and the bot (t.me deep-link).
+  @RpcMethod.unary(name: 'redeemLoginCode')
+  Future<AuthSession> redeemLoginCode(
+    RedeemLoginCodeRequest request, {
+    RpcContext? context,
+  });
+
+  /// Issues a one-time login code for the CURRENTLY AUTHENTICATED user.
+  /// The site calls this after the user logs in via the browser, then
+  /// hands the code to a client (plugin via `obsidian://`, bot via a
+  /// `t.me` deep-link), which exchanges it for a session with
+  /// [redeemLoginCode]. Requires auth — the session identifies the user.
+  @RpcMethod.unary(name: 'issueSessionLoginCode')
+  Future<IssueSessionLoginCodeResponse> issueSessionLoginCode(
+    IssueSessionLoginCodeRequest request, {
     RpcContext? context,
   });
 }

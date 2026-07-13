@@ -37,6 +37,7 @@ class ObsidianConfigSync {
     RpcCallerEndpoint? notifyEndpoint,
     String? notifyTopic,
     void Function(bool active)? onActivity,
+    void Function()? onRemoteApplied,
     void Function(String message)? log,
     Future<void> Function(Future<void> Function() task, {Object? key})?
         runBackground,
@@ -47,6 +48,7 @@ class ObsidianConfigSync {
         _notifyEndpoint = notifyEndpoint,
         _notifyTopic = notifyTopic,
         _onActivity = onActivity,
+        _onRemoteApplied = onRemoteApplied,
         _log = log,
         _runBackground = runBackground;
 
@@ -66,6 +68,13 @@ class ObsidianConfigSync {
   final RpcCallerEndpoint? _notifyEndpoint;
   final String? _notifyTopic;
   final void Function(bool active)? _onActivity;
+
+  /// Fired after a pull that changed on-disk settings while Obsidian is already
+  /// running (a notify push or a resume/manual sync — NOT the initial start
+  /// pull, since a fresh app reads settings at launch). Obsidian doesn't
+  /// hot-apply config files, so the host uses this to prompt a one-click reload.
+  final void Function()? _onRemoteApplied;
+
   final void Function(String message)? _log;
 
   /// Routes connection-using settings work onto the note engine's
@@ -112,11 +121,13 @@ class ObsidianConfigSync {
     if (_busy || _disposed) return;
     _busy = true;
     _onActivity?.call(true);
+    var remoteChanged = 0;
     try {
       await _bg('settings:sync', () async {
         await _scanAndPush();
         final changed = await _sync.pull();
         await _writeChanged(changed);
+        remoteChanged = changed.length;
       });
     } catch (e) {
       _log?.call('config sync error: $e');
@@ -124,6 +135,7 @@ class ObsidianConfigSync {
       _busy = false;
       _onActivity?.call(false);
     }
+    if (remoteChanged > 0) _onRemoteApplied?.call();
   }
 
   /// Pull-only: fetch remote changes and write them to disk, WITHOUT a local
@@ -134,10 +146,12 @@ class ObsidianConfigSync {
     if (_busy || _disposed) return;
     _busy = true;
     _onActivity?.call(true);
+    var remoteChanged = 0;
     try {
       await _bg('settings:pull', () async {
         final changed = await _sync.pull();
         await _writeChanged(changed);
+        remoteChanged = changed.length;
       });
     } catch (e) {
       _log?.call('config notify pull error: $e');
@@ -145,6 +159,7 @@ class ObsidianConfigSync {
       _busy = false;
       _onActivity?.call(false);
     }
+    if (remoteChanged > 0) _onRemoteApplied?.call();
   }
 
   /// Re-upload: make THIS device authoritative — wipe the server settings
@@ -350,12 +365,14 @@ class ObsidianConfigSync {
     try {
       final st = await _adapter.stat(adapterPath);
       if (st == null) return;
-      // Skip large opaque whole-files (e.g. a multi-MB theme CSS): reading +
-      // double-base64 + pure-Dart encrypt of them on the UI thread freezes the
-      // app for tens of seconds. Caught here via stat — no read, no crypto.
-      if (cls.kind == SettingsCrdtKind.wholeFile &&
-          (st.size ?? 0) > _maxWholeFileBytes) {
-        _log?.call('config skip large wholeFile: $resourceId '
+      // Skip large whole-file resources (a multi-MB theme CSS, or a bloated
+      // plugin data.json): reading + parse/canonicalize + double-base64 +
+      // pure-Dart encrypt of them on the UI thread freezes the app for tens of
+      // seconds. Caught here via stat — no read, no crypto.
+      final wholeFileKind = cls.kind == SettingsCrdtKind.wholeFile ||
+          cls.kind == SettingsCrdtKind.jsonWholeFile;
+      if (wholeFileKind && (st.size ?? 0) > _maxWholeFileBytes) {
+        _log?.call('config skip large ${cls.kind.name}: $resourceId '
             '(${st.size} B > $_maxWholeFileBytes)');
         return;
       }

@@ -16,6 +16,7 @@ class VaultContractNames {
   static const createVault = 'createVault';
   static const updateVerificationToken = 'updateVerificationToken';
   static const updateVaultMeta = 'updateVaultMeta';
+  static const deleteVault = 'deleteVault';
 }
 
 class VaultContractCodecs {
@@ -24,6 +25,10 @@ class VaultContractCodecs {
       RpcCodec<CreateVaultRequest>.withDecoder(CreateVaultRequest.fromJson);
   static const codecCreateVaultResponse =
       RpcCodec<CreateVaultResponse>.withDecoder(CreateVaultResponse.fromJson);
+  static const codecDeleteVaultRequest =
+      RpcCodec<DeleteVaultRequest>.withDecoder(DeleteVaultRequest.fromJson);
+  static const codecDeleteVaultResponse =
+      RpcCodec<DeleteVaultResponse>.withDecoder(DeleteVaultResponse.fromJson);
   static const codecListVaultsRequest = RpcCodec<ListVaultsRequest>.withDecoder(
     ListVaultsRequest.fromJson,
   );
@@ -116,6 +121,20 @@ class VaultContractCaller extends RpcCallerContract implements IVaultContract {
       context: context,
     );
   }
+
+  @override
+  Future<DeleteVaultResponse> deleteVault(
+    DeleteVaultRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<DeleteVaultRequest, DeleteVaultResponse>(
+      methodName: VaultContractNames.deleteVault,
+      requestCodec: VaultContractCodecs.codecDeleteVaultRequest,
+      responseCodec: VaultContractCodecs.codecDeleteVaultResponse,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class VaultContractResponder extends RpcResponderContract
@@ -156,6 +175,12 @@ abstract class VaultContractResponder extends RpcResponderContract
       handler: updateVaultMeta,
       requestCodec: VaultContractCodecs.codecUpdateVaultMetaRequest,
       responseCodec: VaultContractCodecs.codecUpdateVaultMetaResponse,
+    );
+    addUnaryMethod<DeleteVaultRequest, DeleteVaultResponse>(
+      methodName: VaultContractNames.deleteVault,
+      handler: deleteVault,
+      requestCodec: VaultContractCodecs.codecDeleteVaultRequest,
+      responseCodec: VaultContractCodecs.codecDeleteVaultResponse,
     );
   }
 }

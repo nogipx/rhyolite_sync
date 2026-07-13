@@ -135,4 +135,16 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     }
     return const VaultAck();
   }
+
+  @override
+  Future<VaultAck> deleteVault(
+    DeleteVaultRequest request, {
+    RpcContext? context,
+  }) async {
+    // Idempotent — a missing entry is treated as already-deleted. The vault's
+    // sync data (states, blobs, history) is wiped separately via wipeVault.
+    await _client.delete(collection: _vaultsCollection, id: request.vaultId);
+    await _client.delete(collection: _metaCollection, id: request.vaultId);
+    return const VaultAck();
+  }
 }

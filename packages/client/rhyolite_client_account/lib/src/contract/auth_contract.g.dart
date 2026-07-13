@@ -19,6 +19,8 @@ class AuthContractNames {
   static const verifyEmail = 'verifyEmail';
   static const getEmailVerified = 'getEmailVerified';
   static const resendVerificationEmail = 'resendVerificationEmail';
+  static const redeemLoginCode = 'redeemLoginCode';
+  static const issueSessionLoginCode = 'issueSessionLoginCode';
 }
 
 class AuthContractCodecs {
@@ -33,6 +35,18 @@ class AuthContractCodecs {
   static const codecGetEmailVerifiedResponse =
       RpcCodec<GetEmailVerifiedResponse>.withDecoder(
         GetEmailVerifiedResponse.fromJson,
+      );
+  static const codecIssueSessionLoginCodeRequest =
+      RpcCodec<IssueSessionLoginCodeRequest>.withDecoder(
+        IssueSessionLoginCodeRequest.fromJson,
+      );
+  static const codecIssueSessionLoginCodeResponse =
+      RpcCodec<IssueSessionLoginCodeResponse>.withDecoder(
+        IssueSessionLoginCodeResponse.fromJson,
+      );
+  static const codecRedeemLoginCodeRequest =
+      RpcCodec<RedeemLoginCodeRequest>.withDecoder(
+        RedeemLoginCodeRequest.fromJson,
       );
   static const codecRefreshRequest = RpcCodec<RefreshRequest>.withDecoder(
     RefreshRequest.fromJson,
@@ -162,6 +176,37 @@ class AuthContractCaller extends RpcCallerContract implements IAuthContract {
       context: context,
     );
   }
+
+  @override
+  Future<AuthSession> redeemLoginCode(
+    RedeemLoginCodeRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<RedeemLoginCodeRequest, AuthSession>(
+      methodName: AuthContractNames.redeemLoginCode,
+      requestCodec: AuthContractCodecs.codecRedeemLoginCodeRequest,
+      responseCodec: AuthContractCodecs.codecAuthSession,
+      request: request,
+      context: context,
+    );
+  }
+
+  @override
+  Future<IssueSessionLoginCodeResponse> issueSessionLoginCode(
+    IssueSessionLoginCodeRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<
+      IssueSessionLoginCodeRequest,
+      IssueSessionLoginCodeResponse
+    >(
+      methodName: AuthContractNames.issueSessionLoginCode,
+      requestCodec: AuthContractCodecs.codecIssueSessionLoginCodeRequest,
+      responseCodec: AuthContractCodecs.codecIssueSessionLoginCodeResponse,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class AuthContractResponder extends RpcResponderContract
@@ -217,6 +262,18 @@ abstract class AuthContractResponder extends RpcResponderContract
       handler: resendVerificationEmail,
       requestCodec: AuthContractCodecs.codecResendVerificationRequest,
       responseCodec: AuthContractCodecs.codecResendVerificationResponse,
+    );
+    addUnaryMethod<RedeemLoginCodeRequest, AuthSession>(
+      methodName: AuthContractNames.redeemLoginCode,
+      handler: redeemLoginCode,
+      requestCodec: AuthContractCodecs.codecRedeemLoginCodeRequest,
+      responseCodec: AuthContractCodecs.codecAuthSession,
+    );
+    addUnaryMethod<IssueSessionLoginCodeRequest, IssueSessionLoginCodeResponse>(
+      methodName: AuthContractNames.issueSessionLoginCode,
+      handler: issueSessionLoginCode,
+      requestCodec: AuthContractCodecs.codecIssueSessionLoginCodeRequest,
+      responseCodec: AuthContractCodecs.codecIssueSessionLoginCodeResponse,
     );
   }
 }

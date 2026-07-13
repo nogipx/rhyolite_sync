@@ -178,6 +178,18 @@ class VaultAck implements IRpcSerializable {
   Map<String, dynamic> toJson() => {'ok': ok};
 }
 
+class DeleteVaultRequest implements IRpcSerializable {
+  const DeleteVaultRequest({required this.vaultId});
+
+  final String vaultId;
+
+  factory DeleteVaultRequest.fromJson(Map<String, dynamic> json) =>
+      DeleteVaultRequest(vaultId: json['vaultId'] as String);
+
+  @override
+  Map<String, dynamic> toJson() => {'vaultId': vaultId};
+}
+
 // --- Contract ---
 
 /// Self-host vault registry + encrypted meta storage, served by the sync
@@ -212,6 +224,14 @@ abstract class IVaultRegistryContract {
   @RpcMethod.unary(name: 'setVaultMeta')
   Future<VaultAck> setVaultMeta(
     SetVaultMetaRequest request, {
+    RpcContext? context,
+  });
+
+  /// Removes the vault + its encrypted meta from the registry. Called last in
+  /// the delete flow, after the sync data has been wiped.
+  @RpcMethod.unary(name: 'deleteVault')
+  Future<VaultAck> deleteVault(
+    DeleteVaultRequest request, {
     RpcContext? context,
   });
 }

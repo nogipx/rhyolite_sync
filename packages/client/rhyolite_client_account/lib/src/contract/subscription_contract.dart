@@ -193,27 +193,16 @@ class ListProductsResponse implements IRpcSerializable {
 }
 
 class CreatePaymentRequest implements IRpcSerializable {
-  const CreatePaymentRequest({required this.planId, this.discountCode});
+  const CreatePaymentRequest({required this.planId});
 
   /// Identifier of the plan/product to purchase (matches [SelfworkProduct.planId]).
   final String planId;
 
-  /// Optional discount code to apply at checkout. Validated and applied
-  /// server-side; if invalid, the createPayment call fails with an
-  /// `invalid_argument` RpcException carrying the reason.
-  final String? discountCode;
-
   factory CreatePaymentRequest.fromJson(Map<String, dynamic> json) =>
-      CreatePaymentRequest(
-        planId: json['plan_id'] as String,
-        discountCode: json['discount_code'] as String?,
-      );
+      CreatePaymentRequest(planId: json['plan_id'] as String);
 
   @override
-  Map<String, dynamic> toJson() => {
-    'plan_id': planId,
-    if (discountCode != null) 'discount_code': discountCode,
-  };
+  Map<String, dynamic> toJson() => {'plan_id': planId};
 }
 
 class CreatePaymentResponse implements IRpcSerializable {

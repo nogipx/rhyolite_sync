@@ -154,8 +154,10 @@ class SettingsSync {
     final rendered = renderResource(resourceId);
     if (rendered == null) return false;
     if (_bytesEqual(diskBytes, rendered)) return true;
-    // Opaque whole-file resources (CSS, plugin data.json) are compared byte
-    // for byte — there is no canonical JSON form to fall back to.
+    // Opaque whole-file resources (CSS) are compared byte for byte — their
+    // exact formatting is meaningful and there is no canonical form. Everything
+    // else (fieldMap, orSet, jsonWholeFile) has a canonical JSON form, so a
+    // pure reformat / key-reorder is treated as equal.
     if (_kindOf(resourceId) == SettingsCrdtKind.wholeFile) return false;
     return jsonCanonicalEqual(diskBytes, rendered);
   }

@@ -34,6 +34,10 @@ abstract interface class IVaultDirectory {
     required String verificationToken,
   });
 
+  /// Removes the vault registration. Call last in the delete flow, after the
+  /// vault's sync data + external blobs have been wiped.
+  Future<void> deleteVault({required String vaultId});
+
   /// Backing store for the engine's external-blob config.
   IVaultMetaStorage get metaStorage;
 }
@@ -80,6 +84,11 @@ class SelfHostVaultDirectory implements IVaultDirectory {
         verificationToken: verificationToken,
       ),
     );
+  }
+
+  @override
+  Future<void> deleteVault({required String vaultId}) async {
+    await _caller.deleteVault(DeleteVaultRequest(vaultId: vaultId));
   }
 
   @override

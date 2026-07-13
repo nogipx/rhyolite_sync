@@ -1019,14 +1019,31 @@ void main() {
             }
 
             // Resume-from-background: WebSocket can die silently while the WebView
-            // is suspended; check on return to visibility.
+            // is suspended; check on return to visibility. Leaving (hidden) is
+            // also a settings sync point: `.obsidian` has no vault events, so
+            // push any pending local settings the moment the user switches away
+            // — other devices then get them via notify before the user arrives,
+            // instead of only on the next return-to-visible.
             if (documentJs != null) {
               jsu.callMethod<void>(plugin.raw, 'registerDomEvent', [
                 documentJs,
                 'visibilitychange',
-                jsu.allowInterop(
-                  (JSAny? _) => recoverConnection(requireVisible: true),
-                ),
+                jsu.allowInterop((JSAny? _) {
+                  final visible = jsu.getProperty<String?>(
+                        documentJs,
+                        'visibilityState',
+                      ) ==
+                      'visible';
+                  if (visible) {
+                    recoverConnection(requireVisible: true);
+                  } else if (!_syncPaused) {
+                    // Best-effort, no delay: the WebView can suspend right after
+                    // 'hidden' (mobile), so fire immediately. sync() is _busy-safe
+                    // and a no-op when nothing changed (signature guard).
+                    final cs = _configSync;
+                    if (cs != null) unawaited(cs.sync());
+                  }
+                }),
               ]);
             }
             // Network restored: reconnect immediately instead of waiting out the
@@ -1038,6 +1055,40 @@ void main() {
                 (JSAny? _) => recoverConnection(requireVisible: false),
               ),
             ]);
+          }
+
+          // Settings-dialog close is a cross-platform "settings changed" signal.
+          // Obsidian emits no vault event for `.obsidian`, but nearly every
+          // settings edit happens inside this dialog, so pushing on its close
+          // propagates changes immediately (still on this device) instead of
+          // only on the next resume. We wrap `app.setting.close`; a short settle
+          // delay lets settings that flush their file write on close land before
+          // the scan. Restored on unload via plugin.register so a reloaded plugin
+          // neither stacks wrappers nor pins a disposed engine.
+          {
+            final setting = jsu.getProperty<Object?>(plugin.app.raw, 'setting');
+            final originalClose = setting == null
+                ? null
+                : jsu.getProperty<Object?>(setting, 'close');
+            if (setting != null && originalClose != null) {
+              jsu.setProperty(
+                setting,
+                'close',
+                jsu.allowInterop(() {
+                  jsu.callMethod<void>(originalClose, 'call', [setting]);
+                  if (_syncPaused) return;
+                  Timer(const Duration(milliseconds: 400), () {
+                    final cs = _configSync;
+                    if (cs != null) unawaited(cs.sync());
+                  });
+                }),
+              );
+              jsu.callMethod<void>(plugin.raw, 'register', [
+                jsu.allowInterop(
+                  () => jsu.setProperty(setting, 'close', originalClose),
+                ),
+              ]);
+            }
           }
 
           // Listen for session expiry and prompt re-authentication.

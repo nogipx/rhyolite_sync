@@ -1,3 +1,10 @@
+## [3.3.0] - 2026-07-13
+
+### Settings sync
+
+- Settings now sync the moment you switch away from Obsidian and when you close the settings dialog, not only when you return to it. A setting you change on one device reaches the others right away (obsidian).
+
+
 ## [3.2.0] - 2026-07-13
 
 ### Sign-in & account

@@ -13,9 +13,11 @@ import 'obsidian_settings_registry.dart';
 ///
 /// `.obsidian` emits no vault events and settings change rarely, so there is no
 /// background polling timer (that would just spam the server). Local -> remote
-/// sync runs at well-defined moments only: once (deferred) after [start],
-/// whenever the user returns to Obsidian (the plugin wires resume to [sync]),
-/// and on the manual "Sync settings now" command.
+/// sync runs at well-defined moments only: once (deferred) after [start], when
+/// the user leaves or returns to Obsidian (the plugin wires visibility to
+/// [sync]), when the settings dialog closes (the plugin wraps `app.setting`),
+/// and on the manual "Sync settings now" command. The signature guard makes
+/// these triggers a no-op when nothing actually changed.
 ///
 /// Remote -> local is event-driven: a [NotifyCoordinator] on the config
 /// keyspace topic (`vault:<vaultId>_config`) reacts to another device's push

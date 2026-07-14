@@ -15,6 +15,7 @@ class StateSyncContractNames {
   static const getStates = 'getStates';
   static const putStates = 'putStates';
   static const wipeVault = 'wipeVault';
+  static const purgeVault = 'purgeVault';
 }
 
 class StateSyncContractCodecs {
@@ -25,6 +26,11 @@ class StateSyncContractCodecs {
   static const codecStateGetResponse = RpcCodec<StateGetResponse>.withDecoder(
     StateGetResponse.fromJson,
   );
+  static const codecStatePurgeRequest = RpcCodec<StatePurgeRequest>.withDecoder(
+    StatePurgeRequest.fromJson,
+  );
+  static const codecStatePurgeResponse =
+      RpcCodec<StatePurgeResponse>.withDecoder(StatePurgeResponse.fromJson);
   static const codecStatePutRequest = RpcCodec<StatePutRequest>.withDecoder(
     StatePutRequest.fromJson,
   );
@@ -92,6 +98,20 @@ class StateSyncContractCaller extends RpcCallerContract
       context: context,
     );
   }
+
+  @override
+  Future<StatePurgeResponse> purgeVault(
+    StatePurgeRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<StatePurgeRequest, StatePurgeResponse>(
+      methodName: StateSyncContractNames.purgeVault,
+      requestCodec: StateSyncContractCodecs.codecStatePurgeRequest,
+      responseCodec: StateSyncContractCodecs.codecStatePurgeResponse,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class StateSyncContractResponder extends RpcResponderContract
@@ -123,6 +143,12 @@ abstract class StateSyncContractResponder extends RpcResponderContract
       handler: wipeVault,
       requestCodec: StateSyncContractCodecs.codecStateWipeRequest,
       responseCodec: StateSyncContractCodecs.codecStateWipeResponse,
+    );
+    addUnaryMethod<StatePurgeRequest, StatePurgeResponse>(
+      methodName: StateSyncContractNames.purgeVault,
+      handler: purgeVault,
+      requestCodec: StateSyncContractCodecs.codecStatePurgeRequest,
+      responseCodec: StateSyncContractCodecs.codecStatePurgeResponse,
     );
   }
 }

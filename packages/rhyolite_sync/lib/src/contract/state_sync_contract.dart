@@ -369,6 +369,44 @@ class StateWipeResponse implements IRpcSerializable {
 }
 
 // ---------------------------------------------------------------------------
+// PURGE — permanent, irreversible teardown of a vault keyspace.
+// ---------------------------------------------------------------------------
+
+/// Request to permanently destroy a vault keyspace: drops every collection AND
+/// both `state_meta` keys (seq + epoch), with no epoch bump. Distinct from
+/// [StateWipeRequest], which is a reset-for-re-upload that keeps the vault alive
+/// and bumps the epoch so live clients re-sync. Call once per keyspace (notes
+/// and, separately, config).
+class StatePurgeRequest implements IRpcSerializable {
+  const StatePurgeRequest({required this.vaultId, this.sourceClientId});
+
+  final String vaultId;
+  final String? sourceClientId;
+
+  factory StatePurgeRequest.fromJson(Map<String, dynamic> json) =>
+      StatePurgeRequest(
+        vaultId: json['vaultId'] as String,
+        sourceClientId: json['sourceClientId'] as String?,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'vaultId': vaultId,
+        if (sourceClientId != null) 'sourceClientId': sourceClientId,
+      };
+}
+
+class StatePurgeResponse implements IRpcSerializable {
+  const StatePurgeResponse();
+
+  factory StatePurgeResponse.fromJson(Map<String, dynamic> _) =>
+      const StatePurgeResponse();
+
+  @override
+  Map<String, dynamic> toJson() => const {};
+}
+
+// ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
 
@@ -389,6 +427,14 @@ abstract class IStateSyncContract {
   @RpcMethod.unary(name: 'wipeVault')
   Future<StateWipeResponse> wipeVault(
     StateWipeRequest request, {
+    RpcContext? context,
+  });
+
+  /// Permanently destroy this keyspace of the vault (collections + seq + epoch),
+  /// with no epoch bump. Used by the delete-vault flow, not by re-upload.
+  @RpcMethod.unary(name: 'purgeVault')
+  Future<StatePurgeResponse> purgeVault(
+    StatePurgeRequest request, {
     RpcContext? context,
   });
 }

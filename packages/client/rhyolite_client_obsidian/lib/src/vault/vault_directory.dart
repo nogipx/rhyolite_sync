@@ -6,6 +6,7 @@ class VaultInfo {
     required this.vaultId,
     required this.vaultName,
     this.verificationToken,
+    this.deletedAt,
   });
 
   final String vaultId;
@@ -13,6 +14,13 @@ class VaultInfo {
 
   /// Opaque E2EE verification token, or null if a passphrase hasn't been set.
   final String? verificationToken;
+
+  /// Tombstone marker: epoch-ms of a permanent delete, or null if live. Non-null
+  /// means another device permanently deleted this vault — the picker hides it
+  /// and a connected device drops it locally (files on disk are left untouched).
+  final int? deletedAt;
+
+  bool get isDeleted => deletedAt != null;
 }
 
 /// Source of the user's vaults + their encrypted meta.
@@ -58,6 +66,7 @@ class SelfHostVaultDirectory implements IVaultDirectory {
             vaultId: v.vaultId,
             vaultName: v.vaultName,
             verificationToken: v.verificationToken,
+            deletedAt: v.deletedAt,
           ),
         )
         .toList();

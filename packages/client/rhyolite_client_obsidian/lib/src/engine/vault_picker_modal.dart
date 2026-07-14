@@ -26,10 +26,14 @@ Future<(VaultConfig, VaultCipher)?> showVaultPickerModal(
   // the real gate; this is a UX hint that avoids a doomed create attempt).
   int? maxVaultCount,
 }) async {
-  // Load vaults before showing the modal.
+  // Load vaults before showing the modal. Hide tombstones (permanently deleted
+  // on another device) — listVaults returns them so connected devices can drop
+  // the vault locally, but the picker only offers live vaults.
   List<VaultInfo> vaults;
   try {
-    vaults = await directory.listVaults();
+    vaults = (await directory.listVaults())
+        .where((v) => !v.isDeleted)
+        .toList();
   } catch (e) {
     vaults = [];
   }

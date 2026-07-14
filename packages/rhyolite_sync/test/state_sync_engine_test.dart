@@ -712,6 +712,11 @@ class _FakeStateContract implements IStateSyncContract {
     StateWipeRequest request, {
     RpcContext? context,
   }) async => StateWipeResponse(epoch: ++epoch);
+  @override
+  Future<StatePurgeResponse> purgeVault(
+    StatePurgeRequest request, {
+    RpcContext? context,
+  }) async => const StatePurgeResponse();
 }
 
 /// Empty history — the engine reports heads/frontiers best-effort.

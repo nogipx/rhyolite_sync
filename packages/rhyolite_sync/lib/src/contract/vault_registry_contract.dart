@@ -16,6 +16,7 @@ class VaultRegistryEntry implements IRpcSerializable {
     required this.vaultId,
     required this.vaultName,
     this.verificationToken,
+    this.deletedAt,
   });
 
   final String vaultId;
@@ -24,11 +25,17 @@ class VaultRegistryEntry implements IRpcSerializable {
   /// Opaque E2EE verification token (set once a passphrase is established).
   final String? verificationToken;
 
+  /// Tombstone marker: epoch-ms of a permanent delete, or null if live. Kept in
+  /// the registry so other devices see the deletion (via [listVaults]) and drop
+  /// the vault locally.
+  final int? deletedAt;
+
   factory VaultRegistryEntry.fromJson(Map<String, dynamic> json) =>
       VaultRegistryEntry(
         vaultId: json['vaultId'] as String,
         vaultName: json['vaultName'] as String? ?? '',
         verificationToken: json['verificationToken'] as String?,
+        deletedAt: json['deletedAt'] as int?,
       );
 
   @override
@@ -36,6 +43,7 @@ class VaultRegistryEntry implements IRpcSerializable {
         'vaultId': vaultId,
         'vaultName': vaultName,
         if (verificationToken != null) 'verificationToken': verificationToken,
+        if (deletedAt != null) 'deletedAt': deletedAt,
       };
 }
 

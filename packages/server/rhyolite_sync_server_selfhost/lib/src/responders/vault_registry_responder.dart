@@ -25,12 +25,15 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     RpcContext? context,
   }) async {
     final resp = await _client.list(collection: _vaultsCollection);
+    // Includes tombstones (deletedAt set) so other devices see the deletion and
+    // drop the vault locally; the picker hides them client-side.
     final vaults = resp.records
         .map(
           (r) => VaultRegistryEntry(
             vaultId: r.payload['vaultId'] as String? ?? r.id,
             vaultName: r.payload['vaultName'] as String? ?? '',
             verificationToken: r.payload['verificationToken'] as String?,
+            deletedAt: r.payload['deletedAt'] as int?,
           ),
         )
         .toList();
@@ -44,8 +47,26 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
   }) async {
     final existing =
         await _client.get(collection: _vaultsCollection, id: request.vaultId);
-    // Idempotent: registering an existing vault returns the stored entry.
     if (existing != null) {
+      if (existing.payload['deletedAt'] != null) {
+        // Revive a tombstoned vault: clear deletedAt + refresh the name. A plain
+        // create would conflict on the existing id.
+        final payload = Map<String, dynamic>.from(existing.payload)
+          ..remove('deletedAt')
+          ..['vaultName'] = request.vaultName;
+        await _client.update(
+          collection: _vaultsCollection,
+          id: request.vaultId,
+          expectedVersion: existing.version,
+          payload: payload,
+        );
+        return VaultRegistryEntry(
+          vaultId: request.vaultId,
+          vaultName: request.vaultName,
+          verificationToken: existing.payload['verificationToken'] as String?,
+        );
+      }
+      // Idempotent: registering an existing (live) vault returns the stored entry.
       return VaultRegistryEntry(
         vaultId: request.vaultId,
         vaultName: existing.payload['vaultName'] as String? ?? request.vaultName,
@@ -141,9 +162,23 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     DeleteVaultRequest request, {
     RpcContext? context,
   }) async {
-    // Idempotent — a missing entry is treated as already-deleted. The vault's
-    // sync data (states, blobs, history) is wiped separately via wipeVault.
-    await _client.delete(collection: _vaultsCollection, id: request.vaultId);
+    // Soft delete: mark the registry entry with deletedAt (tombstone) instead of
+    // removing it, so other devices see the deletion via listVaults and drop the
+    // vault locally. The vault's sync data is purged separately via purgeVault.
+    // Idempotent — a missing or already-tombstoned entry is a no-op. The
+    // encrypted meta is no longer needed once the vault is gone.
+    final existing =
+        await _client.get(collection: _vaultsCollection, id: request.vaultId);
+    if (existing != null && existing.payload['deletedAt'] == null) {
+      final payload = Map<String, dynamic>.from(existing.payload)
+        ..['deletedAt'] = DateTime.now().millisecondsSinceEpoch;
+      await _client.update(
+        collection: _vaultsCollection,
+        id: request.vaultId,
+        expectedVersion: existing.version,
+        payload: payload,
+      );
+    }
     await _client.delete(collection: _metaCollection, id: request.vaultId);
     return const VaultAck();
   }

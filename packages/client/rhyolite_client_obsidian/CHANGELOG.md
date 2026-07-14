@@ -1,3 +1,11 @@
+## [3.4.0] - 2026-07-14
+
+### Vaults
+
+- Deleting a vault now removes all of it from the server. Your notes were already cleared, but a vault's synced settings were left behind; a permanent delete now removes everything (obsidian, core).
+- A vault you delete on one device now disappears from your other devices too. A connected device that sees the vault was deleted elsewhere disconnects and clears its local sync state — your note files on disk are left untouched (obsidian, core).
+
+
 ## [3.3.0] - 2026-07-13
 
 ### Settings sync

@@ -94,6 +94,11 @@ StreamSubscription<SyncEngineEvent>? _configReconnectSub;
 /// engine's event stream each cycle.
 StreamSubscription<SyncEngineEvent>? _engineAuthEventsSub;
 
+/// Watches for the connected vault being permanently deleted on another device
+/// (its registry entry comes back tombstoned). Cancelled on unload like the
+/// others to avoid leaking a listener across soft reloads.
+StreamSubscription<SyncEngineEvent>? _deletedVaultWatchSub;
+
 /// Latest known plan capabilities (managed edition). Populated from
 /// getSubscription; the engine reads `maxFileSizeBytes` from it for the
 /// per-file size gate. Null in self-host / before the first fetch → no limit.
@@ -742,13 +747,54 @@ void main() {
             if (e is SyncConnected) _configSync?.handleReconnect();
           });
 
-          // Permanently delete a vault: wipe its data from the sync server
-          // (states, blobs, history), then remove the registration (last).
-          // The account/self-host token authorizes wiping any of the user's
+          // Permanent-delete propagation. When another device permanently
+          // deletes the vault this device is connected to, its registry entry
+          // comes back tombstoned (deletedAt set). On (re)connect, pull the
+          // vault list and, if our vault is tombstoned, drop it locally:
+          // disconnect + wipe local sync state. Files on disk are left
+          // untouched (matches the initiating device). We act only on an
+          // explicit tombstone, never on mere absence (which could be a
+          // transient list failure or an access change).
+          _deletedVaultWatchSub = engine.events.listen((e) async {
+            if (e is! SyncConnected) return;
+            final connectedVaultId = engine.config.vaultId;
+            final d = directory;
+            if (connectedVaultId.isEmpty || d == null) return;
+            final List<VaultInfo> vaults;
+            try {
+              vaults = await d.listVaults();
+            } catch (_) {
+              return; // transient — don't forget on a failed list
+            }
+            final matches = vaults.where((v) => v.vaultId == connectedVaultId);
+            if (matches.isEmpty || !matches.first.isDeleted) return;
+            _log.info(
+              'Vault $connectedVaultId permanently deleted on another device '
+              '— dropping it locally (files on disk untouched)',
+            );
+            engine.cipher = null;
+            await _scheduleBoot(() async {
+              await engine.stop();
+              try {
+                await engine.wipeLocalState();
+              } catch (_) {}
+            });
+            await configStorage.disconnectVault();
+          });
+
+          // Permanently delete a vault. Order: (1) tombstone the registration
+          // so the vault is marked deleted (other devices see it via listVaults
+          // and drop it locally); (2) purge sync data for BOTH keyspaces —
+          // notes AND settings/config — from the sync server. Tombstone-first
+          // means a failed purge only leaks server data (recoverable by retry —
+          // both steps are idempotent), while the user-facing outcome (vault
+          // gone everywhere) is already correct.
+          //
+          // The account/self-host token authorizes deleting any of the user's
           // own vaults, so a short-lived connection works from the picker even
-          // with no vault connected. Local note files on disk are never
-          // touched; external (BYO) blobs stay in the user's own bucket (the
-          // confirmation warns to clear it separately).
+          // with no vault connected. Local note files on disk are never touched;
+          // external (BYO) blobs stay in the user's own bucket (the confirmation
+          // warns to clear it separately).
           Future<void> deleteVaultClosure(VaultInfo vault) async {
             final dir = directory;
             final tp = sessionTokenProvider;
@@ -757,6 +803,10 @@ void main() {
             }
             final vaultId = vault.vaultId;
 
+            // 1. Tombstone first (intent). Idempotent.
+            await dir.deleteVault(vaultId: vaultId);
+
+            // 2. Purge sync data for both keyspaces over one short-lived socket.
             final conn = WebSocketSyncConnection(
               serverUrl: syncServerUrl,
               tokenProvider: tp,
@@ -764,18 +814,21 @@ void main() {
             );
             try {
               await conn.connect().timeout(const Duration(seconds: 15));
-              await conn.stateCaller.wipeVault(
-                StateWipeRequest(
-                  vaultId: vaultId,
-                  sourceClientId: cfg.clientName,
-                ),
+              final purge = StatePurgeRequest(
+                vaultId: vaultId,
+                sourceClientId: cfg.clientName,
               );
+              // Notes keyspace (default) + settings keyspace ('config'), which
+              // lives as a sibling StateSync service on the same socket.
+              await conn.stateCaller.purgeVault(purge);
+              final configCaller = StateSyncContractCaller(
+                conn.endpoint,
+                serviceNameOverride: StateSyncContractNames.instance('config'),
+              );
+              await configCaller.purgeVault(purge);
             } finally {
               await conn.dispose();
             }
-
-            // Registration LAST — while it exists the vault is still live.
-            await dir.deleteVault(vaultId: vaultId);
 
             // If this device had that vault connected, clear its local state.
             if (engine.config.vaultId == vaultId) {
@@ -1253,6 +1306,8 @@ void main() {
       _configReconnectSub = null;
       await _engineAuthEventsSub?.cancel();
       _engineAuthEventsSub = null;
+      await _deletedVaultWatchSub?.cancel();
+      _deletedVaultWatchSub = null;
       _syncIndicator?.dispose();
       _syncIndicator = null;
       _syncPanel?.closeLeaves();

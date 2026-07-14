@@ -14,6 +14,7 @@ class VaultDto implements IRpcSerializable {
     required this.vaultName,
     this.verificationToken,
     this.encryptedMeta,
+    this.deletedAt,
   });
 
   final String vaultId;
@@ -26,11 +27,17 @@ class VaultDto implements IRpcSerializable {
   /// (e.g. external blob storage config). Server stores but never reads it.
   final String? encryptedMeta;
 
+  /// Tombstone marker: epoch-ms of a permanent delete, or null if live. The
+  /// server keeps the row (soft delete) so other devices see the deletion and
+  /// drop the vault locally, and so created-vs-deleted counts stay meaningful.
+  final int? deletedAt;
+
   factory VaultDto.fromJson(Map<String, dynamic> json) => VaultDto(
     vaultId: json['vault_id'] as String,
     vaultName: json['vault_name'] as String,
     verificationToken: json['verification_token'] as String?,
     encryptedMeta: json['encrypted_meta'] as String?,
+    deletedAt: json['deleted_at'] as int?,
   );
 
   @override
@@ -39,6 +46,7 @@ class VaultDto implements IRpcSerializable {
     'vault_name': vaultName,
     if (verificationToken != null) 'verification_token': verificationToken,
     if (encryptedMeta != null) 'encrypted_meta': encryptedMeta,
+    if (deletedAt != null) 'deleted_at': deletedAt,
   };
 }
 

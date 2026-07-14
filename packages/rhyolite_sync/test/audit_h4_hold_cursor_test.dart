@@ -51,6 +51,10 @@ class _FakeStateCaller implements IStateSyncContract {
   Future<StateWipeResponse> wipeVault(StateWipeRequest request,
           {RpcContext? context}) =>
       throw UnimplementedError();
+  @override
+  Future<StatePurgeResponse> purgeVault(StatePurgeRequest request,
+          {RpcContext? context}) =>
+      throw UnimplementedError();
 }
 
 class _FakeHistoryCaller implements IHistoryContract {

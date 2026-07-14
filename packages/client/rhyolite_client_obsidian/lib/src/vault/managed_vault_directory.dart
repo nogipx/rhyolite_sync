@@ -21,6 +21,7 @@ class ManagedVaultDirectory implements IVaultDirectory {
             vaultId: v.vaultId,
             vaultName: v.vaultName,
             verificationToken: v.verificationToken,
+            deletedAt: v.deletedAt,
           ),
         )
         .toList();

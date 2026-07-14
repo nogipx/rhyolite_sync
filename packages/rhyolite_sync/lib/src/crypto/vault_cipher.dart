@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as pc;
 import 'package:cryptography/cryptography.dart' as crypto;
+import 'package:cryptography/dart.dart' show DartArgon2id;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 /// [IVaultCipher] implementation using AES-256-GCM AEAD.
@@ -33,14 +34,23 @@ class VaultCipher implements IVaultCipher {
   /// Envelope tag for AES-256-GCM.
   static const _tagAesGcm = 0x01;
 
-  // Argon2id parameters: 64 MiB memory, 3 iterations, 4 threads.
+  // Argon2id parameters: 64 MiB memory, 3 iterations, 4 lanes.
   // Provides ~1–2 s KDF time on typical hardware — adequate protection
   // while remaining usable in a browser environment.
-  static final _argon2 = crypto.Argon2id(
+  //
+  // maxIsolates:1 computes the 4 lanes sequentially in-process rather than in
+  // worker isolates. The Argon2id output is byte-identical either way (lanes are
+  // an algorithm parameter, not a threading choice — verified against the default
+  // path), so vault keys are unaffected. It sidesteps an intermittent SIGSEGV in
+  // cryptography's parallel-lane isolate path (DartArgon2State.processBlock) that
+  // crashes on CI runners even under `dart test --concurrency=1`. Web has no
+  // isolates, so this is a no-op there.
+  static final _argon2 = DartArgon2id(
     parallelism: 4,
     memory: 65536, // 64 MiB
     iterations: 3,
     hashLength: 32,
+    maxIsolates: 1,
   );
 
   static final _cipher = crypto.AesGcm.with256bits();

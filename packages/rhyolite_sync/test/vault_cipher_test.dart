@@ -1,3 +1,10 @@
+// Argon2id at production params (64 MiB, t=3, p=4) runs pure-Dart on the VM and
+// is slow on 2-vCPU CI runners; `derive is deterministic` does 3 derivations,
+// which can brush past the test package's 30 s default. The params are baked
+// into every vault's key and cannot be lowered, so widen the timeout instead.
+@Timeout(Duration(minutes: 2))
+library;
+
 import 'dart:convert';
 import 'dart:typed_data';
 

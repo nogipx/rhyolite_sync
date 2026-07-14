@@ -100,10 +100,11 @@ void main() {
 
   group('plugins / themes / snippets', () {
     test(
-      'community plugin data.json is wholeFile (opaque, never field-merged)',
+      'community plugin data.json is jsonWholeFile (canonical, not '
+      'field-merged)',
       () {
         final r = c('plugins/dataview/data.json')!;
-        expect(r.kind, SettingsCrdtKind.wholeFile);
+        expect(r.kind, SettingsCrdtKind.jsonWholeFile);
         expect(r.category, SettingsCategory.communityPluginSettings);
       },
     );

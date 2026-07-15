@@ -1,3 +1,10 @@
+## [3.5.1] - 2026-07-16
+
+### Bug Fixes
+
+- stop a rare sync loop that could repeatedly re-send an unchanged file and hammer the server (core)
+
+
 ## [3.5.0] - 2026-07-15
 
 ### Features

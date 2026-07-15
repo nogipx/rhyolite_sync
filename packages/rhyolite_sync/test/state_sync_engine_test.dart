@@ -599,6 +599,53 @@ void main() {
       );
     });
 
+    test('a pushed file is not re-pushed on every notify-triggered pull '
+        '(no push -> notify -> pull -> push storm)', () async {
+      // Regression: the server echoes a device's own write back as a notify;
+      // getStates since our cursor then returns nothing (own writes filtered).
+      // Each notify triggers a pull whose post-pull _push() re-collects dirty
+      // files. A locally-created file's synced LCA never advances on push (only
+      // _materialise / a sealed merge do), so it stays "isNew" forever — and
+      // without the _lastPushed guard on the plain path it was re-pushed on
+      // EVERY pull, an unbounded push/notify/pull/push loop (cursor climbed
+      // hundreds of seqs in seconds in the field).
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+
+      // Binary so the blobRef is a deterministic manifest hash (no Fugue
+      // re-serialization noise) and the file never converges with a peer.
+      h.io.files['$_vaultPath/photo.bin'] =
+          Uint8List.fromList(List.generate(2000, (i) => (i * 7) % 256));
+      await h.engine.start();
+
+      final putsAfterStartup = h.state.puts.length;
+      expect(putsAfterStartup, greaterThan(0),
+          reason: 'startup must publish the new file exactly once');
+
+      // Model the echo: every pull returns no records (server filtered our own
+      // write), and its post-pull push must find nothing new to send.
+      h.state.recordsFor = (since) => const [];
+      for (var i = 0; i < 5; i++) {
+        await h.engine.triggerPull();
+      }
+
+      expect(h.state.puts.length, putsAfterStartup,
+          reason: 'an unchanged, already-pushed file must not be re-pushed on '
+              'every pull — otherwise push/notify/pull/push loops forever');
+
+      // A genuine content change must STILL push (the guard keys on blobRef, so
+      // a new version clears it) — the fix must not wedge real edits.
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'photo.bin')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/photo.bin'] =
+          Uint8List.fromList(List.generate(2000, (i) => (i * 11) % 256));
+      h.changes.emit(const FileModifiedEvent(relativePath: 'photo.bin'));
+      await pushed;
+      expect(h.state.puts.length, greaterThan(putsAfterStartup),
+          reason: 'a real edit (new blobRef) must still be pushed');
+    });
+
     test('scheduleBackground runs a sibling task on the engine scheduler '
         '(settings-sync hook)', () async {
       final h = await _Harness.create();

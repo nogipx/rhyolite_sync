@@ -211,20 +211,29 @@ class StatePusher {
         // conflict by the pull's pre-join reconcile (an edit made inside the
         // pull window) or kept in a divergent multi-value union was never
         // published. Publish OUR value (the others came from the server
-        // already) so peers can see it and render the same union. Guarded by
-        // [_lastPushed] because a multi-value register never advances a synced
-        // LCA, so it would otherwise re-push every pull.
+        // already) so peers can see it and render the same union.
         final own = register.values
             .where((t) => t.hlc.nodeId == store.deviceId)
             .toList(growable: false);
         if (own.isEmpty) continue;
         tv = own.first;
-        if (_lastPushed[fileId] == tv.value.blobRef) continue;
       } else {
         tv = register.values.first;
       }
 
       final state = tv.value;
+
+      // Already pushed this exact content and nothing has changed since. A push
+      // deliberately never advances the synced LCA (only _materialise / a sealed
+      // merge do — see below), so isNew stays isNew and a conflicting own-value
+      // stays owed. Without this guard the post-pull _push() re-collects the
+      // same value on every cycle; when the server echoes our own write back as
+      // a notify that re-triggers the pull, the result is an unbounded
+      // push -> notify -> pull -> push storm. The guard was previously only on
+      // the conflict path; the plain isNew/isModified path is vulnerable to the
+      // exact same loop because its synced LCA never advances on push either.
+      if (_lastPushed[fileId] == state.blobRef) continue;
+
       final synced = store.lastSyncedBlobRefFor(fileId);
       final neverPushed = synced == null;
       final isNew = neverPushed && !state.tombstone;

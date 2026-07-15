@@ -465,6 +465,53 @@ void main() {
       await duringPushed; // would time out under the old late-subscribe code
     });
 
+    test('an interactive edit preempts a wedged pull download so the push '
+        'still goes out (single lane no longer starved)', () async {
+      final remote = _BlockingRemote();
+
+      // Device A publishes a binary file so B has a real blob to pull.
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      a.io.files['$_vaultPath/photo.bin'] =
+          Uint8List.fromList(List.generate(2000, (i) => (i * 7) % 256));
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+      expect(records, isNotEmpty, reason: 'A must publish a record with a blob');
+
+      // Device B starts empty — its startup pull sees no records, so nothing
+      // blocks yet.
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      await b.engine.start();
+
+      // Arm: B's next pull returns A's records, and every blob download now
+      // wedges until its RpcContext is cancelled — models the iOS WS stall.
+      b.state.recordsFor = (since) => records;
+      b.state.getCursor = records.last.serverSeq;
+      remote.blockDownloads = true;
+
+      // Kick a preemptible pull; it wedges inside the blob download.
+      unawaited(b.engine.triggerPull());
+      await remote.downloadEntered.future.timeout(const Duration(seconds: 10));
+
+      // While the pull is wedged, the user creates a NEW file. Its interactive
+      // reconcile+push (priority _pInteractive) must PREEMPT the pull and free
+      // the single lane, so this push completes instead of starving behind the
+      // stalled download. Under the old non-preemptible pull this times out.
+      final pushed = b.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'edit.bin')
+          .timeout(const Duration(seconds: 10));
+      b.io.files['$_vaultPath/edit.bin'] = Uint8List.fromList([1, 2, 3, 4, 5]);
+      b.changes.emit(const FileCreatedEvent(relativePath: 'edit.bin'));
+
+      await pushed;
+
+      // The wedged download was aborted by the preempt, not left hanging.
+      await _eventually(() => remote.downloadsCancelled > 0);
+
+      remote.blockDownloads = false; // let any re-scheduled pull finish cleanly
+    });
+
     test('scheduleBackground runs a sibling task on the engine scheduler '
         '(settings-sync hook)', () async {
       final h = await _Harness.create();
@@ -825,6 +872,39 @@ class _MemRemote implements IBlobStorage {
     for (final id in blobIds) {
       store.remove(id);
     }
+  }
+}
+
+/// Like [_MemRemote], but when [blockDownloads] is set a download wedges until
+/// its [RpcContext] is cancelled, then throws [RpcCancelledException] — modelling
+/// a stalled server-stream that honours cancellation. Lets a test drive the
+/// pull-preemption path deterministically. Extends [_MemRemote] so it satisfies
+/// the harness's `sharedRemote` type and reuses upload/exists/delete.
+class _BlockingRemote extends _MemRemote {
+  bool blockDownloads = false;
+
+  /// Completes the first time a blocked download is entered, so the test can
+  /// wait for the pull to actually reach the stall before preempting it.
+  final Completer<void> downloadEntered = Completer<void>();
+
+  /// How many blocked downloads were released by a cancellation (preempt).
+  int downloadsCancelled = 0;
+
+  @override
+  Future<Map<String, Uint8List>> download(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async {
+    if (blockDownloads) {
+      if (!downloadEntered.isCompleted) downloadEntered.complete();
+      final token = context?.cancellationToken;
+      if (token != null) {
+        await token.cancelled;
+        downloadsCancelled += 1;
+        throw RpcCancelledException(token.reason ?? 'cancelled');
+      }
+    }
+    return super.download(blobIds, context: context);
   }
 }
 

@@ -66,8 +66,9 @@ class RemoteApplier {
   Future<void> apply(
     String fileId,
     List<StateRecord> records,
-    IStateConflictResolver resolver,
-  ) async {
+    IStateConflictResolver resolver, {
+    RpcContext? context,
+  }) async {
     final swApply = Stopwatch()..start();
     final swDecodeSum = Stopwatch();
     final tagged = <TaggedValue<FileState>>[];
@@ -156,7 +157,7 @@ class RemoteApplier {
       );
       swPreReconcile.start();
       try {
-        await reconciler.reconcileWithDisk(knownPath);
+        await reconciler.reconcileWithDisk(knownPath, context: context);
       } catch (e) {
         // Same rationale as the per-record decode catch: a policy/auth
         // rejection here will fire on every file in the batch, freezing
@@ -206,7 +207,7 @@ class RemoteApplier {
     }
     if (!joined.hasConflict) {
       final swMaterialise = Stopwatch()..start();
-      await _materialise(joined.singleValue!);
+      await _materialise(joined.singleValue!, context: context);
       await store.persistOne(fileId);
       swMaterialise.stop();
       swApply.stop();
@@ -241,7 +242,7 @@ class RemoteApplier {
     if (conflictPath.isNotEmpty &&
         const FileTypeDetector().isText(conflictPath)) {
       final swResolve = Stopwatch()..start();
-      await _resolveTextConflict(fileId, joined);
+      await _resolveTextConflict(fileId, joined, context: context);
       await store.persistOne(fileId);
       swResolve.stop();
       swApply.stop();
@@ -260,7 +261,7 @@ class RemoteApplier {
     final baseRef = store.lastSyncedBlobRefFor(fileId);
     final swResolveBinary = Stopwatch()..start();
     final outcome = await resolver.resolve(joined.allValues, baseRef: baseRef);
-    await _applyOutcome(fileId, outcome, joined);
+    await _applyOutcome(fileId, outcome, joined, context: context);
     await store.persistOne(fileId);
     swResolveBinary.stop();
     swApply.stop();
@@ -290,8 +291,9 @@ class RemoteApplier {
   ///     conflict-copy file, no data loss.
   Future<void> _resolveTextConflict(
     String fileId,
-    MvRegister<FileState> joined,
-  ) async {
+    MvRegister<FileState> joined, {
+    RpcContext? context,
+  }) async {
     final chunkedIO = _newChunkedIO();
     if (chunkedIO == null) return;
 
@@ -309,8 +311,9 @@ class RemoteApplier {
       if (state.tombstone || state.blobRef.isEmpty) continue;
       Uint8List? bytes;
       try {
-        bytes = await chunkedIO.download(state.blobRef);
+        bytes = await chunkedIO.download(state.blobRef, context: context);
       } catch (e) {
+        if (e is RpcCancelledException) rethrow;
         _log.warning('Conflict download failed for $fileId: $e');
       }
       if (bytes == null) continue;
@@ -495,7 +498,7 @@ class RemoteApplier {
 
   /// Write a single canonical [FileState] to disk and update the synced
   /// blob ref. No-op when the file already matches.
-  Future<void> _materialise(FileState state) async {
+  Future<void> _materialise(FileState state, {RpcContext? context}) async {
     if (state.tombstone) {
       final fullPath = '$vaultPath/${state.path}';
       if (await io.fileExists(fullPath)) {
@@ -511,15 +514,16 @@ class RemoteApplier {
     // would trip the already-synced short-circuit on every later pull and
     // leave the file permanently missing (no retry). Leaving the LCA
     // untouched lets a subsequent pull/verify re-attempt the write.
-    final wrote = await reconciler.writeFileToDisk(state);
+    final wrote = await reconciler.writeFileToDisk(state, context: context);
     if (wrote) store.recordSyncedBlobRef(state.fileId, state.blobRef);
   }
 
   Future<void> _applyOutcome(
     String fileId,
     StateMergeOutcome outcome,
-    MvRegister<FileState> sourceRegister,
-  ) async {
+    MvRegister<FileState> sourceRegister, {
+    RpcContext? context,
+  }) async {
     switch (outcome) {
       case StateMergeMerged(:final merged, :final newBlobBytes):
         var sealed = merged;
@@ -535,6 +539,7 @@ class RemoteApplier {
               final result = await chunkedIO.upload(
                 newBlobBytes,
                 _collectKnownChunks(),
+                context: context,
               );
               sealed = merged.copyWith(
                 blobRef: result.manifestHash,
@@ -585,7 +590,7 @@ class RemoteApplier {
       ):
         await _writeConflictCopyFile(loser, suggestedCopyPath);
         // Materialise winner content + register-collapse via applyLocal.
-        await _materialise(winner);
+        await _materialise(winner, context: context);
         store.applyLocal(winner);
         _emit(SyncFileModified(winner.path));
         _emit(
@@ -604,7 +609,7 @@ class RemoteApplier {
         // Materialise the winner and seal the register the normal way,
         // then surface the loss explicitly — the loser's bytes are gone
         // and the UI must know.
-        await _materialise(winner);
+        await _materialise(winner, context: context);
         store.applyLocal(winner);
         _emit(SyncFileModified(winner.path));
         _log.warning('Data loss sealing $fileId via LWW: $reason');
@@ -631,7 +636,7 @@ class RemoteApplier {
         for (final part in parts) {
           switch (part) {
             case StateMergeConflictCopy(:final loser, :final suggestedCopyPath):
-              await _writeConflictCopyFile(loser, suggestedCopyPath);
+              await _writeConflictCopyFile(loser, suggestedCopyPath, context: context);
             case StateMergeWinnerOnlyLossy(
                 :final lostBlobRef,
                 :final lostNodeId,
@@ -653,7 +658,7 @@ class RemoteApplier {
               break;
           }
         }
-        await _materialise(winner);
+        await _materialise(winner, context: context);
         store.applyLocal(winner);
         _emit(SyncFileModified(winner.path));
         _emit(
@@ -673,16 +678,18 @@ class RemoteApplier {
   /// recoverability the resolver pre-verified).
   Future<void> _writeConflictCopyFile(
     FileState loser,
-    String copyPath,
-  ) async {
+    String copyPath, {
+    RpcContext? context,
+  }) async {
     // loser.blobRef is a manifest hash — read it through ChunkedBlobIO so the
     // conflict-copy file gets the real file content, not the manifest JSON.
     Uint8List? loserBytes;
     final chunkedIO = _newChunkedIO();
     if (chunkedIO != null) {
       try {
-        loserBytes = await chunkedIO.download(loser.blobRef);
+        loserBytes = await chunkedIO.download(loser.blobRef, context: context);
       } catch (e) {
+        if (e is RpcCancelledException) rethrow;
         _log.warning('Conflict-copy chunked download failed: $e');
       }
     }

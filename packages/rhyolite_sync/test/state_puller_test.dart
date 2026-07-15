@@ -103,6 +103,10 @@ typedef _Fx = ({
 Future<_Fx> _newPuller(
   List<StateRecord> dataset, {
   required bool Function(String fileId) failFor,
+  // When it returns non-null for a fileId, that apply throws the returned
+  // object instead of the default StateError — used to inject an
+  // RpcCancelledException (what an in-flight blob download raises on preempt).
+  Object? Function(String fileId)? errorFor,
 }) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
@@ -122,7 +126,9 @@ Future<_Fx> _newPuller(
     rpcTimeout: const Duration(seconds: 5),
     getRemoteBlobStorage: () => null,
     newResolver: () => _NoConflictResolver(),
-    applyFile: (fileId, records, resolver) async {
+    applyFile: (fileId, records, resolver, {context}) async {
+      final custom = errorFor?.call(fileId);
+      if (custom != null) throw custom;
       if (failFor(fileId)) throw StateError('boom for $fileId');
     },
     handleEpochMismatch: (_) async {},
@@ -156,7 +162,7 @@ void main() {
         newResolver: () => _NoConflictResolver(),
         // A successful apply records a synced LCA for the file — exactly the
         // in-memory-only state that a crash used to lose.
-        applyFile: (fileId, records, resolver) async {
+        applyFile: (fileId, records, resolver, {context}) async {
           store.recordSyncedBlobRef(fileId, 'lca-$fileId');
         },
         handleEpochMismatch: (_) async {},
@@ -274,6 +280,53 @@ void main() {
       expect(f.store.serverCursor, 3, reason: 'B applied, cursor advances fully');
       expect(f.events.whereType<SyncRecordSkipped>(), isEmpty,
           reason: 'a recovered file is never reported as skipped');
+    });
+  });
+
+  group('StatePuller — preemption unwinds the pull (not swallowed, not held '
+      'like a per-file failure)', () {
+    test('a cancelled context aborts the pull, cursor untouched, nothing skipped',
+        () async {
+      final f = await _newPuller(
+        [_rec(_idA, 1), _rec(_idB, 2)],
+        failFor: (_) => false,
+      );
+      final token = RpcCancellationToken()..cancel('preempted by edit');
+      final ctx = RpcContext.withCancellation(token);
+
+      await expectLater(
+        () => f.puller.pull(context: ctx),
+        throwsA(isA<RpcCancelledException>()),
+        reason: 'a preempted pull must unwind so the lane frees for the push',
+      );
+      expect(f.store.serverCursor, 0,
+          reason: 'cursor must NOT advance on preempt — the re-scheduled pull '
+              're-fetches the batch from where it left off');
+      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty,
+          reason: 'cancellation is not a per-file failure — nothing is skipped');
+    });
+
+    test('cancellation raised mid-apply propagates out, not held/skipped like a '
+        'transient failure', () async {
+      // B throws RpcCancelledException — exactly what an in-flight blob download
+      // raises when the interactive push preempts the pull. Unlike a StateError
+      // (which is held-and-retried), this must abort the WHOLE pull with the
+      // cursor left at 0 so the re-scheduled pull retries from scratch.
+      final f = await _newPuller(
+        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
+        failFor: (_) => false,
+        errorFor: (id) =>
+            id == _idB ? RpcCancelledException('preempted') : null,
+      );
+
+      await expectLater(
+        () => f.puller.pull(),
+        throwsA(isA<RpcCancelledException>()),
+      );
+      expect(f.store.serverCursor, 0,
+          reason: 'the pull unwinds; the cursor is never advanced NOR held '
+              '(a StateError would hold it at 1 — cancellation must not)');
+      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty);
     });
   });
 }

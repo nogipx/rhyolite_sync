@@ -1,3 +1,15 @@
+## [3.4.2] - 2026-07-15
+
+### Bug Fixes
+
+- stop a stalled blob download from starving sync (core)
+
+### Other
+
+- bump plugin version to 3.4.2 (obsidian)
+- cover pull preemption and download cancellation (core)
+
+
 ## [3.4.1] - 2026-07-15
 
 ### Features

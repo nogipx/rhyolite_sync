@@ -17,6 +17,18 @@ class RemoteBlobStorage implements IBlobStorage {
   final String vaultId;
   final IVaultCipher? _cipher;
 
+  /// Idle timeout for the download server-stream: if no chunk arrives for this
+  /// long the stream is considered wedged and errors out. This is the fix for
+  /// the observed pull freeze — on iOS (WKWebView WebSocket) a blob-download
+  /// server-stream can stall silently mid-stream (measured up to ~225s in the
+  /// field) without erroring; because the pull holds the single sync lane and
+  /// the download had no timeout, every subsequent push/pull was starved and
+  /// the vault under-synced. An IDLE (not total) timeout tolerates slow-but-
+  /// progressing transfers — it only fires when the stream goes truly silent.
+  /// On timeout the callers (prefetch / apply) surface it and the puller's
+  /// hold-and-retry re-fetches on the next cycle, so the lane is never wedged.
+  static const _downloadIdleTimeout = Duration(seconds: 20);
+
   @override
   Future<Map<String, Uint8List>> download(
     List<String> blobIds, {
@@ -30,7 +42,7 @@ class RemoteBlobStorage implements IBlobStorage {
     final result = <String, Uint8List>{};
     String? currentBlobId;
     BytesBuilder? currentBuilder;
-    await for (final chunk in stream) {
+    await for (final chunk in stream.timeout(_downloadIdleTimeout)) {
       if (chunk.blobId != null) {
         currentBlobId = chunk.blobId;
         currentBuilder = BytesBuilder();

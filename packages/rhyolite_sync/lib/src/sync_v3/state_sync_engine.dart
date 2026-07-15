@@ -558,18 +558,40 @@ class StateSyncEngine implements ISyncEngine {
     if (!_running) return;
     // Foreground task, coalesced by 'pull' — a burst of notifies collapses to
     // one pull, and it is serialized behind any interactive reconcile/push.
-    // Returns when the pull has run, preserving the await contract for manual
-    // / test callers.
+    //
+    // PREEMPTIBLE: an interactive reconcile+push ([_pInteractive]) can signal
+    // this task's token while the pull runs, so a slow or wedged blob download
+    // no longer starves the user's own push on the single sync lane (the
+    // freeze this fixes). The scheduler token is bridged to an
+    // [RpcCancellationToken]/[RpcContext] threaded through the puller into every
+    // blob download; on preemption the pull unwinds ([RpcCancelledException])
+    // and we re-schedule it to finish once interactive work clears — mirroring
+    // [_scheduleBackground]. Re-scheduling is fire-and-forget: awaiting it here
+    // would hold the lane and deadlock the very push we yielded for.
     await _scheduler.schedule(
       key: 'pull',
       group: _schedulerGroup,
       priority: _pForeground,
-      run: (_) async {
+      preemptible: true,
+      run: (token) async {
+        if (!_running) return;
+        final rpcToken = RpcCancellationToken();
+        unawaited(
+          token.onCancel.then((_) {
+            if (!rpcToken.isCancelled) {
+              rpcToken.cancel('pull preempted by interactive work');
+            }
+          }),
+        );
+        final context = RpcContext.withCancellation(rpcToken);
         try {
-          await _pull();
+          await _pull(context: context);
           await _store?.persistMeta();
           // Causal-stability GC piggybacks on pull cadence; it self-throttles.
           await _causalGc.run();
+        } on RpcCancelledException catch (_) {
+          _log.info('Pull preempted by interactive work — re-scheduling');
+          if (_running) unawaited(triggerPull());
         } catch (e) {
           _log.warning('Pull error: $e');
         }
@@ -744,10 +766,10 @@ class StateSyncEngine implements ISyncEngine {
   // Pull
   // ---------------------------------------------------------------------------
 
-  Future<void> _pull() async {
+  Future<void> _pull({RpcContext? context}) async {
     final puller = _puller;
     if (puller == null) return;
-    await puller.pull();
+    await puller.pull(context: context);
   }
 
   // ---------------------------------------------------------------------------

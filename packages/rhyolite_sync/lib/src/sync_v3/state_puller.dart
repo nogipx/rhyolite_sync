@@ -28,8 +28,9 @@ class StatePuller {
     required Future<void> Function(
       String fileId,
       List<StateRecord> records,
-      IStateConflictResolver resolver,
-    ) applyFile,
+      IStateConflictResolver resolver, {
+      RpcContext? context,
+    }) applyFile,
     required Future<void> Function(int newEpoch) handleEpochMismatch,
     required void Function(SyncEngineEvent event) emit,
     required bool Function(Object error) isFatalRejection,
@@ -56,8 +57,9 @@ class StatePuller {
   final Future<void> Function(
     String fileId,
     List<StateRecord> records,
-    IStateConflictResolver resolver,
-  ) _applyFile;
+    IStateConflictResolver resolver, {
+    RpcContext? context,
+  }) _applyFile;
   final Future<void> Function(int newEpoch) _handleEpochMismatch;
   final void Function(SyncEngineEvent event) _emit;
   final bool Function(Object error) _isFatalRejection;
@@ -80,7 +82,7 @@ class StatePuller {
   /// (with a surfaced event) rather than blocking the cursor further.
   static const int _maxApplyAttempts = 5;
 
-  Future<void> pull() async {
+  Future<void> pull({RpcContext? context}) async {
     final caller = stateCaller;
 
     final swPullTotal = Stopwatch()..start();
@@ -186,17 +188,25 @@ class StatePuller {
         batchRecords.addAll(byFile[fid]!);
       }
 
+      // Cooperative preemption point: an interactive edit can cancel this
+      // pull (see StateSyncEngine.triggerPull). Bail before spending the next
+      // batch's network/compute so the lane frees for the push; the engine
+      // re-schedules the pull to finish later.
+      context?.cancellationToken?.throwIfCancelled();
+
       swPrefetchTotal.start();
       final downloaded = await _prefetchBlobs(
         batchRecords,
         progressOffset: prefetched,
         progressTotal: totalMissing == 0 ? null : totalMissing,
+        context: context,
       );
       prefetched += downloaded;
       swPrefetchTotal.stop();
 
       swApplyTotal.start();
       for (final fileId in batchFileIds) {
+        context?.cancellationToken?.throwIfCancelled();
         fileIdx += 1;
         _log.info(
           'Pull: applying file $fileIdx/$totalFiles '
@@ -205,10 +215,15 @@ class StatePuller {
         );
         final swFile = Stopwatch()..start();
         try {
-          await _applyFile(fileId, byFile[fileId]!, resolver);
+          await _applyFile(fileId, byFile[fileId]!, resolver, context: context);
           // Success ends any prior failure streak for this file.
           _applyAttempts.remove(fileId);
         } catch (e) {
+          // Preemption/cancellation aborts the WHOLE pull — it must not be
+          // recorded as a per-file failure (that would advance-past or
+          // hold-retry a file we simply chose to defer). Re-throw so the
+          // engine's triggerPull catches it and re-schedules the pull.
+          if (e is RpcCancelledException) rethrow;
           // A fatal policy/auth rejection means every subsequent record
           // will fail the same way. Bubble it out so the top-level start()
           // catch can emit a typed event and stop the engine — without
@@ -257,10 +272,12 @@ class StatePuller {
       await Future<void>.delayed(Duration.zero);
       final stillFailed = <String>{};
       for (final fid in failedFileIds) {
+        context?.cancellationToken?.throwIfCancelled();
         try {
-          await _applyFile(fid, byFile[fid]!, resolver);
+          await _applyFile(fid, byFile[fid]!, resolver, context: context);
           _applyAttempts.remove(fid);
         } catch (e) {
+          if (e is RpcCancelledException) rethrow;
           if (_isFatalRejection(e)) rethrow;
           stillFailed.add(fid);
           _log.warning('In-pull retry still failing $fid: $e');
@@ -423,6 +440,7 @@ class StatePuller {
     List<StateRecord> records, {
     int progressOffset = 0,
     int? progressTotal,
+    RpcContext? context,
   }) async {
     if (records.isEmpty) return 0;
     final remote = _getRemoteBlobStorage();
@@ -460,7 +478,7 @@ class StatePuller {
           : (i + chunkSize);
       final chunk = missing.sublist(i, end);
       try {
-        final downloaded = await remote.download(chunk);
+        final downloaded = await remote.download(chunk, context: context);
         for (final entry in downloaded.entries) {
           await blobStore.write(
             entry.value,
@@ -469,6 +487,10 @@ class StatePuller {
           );
         }
       } catch (e) {
+        // A preempted pull must abort, not swallow-and-continue: re-throw so
+        // pull() unwinds and the engine re-schedules. Other download failures
+        // stay best-effort (the file's apply will hold-and-retry).
+        if (e is RpcCancelledException) rethrow;
         _log.warning('Pull: blob chunk download failed: $e');
       }
       done += chunk.length;

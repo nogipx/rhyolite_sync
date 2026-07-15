@@ -124,7 +124,7 @@ Future<_Fx> _newPuller(
     rpcTimeout: const Duration(seconds: 5),
     getRemoteBlobStorage: () => null,
     newResolver: () => _NoConflictResolver(),
-    applyFile: (fileId, records, resolver) async {
+    applyFile: (fileId, records, resolver, {context}) async {
       if (failFor(fileId)) throw StateError('boom for $fileId');
       applied.add(fileId);
     },

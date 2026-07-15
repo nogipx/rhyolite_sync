@@ -18,11 +18,16 @@ class StateStartupDiffResult {
   /// blocked-set so a later delete/shrink can emit [SyncFileSizeUnblocked].
   final List<({String path, int sizeBytes, int limitBytes})> blocked;
 
+  /// Files skipped this scan because their extension is on the per-device
+  /// type-exclusion denylist. The engine emits [SyncFileTypeExcluded] for each.
+  final List<({String path, String extension})> excluded;
+
   const StateStartupDiffResult({
     required this.newFiles,
     required this.modifiedFiles,
     required this.missingFileIds,
     this.blocked = const [],
+    this.excluded = const [],
   });
 }
 
@@ -99,11 +104,16 @@ class StateStartupDiff {
     this.sigStore,
     Uint8List? blobIdKey,
     int? Function()? maxFileSizeBytes,
+    Set<String> Function()? excludedExtensions,
     LogScope? logger,
   })  : _blobIdKey = blobIdKey,
         _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
         _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
+        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
         log = logger ?? LogScope.noop;
+
+  /// Live per-device denylist of extensions (no dot) not synced on this device.
+  final Set<String> Function() _excludedExtensions;
 
   /// Current per-file upload size limit in bytes (null = unlimited). Over-limit
   /// binaries are skipped (not read/chunked/uploaded) to avoid re-freezing on
@@ -142,6 +152,8 @@ class StateStartupDiff {
     var pendingMissingChunks = 0;
     final typeDetector = const FileTypeDetector();
     final blocked = <({String path, int sizeBytes, int limitBytes})>[];
+    final excluded = <({String path, String extension})>[];
+    final denylist = _excludedExtensions();
 
     // First pass: scan disk, collect which files need upload and read
     // their bytes. We don't upload yet so we know how many to push and
@@ -167,6 +179,17 @@ class StateStartupDiff {
       final relPath = normalizeVaultPath(absPath.substring(vaultPath.length + 1));
       if (_isHidden(relPath)) continue;
       diskRelPaths.add(relPath);
+
+      // Type admission (per-device denylist): skip excluded extensions — not
+      // read/uploaded, and no stat signature written, so a re-included type is
+      // re-evaluated on the next scan. Reported so the engine surfaces the list.
+      if (denylist.isNotEmpty) {
+        final ext = FileTypeDetector.extensionOf(relPath);
+        if (ext.isNotEmpty && denylist.contains(ext)) {
+          excluded.add((path: relPath, extension: ext));
+          continue;
+        }
+      }
 
       // Text files go through the Fugue reconciler, not the raw sha
       // fast-path below: disk sha never equals the Fugue blob hash, so the
@@ -490,6 +513,7 @@ class StateStartupDiff {
       modifiedFiles: modifiedFiles,
       missingFileIds: missingFileIds,
       blocked: blocked,
+      excluded: excluded,
     );
   }
 

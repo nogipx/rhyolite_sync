@@ -32,11 +32,13 @@ class RemoteApplier {
     required void Function(SyncEngineEvent event) emit,
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
+    Set<String> Function()? excludedExtensions,
   }) : _newChunkedIO = newChunkedIO,
        _collectKnownChunks = collectKnownChunks,
        _emit = emit,
        _isFatalRejection = isFatalRejection,
-       _log = log;
+       _log = log,
+       _excludedExtensions = excludedExtensions ?? (() => const <String>{});
 
   final FileStateStore store;
   final FugueStore fugueStore;
@@ -52,6 +54,10 @@ class RemoteApplier {
   final void Function(SyncEngineEvent event) _emit;
   final bool Function(Object error) _isFatalRejection;
   final LogScope _log;
+
+  /// Live per-device denylist of extensions (no dot) not synced on this device.
+  /// A remote file of an excluded type is not downloaded/written (download-skip).
+  final Set<String> Function() _excludedExtensions;
 
   /// Apply all TaggedValues received for one fileId. Performs
   /// `localRegister.join(remoteRegister)` via [FileStateStore.applyRemote]
@@ -530,6 +536,21 @@ class RemoteApplier {
       reconciler.forgetStat(state.path);
       return;
     }
+
+    // Type admission (per-device): don't download/materialise a remote file
+    // whose extension the user excluded on this device. Record it as synced so
+    // it isn't re-attempted every pull; the register metadata is applied, just
+    // no local file. Re-including the type re-fetches via "Download from server".
+    final excluded = _excludedExtensions();
+    if (excluded.isNotEmpty && state.blobRef.isNotEmpty) {
+      final ext = FileTypeDetector.extensionOf(state.path);
+      if (ext.isNotEmpty && excluded.contains(ext)) {
+        store.recordSyncedBlobRef(state.fileId, state.blobRef);
+        _emit(SyncFileTypeExcluded(path: state.path, extension: ext));
+        return;
+      }
+    }
+
     // Record the synced LCA ONLY if the content actually landed on disk.
     // A failed blob download writes nothing; recording the ref anyway
     // would trip the already-synced short-circuit on every later pull and

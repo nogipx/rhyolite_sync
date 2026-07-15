@@ -11,6 +11,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:uuid/uuid.dart';
 
 import '../settings/diagnostics_prefs.dart';
+import '../settings/file_filter_prefs.dart';
 import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
 import 'build_env.dart';
@@ -61,6 +62,10 @@ void Function() registerSettingsTab({
   // this device's debug logs to a collector URL for support/debugging.
   required DiagnosticsPrefs Function() diagnosticsPrefs,
   required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
+  // Per-device file-type sync filter (denylist of extensions this device skips
+  // both uploading and downloading). Device-local; default empty (sync all).
+  required FileFilterPrefs Function() fileFilterPrefs,
+  required Future<void> Function(FileFilterPrefs next) onFileFilterChanged,
   // Self-host edition state. When [selfHostEnabled] the managed auth section
   // (sign-in / subscription) is replaced by a self-host vault section that
   // uses [selfHostDirectory] (the sync server's registry).
@@ -407,6 +412,29 @@ void Function() registerSettingsTab({
       );
     }
 
+    // Per-device file-type filter — a denylist of extensions this device skips
+    // both uploading and downloading. Device-local (not synced), so each device
+    // decides what it can afford. Text onChange never refreshes the tab so the
+    // caret stays put while typing.
+    void addFileFilterSection(PluginSettingsTab t) {
+      t.addSection('File types');
+      t.addText(
+        name: "Don't sync these extensions",
+        description:
+            'Comma-separated list (e.g. pdf, zip, mp4). Files with these '
+            'extensions are skipped on this device only — neither uploaded nor '
+            'downloaded. Other devices are unaffected. Leave empty to sync '
+            'everything. Re-adding a type downloads its files on the next sync.',
+        initialValue: fileFilterPrefs().display,
+        placeholder: 'pdf, zip, mp4',
+        onChange: (v) => onFileFilterChanged(
+          fileFilterPrefs().copyWith(
+            excludedExtensions: FileFilterPrefs.parse(v),
+          ),
+        ),
+      );
+    }
+
     final isSignedIn = currentAuthClient?.isSignedIn ?? false;
     final userEmail = currentAuthClient?.email ?? '';
 
@@ -535,6 +563,11 @@ void Function() registerSettingsTab({
           }
         },
       );
+    }
+
+    // Per-device file-type filter — only meaningful once a vault is connected.
+    if (currentConfig.vaultId.isNotEmpty) {
+      addFileFilterSection(t);
     }
 
     // Advanced diagnostics — always shown (useful even before sign-in / vault

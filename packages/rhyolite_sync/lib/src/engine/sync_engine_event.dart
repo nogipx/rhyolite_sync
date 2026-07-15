@@ -73,6 +73,21 @@ class SyncFileSizeUnblocked extends SyncEngineEvent {
   final String path;
 }
 
+/// A file was skipped by the per-device file-type exclusion filter — its
+/// extension is on the user's denylist, so it is neither uploaded (local) nor
+/// materialised (remote). Surfaced so the UI can show "N files excluded". The
+/// filter is device-local (data.json, not synced): each device chooses what it
+/// can afford to sync. Emitted for every excluded path during the startup scan
+/// and whenever a reconcile / apply touches one.
+class SyncFileTypeExcluded extends SyncEngineEvent {
+  SyncFileTypeExcluded({required this.path, required this.extension});
+
+  final String path;
+
+  /// The lowercase extension (no dot) that matched the denylist, e.g. `pdf`.
+  final String extension;
+}
+
 /// Live per-file blob transfer progress, for an "active transfers" monitor.
 /// Emitted as a file's content blob is uploaded or downloaded through
 /// [ChunkedBlobIO]. [sentBytes]/[totalBytes] are coarse (dedup-skipped chunks

@@ -579,6 +579,13 @@ void main() {
           // OS — but it's still early enough to capture the whole engine boot.
           var diagnosticsPrefs = DiagnosticsPrefs.fromData(raw);
 
+          // Per-device file-type sync filter (opt-in; default empty = sync all).
+          // A denylist of extensions this device skips both uploading and
+          // downloading. Device-local (data.json is not synced). Read live by
+          // the engine through the callback below so a settings change takes
+          // effect on the next reconcile without reconstructing the engine.
+          var fileFilterPrefs = FileFilterPrefs.fromData(raw);
+
           // User-requested sync pause (from the side panel). Gates the boot
           // start below; the panel toggles it live.
           _syncPaused = raw is Map && raw['syncPaused'] == true;
@@ -683,6 +690,9 @@ void main() {
             maxFileSizeBytes: () => activeConfig.externalBlobConfig != null
                 ? null
                 : _capabilities?.maxFileSizeBytes,
+            // Per-device denylist, read live so a settings change is picked up
+            // on the next reconcile without reconstructing the engine.
+            excludedExtensions: () => fileFilterPrefs.excludedExtensions,
           );
           _engine = engine;
           _log.info('boot: engine ctor ${bootSw.elapsedMilliseconds}ms');
@@ -935,6 +945,19 @@ void main() {
               diagnosticsPrefs = next;
               await configStorage.saveDiagnostics(next.toJson());
               _diagnostics?.apply(next);
+            },
+            fileFilterPrefs: () => fileFilterPrefs,
+            onFileFilterChanged: (next) async {
+              // Persist + swap the live var; the engine reads the denylist
+              // through its callback, so uploads/downloads for changed types
+              // take effect on the next reconcile/pull. Re-including a type
+              // that was previously skipped re-fetches its files on the next
+              // server notify (or via the panel's Download-from-server action).
+              // No refreshSettings() — the extensions text field fires per
+              // keystroke and a tab rebuild would drop the caret.
+              fileFilterPrefs = next;
+              await configStorage.saveFileFilter(next.toJson());
+              engine.triggerPull();
             },
           );
 
@@ -1424,6 +1447,8 @@ void Function() _registerSettings({
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
   required DiagnosticsPrefs Function() diagnosticsPrefs,
   required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
+  required FileFilterPrefs Function() fileFilterPrefs,
+  required Future<void> Function(FileFilterPrefs next) onFileFilterChanged,
   required Future<void> Function(VaultInfo vault) onDeleteVault,
   required bool selfHostEnabled,
   required String selfHostUrl,
@@ -1561,6 +1586,8 @@ void Function() _registerSettings({
     onSettingsSyncChanged: onSettingsSyncChanged,
     diagnosticsPrefs: diagnosticsPrefs,
     onDiagnosticsChanged: onDiagnosticsChanged,
+    fileFilterPrefs: fileFilterPrefs,
+    onFileFilterChanged: onFileFilterChanged,
     onResetSettings: () async {
       final cs = _configSync;
       if (cs == null) {

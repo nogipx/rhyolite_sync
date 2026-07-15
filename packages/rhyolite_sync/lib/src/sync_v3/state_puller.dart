@@ -150,7 +150,22 @@ class StatePuller {
     for (final record in response.records) {
       byFile.putIfAbsent(record.fileId, () => []).add(record);
     }
-    final fileIds = byFile.keys.toList();
+    // Smallest-first ordering (text/small before large binaries). The records
+    // are E2EE — the path/type isn't visible here — but the chunk-hash list is,
+    // and chunk count is a faithful size proxy (text = 1 chunk, big binaries =
+    // many). So the fast wins (notes) land first and a slow attachment can't
+    // hold them up. Soft-priority only: an interactive edit still preempts.
+    int chunkCount(String fid) =>
+        byFile[fid]!.fold<int>(0, (n, r) => n + r.chunks.length);
+    int maxSeq(String fid) =>
+        byFile[fid]!.fold<int>(0, (m, r) => r.serverSeq > m ? r.serverSeq : m);
+    // Ties break on serverSeq so the order is deterministic (Dart's sort is not
+    // stable) and, among equal-size files, causal — same as the old order.
+    final fileIds = byFile.keys.toList()
+      ..sort((a, b) {
+        final c = chunkCount(a).compareTo(chunkCount(b));
+        return c != 0 ? c : maxSeq(a).compareTo(maxSeq(b));
+      });
     final totalFiles = fileIds.length;
 
     // Pre-count missing blobs across the whole batch so progress events

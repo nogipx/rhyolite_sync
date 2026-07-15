@@ -61,8 +61,10 @@ class StateSyncEngine implements ISyncEngine {
     required ITaskScheduler scheduler,
     this.startupUploadConcurrency = 4,
     int? Function()? maxFileSizeBytes,
+    Set<String> Function()? excludedExtensions,
   }) : _scheduler = scheduler,
        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
+       _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
        _log = logger ?? LogScope.noop,
        _resolverFactory = resolverFactory,
        _rejections = ServerRejectionMapper(factory: rejectionFactory),
@@ -102,6 +104,13 @@ class StateSyncEngine implements ISyncEngine {
   /// read/chunked/uploaded. The host provides it from the subscription's
   /// PlanCapabilities (managed) or leaves it null (self-host / BYO storage).
   final int? Function() _maxFileSizeBytes;
+
+  /// Live per-device denylist of lowercase extensions (no dot) the user chose
+  /// not to sync on THIS device (data.json, not synced). Threaded into the
+  /// reconciler + startup diff (upload-skip) and the applier (download-skip).
+  /// Callback so a settings change takes effect without reconstructing the
+  /// engine; the host restarts the engine on change to re-evaluate all files.
+  final Set<String> Function() _excludedExtensions;
 
   /// Paths currently skipped for exceeding the size limit. Shared between the
   /// startup diff (seeds it) and the reconciler (clears it + emits
@@ -279,6 +288,7 @@ class StateSyncEngine implements ISyncEngine {
         fileIdFor: _deterministicFileId,
         emit: _emit,
         maxFileSizeBytes: _maxFileSizeBytes,
+        excludedExtensions: _excludedExtensions,
         sizeBlocked: _sizeBlockedPaths,
         sigStore: _sigStore,
         logger: _log,
@@ -300,6 +310,7 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         isFatalRejection: _rejections.isFatal,
         log: _log,
+        excludedExtensions: _excludedExtensions,
       );
       _puller = StatePuller(
         stateCaller: conn.stateCaller,
@@ -404,6 +415,7 @@ class StateSyncEngine implements ISyncEngine {
         // detection; otherwise stored (HMAC) chunk ids never match the
         // recomputed ones and every binary re-uploads (or never persists).
         blobIdKey: _resolveBlobIdKey(),
+        excludedExtensions: _excludedExtensions,
         // Route text files through the Fugue reconciler so startup uses the
         // same blob format as the runtime path. Without this, text was
         // re-uploaded as raw bytes every startup (disk sha never matches the
@@ -442,6 +454,11 @@ class StateSyncEngine implements ISyncEngine {
           sizeBytes: b.sizeBytes,
           limitBytes: b.limitBytes,
         ));
+      }
+      // Surface files skipped by the per-device type-exclusion filter so the UI
+      // can show the count. Re-emitted every startup → rebuilt from truth.
+      for (final e in diff.excluded) {
+        _emit(SyncFileTypeExcluded(path: e.path, extension: e.extension));
       }
 
       final swStartupPush = Stopwatch()..start();

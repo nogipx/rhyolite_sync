@@ -92,6 +92,14 @@ class FileTypeDetector {
     return _textExtensions.contains(ext);
   }
 
+  /// The file's lowercase extension WITHOUT the leading dot (e.g. `pdf`), or ''
+  /// when it has none. Used by the per-device type-exclusion filter to match a
+  /// path against a denylist of extensions.
+  static String extensionOf(String path) {
+    final ext = _extension(path);
+    return ext.isEmpty ? '' : ext.substring(1);
+  }
+
   static String _extension(String path) {
     final lastSlash = path.lastIndexOf('/');
     final name = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;

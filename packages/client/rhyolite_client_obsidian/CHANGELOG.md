@@ -1,3 +1,11 @@
+## [3.5.0] - 2026-07-15
+
+### Features
+
+- exclude file types from sync per device — list extensions to skip in Settings, and those files are neither uploaded nor downloaded on this device (other devices are unaffected) (obsidian)
+- sync notes and small files before large attachments, so a slow upload can no longer hold up your note sync (core)
+
+
 ## [3.4.3] - 2026-07-15
 
 ### Features

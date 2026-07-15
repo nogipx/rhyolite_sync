@@ -48,6 +48,7 @@ class DiskReconciler {
     required String Function(String relPath) fileIdFor,
     required void Function(SyncEngineEvent event) emit,
     int? Function()? maxFileSizeBytes,
+    Set<String> Function()? excludedExtensions,
     Set<String>? sizeBlocked,
     StatSigStore? sigStore,
     LogScope? logger,
@@ -56,6 +57,7 @@ class DiskReconciler {
        _fileIdFor = fileIdFor,
        _emit = emit,
        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
+       _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
        _sizeBlocked = sizeBlocked ?? <String>{},
        _sigStore = sigStore,
        _log = logger ?? LogScope.noop;
@@ -76,6 +78,10 @@ class DiskReconciler {
   /// larger than this is never read/chunked/uploaded — surfaced via
   /// [SyncFileSizeBlocked] and skipped. Callback so a tier upgrade is live.
   final int? Function() _maxFileSizeBytes;
+
+  /// Live per-device denylist of lowercase extensions (no dot) the user chose
+  /// not to sync on this device. Callback so a settings change takes effect.
+  final Set<String> Function() _excludedExtensions;
 
   /// Paths currently over the size limit (shared with [StateStartupDiff] via the
   /// engine). Used to emit [SyncFileSizeUnblocked] exactly once when a blocked
@@ -132,6 +138,21 @@ class DiskReconciler {
     // overwrite-with-same-mtime+size, which doesn't happen with normal
     // editors.
     final absPath = '$vaultPath/$relPath';
+
+    // Type admission (per-device denylist): a file whose extension the user
+    // excluded ON THIS DEVICE is never read/chunked/uploaded. Cheap (extension
+    // string only). Takes precedence over the size check. A denylist change
+    // triggers a re-scan (engine restart) so a re-included type re-syncs; a
+    // skipped file leaves no stat signature, so the startup scan re-evaluates it.
+    final excluded = _excludedExtensions();
+    if (excluded.isNotEmpty) {
+      final ext = FileTypeDetector.extensionOf(relPath);
+      if (ext.isNotEmpty && excluded.contains(ext)) {
+        _emit(SyncFileTypeExcluded(path: relPath, extension: ext));
+        return false;
+      }
+    }
+
     final stat = await io.statFile(absPath);
 
     // Size admission: a file over the plan's per-file limit is never

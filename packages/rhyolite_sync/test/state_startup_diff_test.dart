@@ -105,7 +105,7 @@ Future<({
   _MemIo io,
   _MemRemote remote,
   String Function(String) fileIdFor,
-})> _newFixture({Uint8List? blobIdKey}) async {
+})> _newFixture({Uint8List? blobIdKey, Set<String>? excludedExtensions}) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
   final store = FileStateStore(client: env.client, vaultId: _vaultId);
@@ -129,6 +129,8 @@ Future<({
     readClock: clock,
     writeClock: (_) {},
     blobIdKey: blobIdKey,
+    excludedExtensions:
+        excludedExtensions == null ? null : () => excludedExtensions,
   );
   return (
     diff: diff,
@@ -340,6 +342,30 @@ void main() {
       final result = await f.diff.call();
       expect(result.modifiedFiles, 1,
           reason: 'state.sizeBytes=0 but disk has bytes → must upload');
+    });
+
+    test('denylisted extension → not uploaded, reported as excluded; '
+        'other files still upload', () async {
+      final f = await _newFixture(excludedExtensions: {'pdf'});
+      // A brand-new pdf (denylisted) and a brand-new binary file (not),
+      // neither in the store yet. Binary so it takes the raw upload path
+      // that bumps modifiedFiles (text would be delegated to reconcileText).
+      f.io.files['$_vaultPath/doc.pdf'] = _randomBytes(2048, 3);
+      f.io.files['$_vaultPath/pic.bin'] = _randomBytes(2048, 9);
+
+      final result = await f.diff.call();
+
+      expect(result.excluded.map((e) => e.path), ['doc.pdf'],
+          reason: 'the pdf must be reported excluded, not uploaded');
+      expect(result.excluded.single.extension, 'pdf');
+      // The pdf must not have produced any stored state.
+      expect(f.store.get(f.fileIdFor('doc.pdf')), isNull,
+          reason: 'excluded file must not be admitted into the store');
+      // The binary is not denylisted → normal upload path (new file).
+      expect(result.newFiles, 1,
+          reason: 'the non-excluded binary must still sync');
+      expect(f.store.get(f.fileIdFor('pic.bin')), isNotNull,
+          reason: 'the non-excluded binary must be admitted into the store');
     });
   });
 

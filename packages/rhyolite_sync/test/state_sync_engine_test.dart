@@ -569,6 +569,36 @@ void main() {
       remote.blockDownloads = false; // let any re-scheduled pull finish cleanly
     });
 
+    test('a file whose extension is on the per-device denylist is skipped, '
+        'others still sync', () async {
+      final h = await _Harness.create(excludedExtensions: () => {'bin'});
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      // A non-excluded binary pushes (the sync barrier); the .bin is excluded.
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'ok.dat')
+          .timeout(const Duration(seconds: 10));
+      final excluded = h.engine.events
+          .firstWhere((e) => e is SyncFileTypeExcluded && e.path == 'skip.bin')
+          .timeout(const Duration(seconds: 10));
+
+      h.io.files['$_vaultPath/skip.bin'] = Uint8List.fromList([1, 2, 3]);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'skip.bin'));
+      h.io.files['$_vaultPath/ok.dat'] = Uint8List.fromList([4, 5, 6]);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'ok.dat'));
+
+      await pushed;
+      final ex = await excluded as SyncFileTypeExcluded;
+      expect(ex.extension, 'bin');
+
+      expect(
+        h.events.whereType<SyncFilePushed>().where((e) => e.path == 'skip.bin'),
+        isEmpty,
+        reason: 'an excluded-type file must never be pushed',
+      );
+    });
+
     test('scheduleBackground runs a sibling task on the engine scheduler '
         '(settings-sync hook)', () async {
       final h = await _Harness.create();
@@ -690,6 +720,7 @@ class _Harness {
     _MemRemote? sharedRemote,
     PriorityTaskScheduler? scheduler,
     IVaultCipher? cipher,
+    Set<String> Function()? excludedExtensions,
   }) async {
     final env = await DataServiceFactory.inMemory();
     final state = _FakeStateContract();
@@ -714,6 +745,7 @@ class _Harness {
       io: io,
       changeProvider: changes,
       scheduler: sched,
+      excludedExtensions: excludedExtensions,
       connectionFactory: ({required serverUrl, tokenProvider, logger}) =>
           connection,
       blobStorageBuilder:

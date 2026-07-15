@@ -190,6 +190,11 @@ class ObsidianConfigStorage {
   Future<void> saveDiagnostics(Map<String, Object?> json) =>
       _data.update((m) => m['diagnostics'] = json);
 
+  /// Persists the per-device file-type sync filter under its own data.json key,
+  /// preserving all other keys.
+  Future<void> saveFileFilter(Map<String, Object?> json) =>
+      _data.update((m) => m['fileFilter'] = json);
+
   /// User-requested sync pause (from the side panel). When true, boot skips
   /// the initial `engine.start()`; sync stays off until the user resumes.
   /// Survives restarts. Explicit user actions (sign-in, config change) still

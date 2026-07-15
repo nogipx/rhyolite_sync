@@ -1,3 +1,10 @@
+## [3.5.2] - 2026-07-16
+
+### Bug Fixes
+
+- fix the "pending changes" indicator sticking after a rename or delete, and make sure renames/moves are always synced (core)
+
+
 ## [3.5.1] - 2026-07-16
 
 ### Bug Fixes

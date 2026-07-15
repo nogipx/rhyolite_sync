@@ -646,6 +646,46 @@ void main() {
           reason: 'a real edit (new blobRef) must still be pushed');
     });
 
+    test('a file the pusher will not send is dropped from the pending set '
+        '(no stuck "pending changes" indicator)', () async {
+      // Regression: a rename/delete could mark a file pending, but the pusher
+      // then finds nothing to send for it (its value is already on the server,
+      // or a tombstone whose create was never confirmed can't be committed).
+      // Before the fix the fileId lingered in the pending set forever and the
+      // amber "pending changes" status never cleared.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      // Create + push a file. Its create reaches the server but is never
+      // materialised back (synced stays null) — the ordinary single-file case.
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'photo.bin')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/photo.bin'] =
+          Uint8List.fromList(List.generate(64, (i) => i));
+      h.changes.emit(const FileCreatedEvent(relativePath: 'photo.bin'));
+      await pushed;
+
+      // Delete it. reconcile writes a tombstone and marks the file pending, but
+      // the tombstone cannot be committed (synced == null), so the pusher sends
+      // nothing. The pending set must still be reconciled to empty.
+      final wentPending = h.engine.events
+          .firstWhere((e) => e is SyncPending && e.hasPending)
+          .timeout(const Duration(seconds: 10));
+      h.io.files.remove('$_vaultPath/photo.bin');
+      h.changes.emit(const FileDeletedEvent(relativePath: 'photo.bin'));
+      await wentPending;
+
+      // The indicator must return to "no pending" — this is the fix. Under the
+      // old code the last SyncPending stayed hasPending:true forever.
+      await _eventually(
+        () =>
+            h.events.whereType<SyncPending>().isNotEmpty &&
+            !h.events.whereType<SyncPending>().last.hasPending,
+      );
+    });
+
     test('scheduleBackground runs a sibling task on the engine scheduler '
         '(settings-sync hook)', () async {
       final h = await _Harness.create();

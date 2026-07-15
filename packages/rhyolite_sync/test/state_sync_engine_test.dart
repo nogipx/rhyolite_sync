@@ -465,6 +465,63 @@ void main() {
       await duringPushed; // would time out under the old late-subscribe code
     });
 
+    test('an edit made inside the pull window still reaches the peer '
+        '(no under-sync)', () async {
+      final remote = _MemRemote();
+
+      // A publishes a base version of a text note.
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      a.io.files['$_vaultPath/note.md'] = Uint8List.fromList('base\n'.codeUnits);
+      await a.engine.start();
+      final base = _recordsFromPuts(a.state);
+      expect(base, isNotEmpty, reason: 'A must publish the base note');
+
+      // A edits → the remote version B will pull.
+      final aPushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      a.io.files['$_vaultPath/note.md'] =
+          Uint8List.fromList('base\nA\n'.codeUnits);
+      a.changes.emit(const FileModifiedEvent(relativePath: 'note.md'));
+      await aPushed;
+      final remoteEdit = _recordsFromPuts(a.state); // base + A's edit
+
+      // B starts from the same base (shared history), so its own edit will be
+      // a genuine concurrent value, not a divergent create.
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? base : const [];
+      b.state.getCursor = base.last.serverSeq;
+      await b.engine.start();
+
+      // B edits the note ON DISK inside the pull window: the bytes are present
+      // but no change event fired, so no standalone reconcile+push ran. The
+      // imminent pull's pre-join reconcile is what captures this edit.
+      b.io.files['$_vaultPath/note.md'] =
+          Uint8List.fromList('base\nB\n'.codeUnits);
+      final putsBefore = b.state.puts.length;
+
+      // A's edit arrives; B pulls it. preReconcile captures B's disk edit, the
+      // conflict resolves, and the post-pull push must publish B's contribution
+      // — otherwise A never receives B's edit (the under-sync bug).
+      b.state.recordsFor = (since) => remoteEdit;
+      b.state.getCursor = remoteEdit.last.serverSeq;
+      await b.engine.triggerPull();
+
+      expect(
+        b.state.puts.length,
+        greaterThan(putsBefore),
+        reason: "B's edit made inside the pull window must still be pushed — "
+            'otherwise the peer never receives it (under-sync)',
+      );
+      expect(
+        b.state.puts.last.items.any((it) => !it.tombstone),
+        isTrue,
+        reason: "B must publish its live content, not a tombstone",
+      );
+    });
+
     test('an interactive edit preempts a wedged pull download so the push '
         'still goes out (single lane no longer starved)', () async {
       final remote = _BlockingRemote();

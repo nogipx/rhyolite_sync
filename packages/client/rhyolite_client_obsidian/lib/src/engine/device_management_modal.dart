@@ -110,7 +110,12 @@ void _deviceRow(
       text: d.isCurrent ? '${d.name}  (this device)' : d.name);
   _css(title, {'fontWeight': '600', 'whiteSpace': 'nowrap'});
 
+  final client = [
+    if (d.clientKind.isNotEmpty) d.clientKind,
+    if (d.clientVersion.isNotEmpty) d.clientVersion,
+  ].join(' ');
   final metaBits = <String>[
+    if (client.isNotEmpty) client,
     'seen ${_ago(d.lastSeen)}',
     if (d.behindBySeq > 0) '${d.behindBySeq} behind',
   ];

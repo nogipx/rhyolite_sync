@@ -17,7 +17,9 @@ import 'package:rpc_dart/rpc_dart.dart';
 /// Storage layout: each chunk and each manifest are independent blobs.
 /// LocalBlobStore holds plain bytes; the remote IBlobStorage is expected
 /// to be EncryptedBlobStorage (or compatible) — it encrypts at upload
-/// and decrypts at download. All ids are sha256 of the PLAIN content.
+/// and decrypts at download. Blob ids are keyed `HMAC-SHA256(vault subkey,
+/// plain content)` when a [blobIdKey] is supplied (raw `sha256` only as a
+/// test/keyless fallback) — see the class-doc note below on keying.
 ///
 /// `FileState.blobRef` points to the manifest. `FileState.chunks` is a
 /// plain list of chunk hashes (server uses it for blob GC).

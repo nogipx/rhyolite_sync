@@ -312,6 +312,9 @@ class SyncPanel {
         _blocked.remove(path);
       case SyncDataLoss():
         _dataLoss.add(event);
+        // Bounded: data-loss is rare, but a very long session must not grow the
+        // list without limit. Keep the most recent entries.
+        if (_dataLoss.length > 100) _dataLoss.removeRange(0, _dataLoss.length - 100);
       case SyncError(:final message):
         _blocker = _Blocker.error;
         _lastError = message;

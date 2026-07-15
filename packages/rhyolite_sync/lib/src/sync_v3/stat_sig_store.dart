@@ -45,6 +45,10 @@ class StatSigStore {
 
   ({int mtimeMs, int sizeBytes})? get(String fileId) => _cache[fileId];
 
+  /// All fileIds with a persisted signature. Used by the orphan sweep to
+  /// reclaim rows for files that no longer have a live FileState.
+  Iterable<String> get fileIds => _cache.keys;
+
   /// Records the signature for [fileId] and persists it (fire-and-forget,
   /// serialized per fileId). No-ops when the signature is unchanged.
   void set(String fileId, int mtimeMs, int sizeBytes) {

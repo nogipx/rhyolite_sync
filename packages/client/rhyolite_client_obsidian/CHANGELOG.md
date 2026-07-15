@@ -1,3 +1,21 @@
+## [3.4.3] - 2026-07-15
+
+### Features
+
+- report plugin version + kind; show them in device management (obsidian)
+- report client version + kind in device heads (core)
+
+### Bug Fixes
+
+- migrate BYO creds out of data.json + cap data-loss list (obsidian)
+- fix edit-in-pull-window under-sync, reclaim deleted storage, keep BYO creds off local disk (core)
+
+### Other
+
+- bump plugin version to 3.4.3 (obsidian)
+- edit-in-pull-window sync, tombstone GC, BYO config privacy (core)
+
+
 ## [3.4.2] - 2026-07-15
 
 ### Bug Fixes

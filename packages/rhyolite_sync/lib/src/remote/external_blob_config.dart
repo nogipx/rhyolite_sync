@@ -18,6 +18,12 @@ abstract class ExternalBlobConfig {
 
   Map<String, dynamic> toJson();
 
+  /// Non-secret backend discriminator (`s3` / `webdav`). Persisted locally as
+  /// [VaultConfig.externalStorageKind] so a device knows it is BYO even though
+  /// the secret config lives only on the (E2EE) server — used to pause sync
+  /// rather than fall back to the managed backend when the fetch fails.
+  String get kind;
+
   /// Creates blob storage. Pass [httpClient] to override the default
   /// HTTP client (e.g. to bypass CORS in Obsidian/Electron).
   IBlobStorage createBlobStorage({

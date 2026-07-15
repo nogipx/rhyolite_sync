@@ -490,6 +490,15 @@ void main() {
           // Vault
           // -----------------------------------------------------------------------
           var config = await configStorage.tryLoad();
+          // One-time migration: older installs stored the BYO storage secret
+          // (S3/WebDAV keys) in cleartext in data.json. VaultConfig.toJson no
+          // longer serialises it, so re-saving strips the cleartext; the secret
+          // is re-fetched from the E2EE server config each session, and only
+          // the non-secret kind marker (derived in fromJson) is persisted.
+          if (config != null && config.externalBlobConfig != null) {
+            await configStorage.save(config);
+            _log.info('Migrated external storage credentials out of data.json');
+          }
           VaultCipher? cipher;
 
           if (directory != null) {
@@ -627,6 +636,18 @@ void main() {
           // can OOM the host process. Cap to 2 on mobile.
           final startupUploadConcurrency = isMobile ? 2 : 4;
 
+          // Plugin version (from the Obsidian manifest) + client kind, reported
+          // with this device's head so the device-management UI and support can
+          // tell devices/versions apart. Best-effort — empty on any failure.
+          String pluginVersion = '';
+          try {
+            final manifest = jsu.getProperty<JSObject?>(plugin.raw, 'manifest');
+            if (manifest != null) {
+              pluginVersion = jsu.getProperty<String?>(manifest, 'version') ?? '';
+            }
+          } catch (_) {}
+          final clientKind = selfHostActive ? 'obsidian-selfhost' : 'obsidian';
+
           // One scheduler for the whole plugin: the engine's sync work and the
           // lifecycle boot/restart work below share it (see [_scheduleBoot]).
           final scheduler = PriorityTaskScheduler(
@@ -637,7 +658,11 @@ void main() {
           final ISyncEngine engine = StateSyncEngine(
             vaultPath: '',
             serverUrl: syncServerUrl,
-            config: activeConfig.copyWith(clientName: 'Obsidian/$platformTag'),
+            config: activeConfig.copyWith(
+              clientName: 'Obsidian/$platformTag',
+              clientVersion: pluginVersion,
+              clientKind: clientKind,
+            ),
             cipher: cipher,
             dataClient: dataClient,
             blobStore: LocalBlobStore(blobRepo),
@@ -1209,23 +1234,32 @@ void main() {
                   // Build on top of the *current* config, not the initial
                   // load-time snapshot — `cfg` is `final` and misses any
                   // post-load edits (verification token rotation, vault
-                  // rename, etc.).
+                  // rename, etc.). Persist only the non-secret kind marker
+                  // (VaultConfig.toJson drops the secret); the secret stays in
+                  // memory + on the E2EE server.
                   final base = config ?? cfg;
-                  final updated = base.copyWith(externalBlobConfig: extConfig);
+                  final updated = base.copyWith(
+                    externalBlobConfig: extConfig,
+                    externalStorageKind: extConfig.kind,
+                  );
                   config = updated;
                   await configStorage.save(updated);
-                  engine.config = buildConfig(updated, authClient);
-                  await _scheduleBoot(() async {
-                    await engine.stop();
-                    await _guardedStart(engine);
-                  });
-                  await relaunchConfigSync();
-                  // The settings tab was built with the snapshot config
-                  // and still shows "Configure" buttons. Re-render so
-                  // the user sees the freshly-adopted "Connected: ..."
-                  // panel without having to close and reopen Settings.
+                  if (engine.config.externalBlobConfig == null) {
+                    // Runtime discovery — the engine wasn't started with the
+                    // secret, so adopt it and restart to pick up the backend.
+                    engine.config = buildConfig(updated, authClient);
+                    await _scheduleBoot(() async {
+                      await engine.stop();
+                      await _guardedStart(engine);
+                    });
+                    await relaunchConfigSync();
+                    _log.info('Restarted with external blob storage');
+                  }
+                  // Otherwise the engine already self-applied the secret in
+                  // _checkExternalBlobConfig during this start() — no restart.
+                  // Re-render the settings tab so it shows "Connected: ..."
+                  // instead of the snapshot's "Configure" buttons.
                   refreshSettings();
-                  _log.info('Restarted with external blob storage');
                 }
                 return;
               case SubscriptionRequired():

@@ -37,9 +37,10 @@ class StatePutItem implements IRpcSerializable {
   /// causally dominates (doc §4.2, §5.1).
   final String contextPacked;
 
-  /// Plain list of chunk hashes (sha256 of plain chunk bytes) that this
-  /// file consists of. The server uses it to compute the live chunk set
-  /// during blob GC. Empty for tombstones.
+  /// Plain list of chunk ids — keyed `HMAC-SHA256(vault subkey, plain chunk
+  /// bytes)`, NOT a raw sha256 (keying closes the confirmation-of-file oracle;
+  /// see ChunkedBlobIO). The server uses this list to compute the live chunk
+  /// set during blob GC. Empty for tombstones.
   final List<String> chunks;
 
   const StatePutItem({

@@ -36,6 +36,8 @@ class StatePuller {
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
     String Function()? clientName,
+    String clientVersion = '',
+    String clientKind = '',
   })  : _rpcTimeout = rpcTimeout,
         _getRemoteBlobStorage = getRemoteBlobStorage,
         _newResolver = newResolver,
@@ -44,7 +46,9 @@ class StatePuller {
         _emit = emit,
         _isFatalRejection = isFatalRejection,
         _log = log,
-        _clientName = clientName ?? (() => '');
+        _clientName = clientName ?? (() => ''),
+        _clientVersion = clientVersion,
+        _clientKind = clientKind;
 
   final IStateSyncContract stateCaller;
   final IHistoryContract historyCaller;
@@ -68,6 +72,8 @@ class StatePuller {
   /// Human-readable device label reported with the head so the
   /// device-management UI can name this device.
   final String Function() _clientName;
+  final String _clientVersion;
+  final String _clientKind;
 
   /// In-memory per-file consecutive apply-failure counter, scoped to this
   /// session's puller. A file that throws during apply holds the cursor
@@ -390,6 +396,8 @@ class StatePuller {
           deviceId: store.deviceId,
           headSeq: headSeq,
           deviceName: _clientName(),
+          clientVersion: _clientVersion,
+          clientKind: _clientKind,
         ),
       );
     } catch (e) {

@@ -29,6 +29,9 @@ class S3BlobConfig extends ExternalBlobConfig {
   final bool useSSL;
 
   @override
+  String get kind => 's3';
+
+  @override
   Map<String, dynamic> toJson() => {
     'type': 's3',
     'endpoint': endpoint,
@@ -76,6 +79,9 @@ class WebDavBlobConfig extends ExternalBlobConfig {
   final String username;
   final String password;
   final bool useSSL;
+
+  @override
+  String get kind => 'webdav';
 
   @override
   Map<String, dynamic> toJson() => {

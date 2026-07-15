@@ -691,7 +691,10 @@ void _addExternalStorageSection(
       final result = await _showS3ConfigModal(t.plugin);
       if (result == null) return;
       try {
-        await onSave(config.copyWith(externalBlobConfig: result));
+        await onSave(config.copyWith(
+          externalBlobConfig: result,
+          externalStorageKind: result.kind,
+        ));
         showNotice('External storage connected: S3');
       } catch (e) {
         showNotice('Could not save external storage: $e');
@@ -707,7 +710,10 @@ void _addExternalStorageSection(
       final result = await _showWebDavConfigModal(t.plugin);
       if (result == null) return;
       try {
-        await onSave(config.copyWith(externalBlobConfig: result));
+        await onSave(config.copyWith(
+          externalBlobConfig: result,
+          externalStorageKind: result.kind,
+        ));
         showNotice('External storage connected: WebDAV');
       } catch (e) {
         showNotice('Could not save external storage: $e');

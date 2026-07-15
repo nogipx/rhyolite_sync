@@ -9,12 +9,20 @@ class SyncDevice {
     required this.lastSeen,
     required this.behindBySeq,
     required this.isCurrent,
+    this.clientVersion = '',
+    this.clientKind = '',
   });
 
   final String deviceId;
 
   /// Human label the device reported, or a short id fallback.
   final String name;
+
+  /// Client version the device reported (e.g. "3.4.3"), or '' if unknown.
+  final String clientVersion;
+
+  /// Client kind the device reported (`obsidian` / `cli` / …), or '' if unknown.
+  final String clientKind;
 
   /// Highest history serverSeq this device has processed.
   final int headSeq;
@@ -62,6 +70,8 @@ class DeviceRegistryUseCase {
               behindBySeq:
                   (maxHead - h.headSeq) < 0 ? 0 : (maxHead - h.headSeq),
               isCurrent: h.deviceId == thisDeviceId,
+              clientVersion: h.clientVersion,
+              clientKind: h.clientKind,
             ))
         .toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));

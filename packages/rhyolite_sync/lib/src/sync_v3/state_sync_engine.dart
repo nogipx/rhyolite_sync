@@ -177,6 +177,7 @@ class StateSyncEngine implements ISyncEngine {
   late final CausalStabilityGc _causalGc = CausalStabilityGc(
     vaultId: config.vaultId,
     getFugueStore: () => _fugueStore,
+    getStore: () => _store,
     getHistoryCaller: () => _conn?.historyCaller,
     onInfo: _log.info,
     onWarning: _log.warning,
@@ -315,6 +316,8 @@ class StateSyncEngine implements ISyncEngine {
         isFatalRejection: _rejections.isFatal,
         log: _log,
         clientName: () => config.clientName ?? '',
+        clientVersion: config.clientVersion ?? '',
+        clientKind: config.clientKind ?? '',
       );
       _pusher = StatePusher(
         stateCaller: conn.stateCaller,
@@ -323,6 +326,8 @@ class StateSyncEngine implements ISyncEngine {
         codec: _recordCodec!,
         vaultId: config.vaultId,
         clientName: config.clientName,
+        clientVersion: config.clientVersion,
+        clientKind: config.clientKind,
         rpcTimeout: _rpcTimeout,
         emit: _emit,
         handleEpochMismatch: _handleEpochMismatch,
@@ -487,6 +492,9 @@ class StateSyncEngine implements ISyncEngine {
     _startupInProgress = false;
     _startupEventQueue.clear();
     _pendingFileIds.clear();
+    // Rebuilt from the startup diff on the next start(); clearing here stops a
+    // previous vault's blocked paths from lingering across a vault switch.
+    _sizeBlockedPaths.clear();
     _lastEmittedHasPending = false;
     _wasOnline = false;
     await _connSub?.cancel();
@@ -586,6 +594,16 @@ class StateSyncEngine implements ISyncEngine {
         final context = RpcContext.withCancellation(rpcToken);
         try {
           await _pull(context: context);
+          // Publish anything the pull produced locally: a value the pre-join
+          // reconcile captured (an edit made inside the pull window), a sealed
+          // conflict merge, or this device's own value kept in a divergent
+          // union. Without this, such a contribution is never pushed and the
+          // peer never receives it (the "edit right after an incoming change
+          // doesn't sync" bug). No context: it's a quick putStates (blobs are
+          // already uploaded) and must complete even if a fresh edit preempts,
+          // else the captured value is stranded again. No-op when nothing is
+          // dirty (see StatePusher._collectDirty).
+          await _push();
           await _store?.persistMeta();
           // Causal-stability GC piggybacks on pull cadence; it self-throttles.
           await _causalGc.run();
@@ -1051,6 +1069,45 @@ class StateSyncEngine implements ISyncEngine {
       )(context: ctx);
       if (!verify.isClean) _log.info('Startup blob verify: $verify');
     });
+    // Reclaim orphaned Fugue trees + stat signatures — rows for a fileId with
+    // no LIVE (non-tombstone) FileState. Cleans the pre-fix backlog (remote
+    // deletes that didn't prune siblings, empty-tree tombstones) that the
+    // forward-looking sibling-prune can't reach. Safe regardless of causal
+    // stability: a non-live file's CRDT tree/signature is never needed (a
+    // recreate reseeds fresh), so this is orthogonal to tombstone GC.
+    _scheduleBackground('prune-orphan-crdt', (_) async {
+      final store = _store;
+      final fugue = _fugueStore;
+      final sig = _sigStore;
+      if (store == null || fugue == null) return;
+      final live = <String>{};
+      for (final fileId in store.fileIds) {
+        final reg = store.registerFor(fileId);
+        if (reg != null && reg.values.any((tv) => !tv.value.tombstone)) {
+          live.add(fileId);
+        }
+      }
+      var prunedFugue = 0;
+      for (final fileId in fugue.fileIds.toList()) {
+        if (live.contains(fileId)) continue;
+        await fugue.remove(fileId);
+        prunedFugue += 1;
+      }
+      var prunedSig = 0;
+      if (sig != null) {
+        for (final fileId in sig.fileIds.toList()) {
+          if (live.contains(fileId)) continue;
+          sig.remove(fileId);
+          prunedSig += 1;
+        }
+      }
+      if (prunedFugue > 0 || prunedSig > 0) {
+        _log.info(
+          'Orphan CRDT sweep: pruned $prunedFugue fugue tree(s), '
+          '$prunedSig stat-sig row(s) for non-live files',
+        );
+      }
+    });
   }
 
   /// Wait after the last typing keystroke OR the last disk modify
@@ -1195,48 +1252,70 @@ class StateSyncEngine implements ISyncEngine {
   }
 
   Future<void> _checkExternalBlobConfig() async {
+    // Secret already in memory (session fallback from migration, or applied on
+    // a prior discovery) — the backend is already correct, nothing to fetch.
     if (config.externalBlobConfig != null) return;
+
+    // BYO is now marked by the NON-SECRET [externalStorageKind] (the secret is
+    // never persisted locally — see VaultConfig). A BYO vault whose secret we
+    // cannot load must NOT fall through to the managed backend: that would
+    // upload the user's blobs to the wrong place. We throw so start()'s catch
+    // surfaces it and tears the engine down; a retry after sign-in / unlock
+    // (or when the server is reachable) resolves it.
+    final isByo = config.externalStorageKind != null;
+
     final storage = metaStorage;
-    if (storage == null) {
-      // No meta storage means we can't ask the server whether the user
-      // already configured external blob storage on another device. The
-      // most common cause is that the engine was constructed before the
-      // user signed in (or session refresh failed); the host must call
-      // `engine.metaStorage = ...` whenever the auth client changes.
-      _log.info(
-        'External blob config check skipped: metaStorage is null. '
-        'Has the auth client been wired to the engine since sign-in?',
-      );
-      return;
-    }
     final c = cipher;
-    if (c == null) {
-      // VaultMetaService is now strict about requiring a cipher (the
-      // external-storage credentials must never round-trip cleartext).
-      // If the engine reaches this point without one, the user hasn't
-      // unlocked the vault yet — the load will resume on the next
-      // start() after passphrase entry.
-      _log.info(
-        'External blob config check skipped: cipher is null '
-        '(vault not unlocked).',
-      );
+    if (storage == null || c == null) {
+      final why = storage == null ? 'not signed in' : 'vault locked';
+      if (isByo) {
+        throw StateError(
+          'external storage (${config.externalStorageKind}) is configured but '
+          'its credentials cannot be loaded yet ($why) — refusing to sync to '
+          'the managed backend',
+        );
+      }
+      _log.info('External blob config check skipped ($why).');
       return;
     }
+
+    ExternalBlobConfig? remote;
     try {
-      final metaService = VaultMetaService(
+      remote = await VaultMetaService(
         storage: storage,
         vaultId: config.vaultId,
         cipher: c,
-      );
-      final remote = await metaService.loadExternalBlobConfig();
-      if (remote != null) {
-        const code = 'feature.external_blob_config_discovered';
-        const msg = 'external blob config available on the server';
-        final params = {'config': remote.toJson()};
-        _emit(_rejections.build(code, msg, params));
-      }
+      ).loadExternalBlobConfig();
     } catch (e) {
+      if (isByo) {
+        throw StateError(
+          'could not load external storage credentials: $e — refusing to sync '
+          'to the managed backend',
+        );
+      }
       _log.warning('External blob config check failed: $e');
+      return;
+    }
+
+    if (remote != null) {
+      // Apply SYNCHRONOUSLY, before any blob op in this start(), so the lazily-
+      // built blob hub picks the correct backend — no async-event race (the
+      // old code only emitted an event for the plugin to apply later). Also
+      // remember the non-secret marker so a future boot knows it is BYO.
+      config = config.copyWith(
+        externalBlobConfig: remote,
+        externalStorageKind: remote.kind,
+      );
+      _emit(_rejections.build(
+        'feature.external_blob_config_discovered',
+        'external blob config available on the server',
+        {'config': remote.toJson()},
+      ));
+    } else if (isByo) {
+      throw StateError(
+        'external storage is configured locally but no credentials were found '
+        'on the server — refusing to sync to the managed backend',
+      );
     }
   }
 

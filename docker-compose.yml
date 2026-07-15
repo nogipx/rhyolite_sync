@@ -40,7 +40,7 @@ services:
       - ./data/minio:/data
 
   sync:
-    image: ghcr.io/nogipx/rhyolite_sync_selfhost:1.4.0
+    image: ghcr.io/nogipx/rhyolite_sync_selfhost:1.4.1
     restart: unless-stopped
     depends_on:
       postgres:

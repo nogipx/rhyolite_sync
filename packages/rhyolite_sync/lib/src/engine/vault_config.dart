@@ -53,7 +53,10 @@ class VaultConfig {
     this.pullIntervalSeconds = 5,
     this.tokenProvider,
     this.clientName,
+    this.clientVersion,
+    this.clientKind,
     this.externalBlobConfig,
+    this.externalStorageKind,
   });
 
   factory VaultConfig.newVault({
@@ -67,6 +70,14 @@ class VaultConfig {
 
   factory VaultConfig.fromJson(Map<String, dynamic> json) {
     final rawToken = json['verificationToken'] as String?;
+    // MIGRATION: older data.json stored the full (secret-bearing)
+    // externalBlobConfig in cleartext. We still read it so the current session
+    // has a fallback, but it is NEVER re-serialised (see [toJson]) — the
+    // caller re-saves on boot to strip the cleartext, and the secret is
+    // henceforth sourced only from the E2EE server config.
+    final legacy = ExternalBlobConfig.fromJson(
+      json['externalBlobConfig'] as Map<String, dynamic>?,
+    );
     return VaultConfig(
       vaultId: _requireUuid(json['vaultId'] as String, 'vaultId'),
       vaultName: _sanitizeText(json['vaultName'] as String, 'vaultName'),
@@ -77,9 +88,11 @@ class VaultConfig {
         5,
         3600,
       ),
-      externalBlobConfig: ExternalBlobConfig.fromJson(
-        json['externalBlobConfig'] as Map<String, dynamic>?,
-      ),
+      externalBlobConfig: legacy,
+      // Non-secret marker: prefer the explicit field, else derive from a legacy
+      // cleartext config during migration.
+      externalStorageKind:
+          (json['externalStorageKind'] as String?) ?? legacy?.kind,
     );
   }
 
@@ -100,10 +113,29 @@ class VaultConfig {
   /// Not serialized to/from JSON — must be set in code.
   final String? clientName;
 
-  /// Optional external blob storage config. When set, the client
-  /// uploads/downloads blobs directly instead of proxying through
-  /// the sync server. Supports S3 and WebDAV backends.
+  /// Client version (e.g. "3.4.3") reported with the device head for the
+  /// device-management UI + support diagnostics. Code-set, not serialized.
+  final String? clientVersion;
+
+  /// Client kind (`obsidian` / `cli` / `selfhost`) reported with the device
+  /// head. Code-set, not serialized.
+  final String? clientKind;
+
+  /// Optional external blob storage config (secret-bearing). When set, the
+  /// client uploads/downloads blobs directly instead of proxying through the
+  /// sync server. Supports S3 and WebDAV backends.
+  ///
+  /// **Never persisted to `data.json`** (see [toJson]) — the secret is stored
+  /// only in the E2EE server config and re-fetched into memory each session.
+  /// The local, non-secret [externalStorageKind] marks the vault as BYO.
   final ExternalBlobConfig? externalBlobConfig;
+
+  /// Non-secret BYO marker (`s3` / `webdav` / null), safe to persist locally.
+  /// Lets a device know it is BYO even before the secret [externalBlobConfig]
+  /// is fetched from the server — so a failed fetch pauses sync instead of
+  /// silently falling back to the managed backend (which would upload the
+  /// user's blobs to the wrong place).
+  final String? externalStorageKind;
 
   VaultConfig copyWith({
     String? vaultId,
@@ -112,7 +144,10 @@ class VaultConfig {
     int? pullIntervalSeconds,
     ITokenProvider? tokenProvider,
     String? clientName,
+    String? clientVersion,
+    String? clientKind,
     ExternalBlobConfig? externalBlobConfig,
+    String? externalStorageKind,
   }) => VaultConfig(
     vaultId: vaultId ?? this.vaultId,
     vaultName: vaultName ?? this.vaultName,
@@ -120,7 +155,10 @@ class VaultConfig {
     pullIntervalSeconds: pullIntervalSeconds ?? this.pullIntervalSeconds,
     tokenProvider: tokenProvider ?? this.tokenProvider,
     clientName: clientName ?? this.clientName,
+    clientVersion: clientVersion ?? this.clientVersion,
+    clientKind: clientKind ?? this.clientKind,
     externalBlobConfig: externalBlobConfig ?? this.externalBlobConfig,
+    externalStorageKind: externalStorageKind ?? this.externalStorageKind,
   );
 
   Map<String, dynamic> toJson() => {
@@ -128,7 +166,9 @@ class VaultConfig {
     'vaultName': vaultName,
     if (verificationToken != null) 'verificationToken': verificationToken,
     'pullIntervalSeconds': pullIntervalSeconds,
-    if (externalBlobConfig != null)
-      'externalBlobConfig': externalBlobConfig!.toJson(),
+    // NOTE: externalBlobConfig (the SECRET) is deliberately NOT serialised —
+    // it lives only in the E2EE server config. Only the non-secret marker is
+    // persisted locally.
+    if (externalStorageKind != null) 'externalStorageKind': externalStorageKind,
   };
 }

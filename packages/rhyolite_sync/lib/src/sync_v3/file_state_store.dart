@@ -41,6 +41,12 @@ class FileStateStore {
   final Map<String, MvRegister<FileState>> _registers = {};
   final Map<String, String> _lastSyncedBlobRef = {};
 
+  /// fileId → the max serverSeq at which this device has pulled a record for
+  /// the file. The causal-stability boundary for tombstone GC: a tombstone is
+  /// safe to drop only once every active device's pull cursor (headSeq) has
+  /// passed its serverSeq. Persisted in meta alongside [_lastSyncedBlobRef].
+  final Map<String, int> _serverSeq = {};
+
   CausalContext _ownContext = const CausalContext.empty();
   int _serverCursor = 0;
   int? _serverEpoch;
@@ -123,6 +129,28 @@ class FileStateStore {
       _registers[fileId]?.allValues ?? const [];
 
   String? lastSyncedBlobRefFor(String fileId) => _lastSyncedBlobRef[fileId];
+
+  /// The max serverSeq this device has pulled for [fileId], or null if it has
+  /// never pulled a record for it (e.g. a locally-created tombstone not yet
+  /// echoed back). Tombstone GC treats null as "not yet stable" (skip).
+  int? serverSeqFor(String fileId) => _serverSeq[fileId];
+
+  /// Record the server seq at which [fileId] was pulled — monotonic, only
+  /// advances. Set by the applier from each pulled record's serverSeq.
+  void recordServerSeq(String fileId, int seq) {
+    final cur = _serverSeq[fileId];
+    if (cur == null || seq > cur) _serverSeq[fileId] = seq;
+  }
+
+  /// fileIds whose collapsed (single-value) register is a tombstone. The
+  /// causal-stability GC scans these for prunable deletes; conflicting
+  /// (multi-value) registers are skipped until they collapse.
+  Iterable<String> get tombstoneFileIds sync* {
+    for (final e in _registers.entries) {
+      final v = e.value.singleValue;
+      if (v != null && v.tombstone) yield e.key;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // HLC + context helpers
@@ -273,6 +301,7 @@ class FileStateStore {
   void remove(String fileId) {
     _registers.remove(fileId);
     _lastSyncedBlobRef.remove(fileId);
+    _serverSeq.remove(fileId);
   }
 
   void recordSyncedBlobRef(String fileId, String blobRef) {
@@ -319,6 +348,14 @@ class FileStateStore {
       if (lsbr != null) {
         for (final e in lsbr.entries) {
           _lastSyncedBlobRef[e.key as String] = e.value as String;
+        }
+      }
+      _serverSeq.clear();
+      final ss = meta.payload['serverSeq'] as Map?;
+      if (ss != null) {
+        for (final e in ss.entries) {
+          final v = e.value;
+          if (v is int) _serverSeq[e.key as String] = v;
         }
       }
     } else {
@@ -397,6 +434,7 @@ class FileStateStore {
       'ownContext': _ownContext.pack(),
       'fugueCounter': _fugueClock?.value ?? 0,
       'lastSyncedBlobRef': _lastSyncedBlobRef,
+      'serverSeq': _serverSeq,
     };
     await _writeWithRetry(
       collection: _metaCol,
@@ -445,6 +483,7 @@ class FileStateStore {
   Future<void> wipeAll() async {
     _registers.clear();
     _lastSyncedBlobRef.clear();
+    _serverSeq.clear();
     _serverCursor = 0;
     _serverEpoch = null;
     _ownContext = const CausalContext.empty();

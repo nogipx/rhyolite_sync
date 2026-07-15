@@ -214,6 +214,8 @@ class DeviceHead implements IRpcSerializable {
     required this.updatedAtMs,
     this.frontierPacked = '',
     this.deviceName = '',
+    this.clientVersion = '',
+    this.clientKind = '',
   });
 
   final String deviceId;
@@ -233,12 +235,23 @@ class DeviceHead implements IRpcSerializable {
   /// legacy clients that don't report a name.
   final String deviceName;
 
+  /// Client version the device runs (e.g. "3.4.3"). Cosmetic/diagnostic —
+  /// lets the device-management UI and support diagnose version-specific
+  /// issues. Empty for legacy clients.
+  final String clientVersion;
+
+  /// Client kind: `obsidian` / `cli` / `selfhost` etc. Cosmetic/diagnostic.
+  /// Empty for legacy clients.
+  final String clientKind;
+
   factory DeviceHead.fromJson(Map<String, dynamic> json) => DeviceHead(
         deviceId: json['deviceId'] as String,
         headSeq: json['headSeq'] as int,
         updatedAtMs: json['updatedAtMs'] as int,
         frontierPacked: (json['frontierPacked'] as String?) ?? '',
         deviceName: (json['deviceName'] as String?) ?? '',
+        clientVersion: (json['clientVersion'] as String?) ?? '',
+        clientKind: (json['clientKind'] as String?) ?? '',
       );
 
   @override
@@ -248,6 +261,8 @@ class DeviceHead implements IRpcSerializable {
         'updatedAtMs': updatedAtMs,
         if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
         if (deviceName.isNotEmpty) 'deviceName': deviceName,
+        if (clientVersion.isNotEmpty) 'clientVersion': clientVersion,
+        if (clientKind.isNotEmpty) 'clientKind': clientKind,
       };
 }
 
@@ -258,6 +273,8 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
     required this.headSeq,
     this.frontierPacked = '',
     this.deviceName = '',
+    this.clientVersion = '',
+    this.clientKind = '',
   });
 
   final String vaultId;
@@ -274,6 +291,12 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
   /// the head so the device-management UI can show it. Cosmetic.
   final String deviceName;
 
+  /// Client version (e.g. "3.4.3") — cosmetic/diagnostic. Empty = legacy.
+  final String clientVersion;
+
+  /// Client kind (`obsidian` / `cli` / `selfhost`) — cosmetic/diagnostic.
+  final String clientKind;
+
   factory ReportHistoryHeadRequest.fromJson(Map<String, dynamic> json) =>
       ReportHistoryHeadRequest(
         vaultId: json['vaultId'] as String,
@@ -281,6 +304,8 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
         headSeq: json['headSeq'] as int,
         frontierPacked: (json['frontierPacked'] as String?) ?? '',
         deviceName: (json['deviceName'] as String?) ?? '',
+        clientVersion: (json['clientVersion'] as String?) ?? '',
+        clientKind: (json['clientKind'] as String?) ?? '',
       );
 
   @override
@@ -290,6 +315,8 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
         'headSeq': headSeq,
         if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
         if (deviceName.isNotEmpty) 'deviceName': deviceName,
+        if (clientVersion.isNotEmpty) 'clientVersion': clientVersion,
+        if (clientKind.isNotEmpty) 'clientKind': clientKind,
       };
 }
 

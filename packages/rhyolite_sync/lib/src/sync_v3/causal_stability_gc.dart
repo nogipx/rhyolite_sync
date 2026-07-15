@@ -3,9 +3,15 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 import 'fugue_frontier.dart';
 
-/// Aggregates per-device causal frontiers from the server, computes the
-/// per-replica causal-stability boundary, and prunes every [Fugue] tree's
-/// fully-tombstoned blocks that are dominated by that boundary.
+/// Aggregates per-device heads from the server (one fetch, throttled) and does
+/// two causal-stability sweeps off it:
+///   * **Fugue text trees** — prunes fully-tombstoned blocks dominated by the
+///     per-replica dot frontier (`min` over each device's Fugue version vector).
+///   * **FileState tombstones** — reclaims deleted-file registers once every
+///     active device's pull cursor (`headSeq`) has passed the tombstone's
+///     serverSeq, i.e. the delete has propagated to all (`min(headSeq)` gate,
+///     the same idiom BlobJanitor uses). Prevents unbounded tombstone growth
+///     without ever resurrecting a delete a peer hasn't seen.
 ///
 /// **Conservative by design.** The block model already makes tombstones
 /// cheap (a deleted paragraph is one block with a deleted range, not
@@ -39,18 +45,22 @@ class CausalStabilityGc {
   CausalStabilityGc({
     required this.vaultId,
     required FugueStore? Function() getFugueStore,
+    required FileStateStore? Function() getStore,
     required IHistoryContract? Function() getHistoryCaller,
     required void Function(String message) onInfo,
     required void Function(String message) onWarning,
     this.minInterval = const Duration(minutes: 1),
     this.staleHeadAge = const Duration(days: 90),
+    this.tombstoneBackfillMinAge = const Duration(hours: 24),
   }) : _getFugueStore = getFugueStore,
+       _getStore = getStore,
        _getHistoryCaller = getHistoryCaller,
        _onInfo = onInfo,
        _onWarning = onWarning;
 
   final String vaultId;
   final FugueStore? Function() _getFugueStore;
+  final FileStateStore? Function() _getStore;
   final IHistoryContract? Function() _getHistoryCaller;
   final void Function(String message) _onInfo;
   final void Function(String message) _onWarning;
@@ -64,13 +74,27 @@ class CausalStabilityGc {
   /// so ordinary vacations / travel don't trigger it.
   final Duration staleHeadAge;
 
+  /// Minimum age of a tombstone before its UNKNOWN serverSeq is backfilled
+  /// with the pull cursor (see the tombstone loop). Old tombstones (predating
+  /// serverSeq tracking) are certainly confirmed/pulled-back, so the cursor is
+  /// a safe upper bound; a just-created local delete not yet echoed from the
+  /// server is younger than this and is left alone until its precise seq
+  /// arrives on the next pull — otherwise the cursor could under-estimate its
+  /// true seq and the delete could be reclaimed before a peer has seen it.
+  final Duration tombstoneBackfillMinAge;
+
   DateTime _lastRunAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   Future<void> run() async {
     final fugueStore = _getFugueStore();
     final history = _getHistoryCaller();
     if (fugueStore == null || history == null) return;
-    if (fugueStore.count == 0) return;
+    final store = _getStore();
+
+    // Anything to potentially GC? Fugue trees to prune OR tombstones to reclaim.
+    // Both share the single heads fetch below — no extra RPC per cycle.
+    final hasTombstones = store != null && store.tombstoneFileIds.isNotEmpty;
+    if (fugueStore.count == 0 && !hasTombstones) return;
 
     final now = DateTime.now();
     if (now.difference(_lastRunAt) < minInterval) return;
@@ -87,43 +111,109 @@ class CausalStabilityGc {
       return;
     }
 
-    final frontier = _minFrontier(heads.heads);
-    if (frontier.isEmpty) return;
-
+    // --- Fugue text-tree pruning (per-replica dot frontier) ---
     var prunedFiles = 0;
     var droppedElements = 0;
-    for (final fileId in fugueStore.fileIds.toList()) {
-      final f = await fugueStore.get(fileId);
-      if (f == null || f.elementCount == 0) continue;
+    final frontier = _minFrontier(heads.heads);
+    if (fugueStore.count > 0 && frontier.isNotEmpty) {
+      for (final fileId in fugueStore.fileIds.toList()) {
+        final f = await fugueStore.get(fileId);
+        if (f == null || f.elementCount == 0) continue;
 
-      // Stable = every dot whose per-replica boundary dominates its counter.
-      final stable = <Dot>{};
-      for (final d in f.dots) {
-        final boundary = frontier[d.replica];
-        if (boundary == null) continue;
-        if (d.counter <= boundary) stable.add(d);
+        // Stable = every dot whose per-replica boundary dominates its counter.
+        final stable = <Dot>{};
+        for (final d in f.dots) {
+          final boundary = frontier[d.replica];
+          if (boundary == null) continue;
+          if (d.counter <= boundary) stable.add(d);
+        }
+        if (stable.isEmpty) continue;
+
+        final before = f.elementCount;
+        final pruned = f.prune(stable);
+        final after = pruned.elementCount;
+        if (after == before) continue; // nothing was droppable
+
+        fugueStore.set(fileId, pruned);
+        await fugueStore.persistOne(fileId);
+        prunedFiles += 1;
+        droppedElements += before - after;
       }
-      if (stable.isEmpty) continue;
+    }
 
-      final before = f.elementCount;
-      final pruned = f.prune(stable);
-      final after = pruned.elementCount;
-      if (after == before) continue; // nothing was droppable
-
-      fugueStore.set(fileId, pruned);
-      await fugueStore.persistOne(fileId);
-      prunedFiles += 1;
-      droppedElements += before - after;
+    // --- FileState tombstone pruning (min pull-cursor frontier) ---
+    // Reuses the SAME heads fetch. A tombstone is dropped only once every
+    // ACTIVE device's pull cursor (headSeq) has passed its serverSeq — i.e. the
+    // delete has propagated to everyone, so the tombstone is no longer needed.
+    // Conservative: an unknown serverSeq (locally-created delete not yet echoed
+    // back) or a lagging device's low headSeq keeps the tombstone, so a delete
+    // is never reclaimed before a peer has seen it (no resurrection).
+    var prunedTombstones = 0;
+    var metaDirty = false;
+    if (store != null) {
+      final minSafeHead = _minSafeHead(heads.heads);
+      if (minSafeHead != null) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        final backfillMinAgeMs = tombstoneBackfillMinAge.inMilliseconds;
+        for (final fileId in store.tombstoneFileIds.toList()) {
+          var seq = store.serverSeqFor(fileId);
+          if (seq == null) {
+            // A tombstone predating serverSeq tracking (the pre-fix backlog).
+            // Backfill a SAFE upper bound — the current pull cursor — but only
+            // once it's old enough to be certainly confirmed/pulled-back, so a
+            // just-created local delete not yet echoed from the server isn't
+            // reclaimed before a peer has seen it (see [tombstoneBackfillMinAge]
+            // — the cursor would otherwise under-estimate a fresh own delete's
+            // true seq). The precise seq arrives on the next pull regardless.
+            final ts = store.get(fileId);
+            if (ts == null) continue;
+            if (nowMs - ts.hlc.millis < backfillMinAgeMs) continue;
+            seq = store.serverCursor;
+            store.recordServerSeq(fileId, seq);
+            metaDirty = true;
+          }
+          if (seq > minSafeHead) continue;
+          store.remove(fileId);
+          // Drop the file's Fugue tree too — a tombstone doesn't need it, and
+          // an orphan from a pre-fix remote delete would otherwise linger.
+          await fugueStore.remove(fileId);
+          await store.persistOne(fileId); // register now empty → row deleted
+          prunedTombstones += 1;
+          metaDirty = true;
+        }
+        // Persist the in-memory map changes (serverSeq backfills + removals).
+        if (metaDirty) await store.persistMeta();
+      }
     }
 
     swTotal.stop();
-    if (prunedFiles > 0 || swTotal.elapsedMilliseconds > 100) {
+    if (prunedFiles > 0 ||
+        prunedTombstones > 0 ||
+        swTotal.elapsedMilliseconds > 100) {
       _onInfo(
-        'Fugue GC: dropped $droppedElements element(s) across '
-        '$prunedFiles file(s) (heads=${heads.heads.length}, '
-        'total=${swTotal.elapsedMilliseconds}ms)',
+        'Causal GC: dropped $droppedElements fugue element(s) across '
+        '$prunedFiles file(s), $prunedTombstones tombstone(s) '
+        '(heads=${heads.heads.length}, total=${swTotal.elapsedMilliseconds}ms)',
       );
     }
+  }
+
+  /// Smallest pull cursor (headSeq) across ACTIVE devices — the causal-
+  /// stability boundary for FileState tombstones. A record with
+  /// `serverSeq <= this` has been pulled (and applied, since headSeq is held
+  /// below any un-applied record) by every active device. Devices whose head
+  /// is older than [staleHeadAge] are excluded — the same abandoned-peer
+  /// trade-off as the Fugue frontier. Returns null when no active device has
+  /// reported (fail-safe: no pruning).
+  int? _minSafeHead(List<DeviceHead> heads) {
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final staleMs = staleHeadAge.inMilliseconds;
+    int? min;
+    for (final h in heads) {
+      if (nowMs - h.updatedAtMs >= staleMs) continue;
+      if (min == null || h.headSeq < min) min = h.headSeq;
+    }
+    return min;
   }
 
   /// Per-replica min over the supplied [DeviceHead]s' version vectors.

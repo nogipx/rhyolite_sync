@@ -69,6 +69,15 @@ class RemoteApplier {
     IStateConflictResolver resolver, {
     RpcContext? context,
   }) async {
+    // Track the server seq we've pulled this file up to — the causal-stability
+    // boundary tombstone GC compares against min(headSeq) across devices. This
+    // is what later lets a stable delete be reclaimed (see CausalStabilityGc).
+    var maxSeq = 0;
+    for (final r in records) {
+      if (r.serverSeq > maxSeq) maxSeq = r.serverSeq;
+    }
+    if (maxSeq > 0) store.recordServerSeq(fileId, maxSeq);
+
     final swApply = Stopwatch()..start();
     final swDecodeSum = Stopwatch();
     final tagged = <TaggedValue<FileState>>[];
@@ -372,8 +381,13 @@ class RemoteApplier {
           tombstone: true,
         ),
       );
-      fugueStore.set(fileId, Fugue<String>());
-      await fugueStore.persistOne(fileId);
+      // Drop the sibling rows rather than persisting an empty tree — an empty
+      // Fugue tree lingers forever (causal-stability GC skips elementCount==0),
+      // and the stat signature would otherwise never be reclaimed on a remote
+      // delete. The FileState tombstone above is retained for delete
+      // propagation.
+      await fugueStore.remove(fileId);
+      reconciler.forgetStat(winnerPath);
       final fullPath = '$vaultPath/$winnerPath';
       if (winnerPath.isNotEmpty && await io.fileExists(fullPath)) {
         changeProvider.suppress(winnerPath);
@@ -436,11 +450,13 @@ class RemoteApplier {
       chunks: upload.chunkHashes,
     );
     store.applyLocal(sealed);
-    // CRDT join is a convergence point — record the merged blob as
-    // the new LCA so [sync_v3_lca_semantics] holds for any future
-    // 3-way comparisons that might still touch this register (e.g.
-    // tooling that walks history).
-    store.recordSyncedBlobRef(fileId, upload.manifestHash);
+    // Do NOT record a synced LCA here. The sealed value is a NEW dominating
+    // contribution this device just computed; it is not on the server yet, so
+    // marking it synced would make `_collectDirty` treat it as already-pushed
+    // and it would never reach peers (the under-sync bug). Leaving it dirty
+    // lets the post-pull push publish it; the LCA is then recorded at the real
+    // convergence point when the pushed seal is pulled back (`_materialise`).
+    // For Fugue text the LCA is vestigial anyway (join is conflict-free).
 
     final projection = Uint8List.fromList(utf8.encode(merged.values.join()));
     final fullPath = '$vaultPath/$winnerPath';
@@ -507,6 +523,11 @@ class RemoteApplier {
         _emit(SyncFileDeleted(state.path));
       }
       store.recordSyncedBlobRef(state.fileId, '');
+      // Prune the file's sibling rows on a REMOTE delete — only local deletes
+      // pruned them before, so remote-deleted files leaked a Fugue tree + a
+      // stat signature forever (bounded-storage fix).
+      await fugueStore.remove(state.fileId);
+      reconciler.forgetStat(state.path);
       return;
     }
     // Record the synced LCA ONLY if the content actually landed on disk.

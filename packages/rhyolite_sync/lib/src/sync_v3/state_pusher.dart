@@ -24,6 +24,8 @@ class StatePusher {
     required this.codec,
     required this.vaultId,
     required this.clientName,
+    this.clientVersion,
+    this.clientKind,
     required Duration rpcTimeout,
     required void Function(SyncEngineEvent event) emit,
     required Future<void> Function(int newEpoch) handleEpochMismatch,
@@ -41,6 +43,8 @@ class StatePusher {
   final StateRecordCodec codec;
   final String vaultId;
   final String? clientName;
+  final String? clientVersion;
+  final String? clientKind;
   final Duration _rpcTimeout;
   final void Function(SyncEngineEvent event) _emit;
   final Future<void> Function(int newEpoch) _handleEpochMismatch;
@@ -52,6 +56,13 @@ class StatePusher {
   /// over-limit record every cycle; a new version (different blobRef) retries.
   final Map<String, ({String blobRef, StatePutRejection rejection})> _rejected =
       {};
+
+  /// fileId → blobRef of the last value this device successfully pushed. Used
+  /// only to keep a CONFLICTING register's own value from being re-pushed on
+  /// every pull: a multi-value register never advances a synced LCA (that only
+  /// happens once it collapses to a single value), so without this guard the
+  /// "push after every pull" trigger would resend the same own value each cycle.
+  final Map<String, String> _lastPushed = {};
 
   /// Push every dirty file as one Δ-state TaggedValue per file.
   Future<void> push({RpcContext? context}) async {
@@ -107,6 +118,7 @@ class StatePusher {
         continue;
       }
       _rejected.remove(state.fileId);
+      _lastPushed[state.fileId] = state.blobRef;
       // Push does NOT update lastSyncedBlobRef. The field is consumed
       // by StateConflictResolver as the 3-way-merge BASE (= LCA across
       // devices), and a push doesn't establish convergence with anyone.
@@ -172,6 +184,9 @@ class StatePusher {
           deviceId: store.deviceId,
           headSeq: headSeq,
           frontierPacked: frontier,
+          deviceName: clientName ?? '',
+          clientVersion: clientVersion ?? '',
+          clientKind: clientKind ?? '',
         ),
       );
     } catch (e) {
@@ -187,18 +202,41 @@ class StatePusher {
     for (final fileId in store.fileIds) {
       final register = store.registerFor(fileId);
       if (register == null) continue;
-      // Conflicting registers are NOT pushed — resolver collapses them
-      // first (via applyLocal during _applyOutcome), and the resulting
-      // single-value register IS pushed on the next cycle.
-      if (register.hasConflict) continue;
-      final tv = register.values.first;
+
+      final TaggedValue<FileState> tv;
+      if (register.hasConflict) {
+        // A conflicting register still owes the server THIS device's own
+        // concurrent value. Usually it reaches the server via a standalone
+        // push before the conflict forms — but a value absorbed into the
+        // conflict by the pull's pre-join reconcile (an edit made inside the
+        // pull window) or kept in a divergent multi-value union was never
+        // published. Publish OUR value (the others came from the server
+        // already) so peers can see it and render the same union. Guarded by
+        // [_lastPushed] because a multi-value register never advances a synced
+        // LCA, so it would otherwise re-push every pull.
+        final own = register.values
+            .where((t) => t.hlc.nodeId == store.deviceId)
+            .toList(growable: false);
+        if (own.isEmpty) continue;
+        tv = own.first;
+        if (_lastPushed[fileId] == tv.value.blobRef) continue;
+      } else {
+        tv = register.values.first;
+      }
+
       final state = tv.value;
       final synced = store.lastSyncedBlobRefFor(fileId);
       final neverPushed = synced == null;
       final isNew = neverPushed && !state.tombstone;
       final isModified = synced != null && synced != state.blobRef;
       final isTombstoneToCommit = state.tombstone && synced != null;
-      if (isNew || isModified || isTombstoneToCommit) {
+      // A conflicting own-value is always a candidate — its "dirtiness" is
+      // decided by the [_lastPushed] guard above, not the synced LCA (a
+      // multi-value register never advances it).
+      if (register.hasConflict ||
+          isNew ||
+          isModified ||
+          isTombstoneToCommit) {
         // Skip a file the server already rejected for this exact content —
         // don't re-push the same over-limit record every cycle. A new version
         // (different blobRef) clears the stale block and is retried.

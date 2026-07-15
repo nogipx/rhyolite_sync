@@ -1,3 +1,19 @@
+## [3.4.1] - 2026-07-15
+
+### Features
+
+- runtime-configurable remote log collector (obsidian)
+
+### Bug Fixes
+
+- position sync indicator lower on iOS (obsidian)
+- a failed token refresh no longer escapes as an unhandled async error (account)
+
+### Other
+
+- bump plugin version to 3.4.1 (obsidian)
+
+
 ## [3.4.0] - 2026-07-14
 
 ### Vaults

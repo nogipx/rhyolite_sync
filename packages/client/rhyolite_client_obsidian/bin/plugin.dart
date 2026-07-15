@@ -10,6 +10,7 @@ import 'package:rhyolite_client_account/rhyolite_client_account.dart'
 import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
+import 'package:rhyolite_client_obsidian/src/engine/diagnostics_logging.dart';
 import 'package:rhyolite_client_obsidian/src/engine/device_management_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/file_version_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/modal_lock.dart';
@@ -31,15 +32,24 @@ import 'package:rpc_dart_log/rpc_dart_log.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:rpc_data_sqlite/rpc_data_sqlite.dart';
 
-// Release builds emit only warnings and errors to the developer
-// console — per Obsidian's plugin guidelines, info/debug logs should
-// not appear by default. Dev builds (RHYOLITE_DEBUG=true) keep the
-// full debug-level stream for live debugging.
+// Silent baseline level: dev builds stream everything; release builds sit at
+// warning. When the user enables remote diagnostics, [DiagnosticsLogging] drops
+// the level to debug and restores this on disable.
+const _baselineLogLevel = kDebug ? RpcLogLevel.debug : RpcLogLevel.warning;
+
+// Release builds start with NO outputs — nothing is written anywhere until the
+// user explicitly enables remote diagnostics (see [DiagnosticsLogging]). Dev
+// builds (RHYOLITE_DEBUG=true) keep the console for local debugging.
 final _logController = LogController(
-  outputs: [ConsoleOutput()],
-  minLevel: kDebug ? RpcLogLevel.debug : RpcLogLevel.warning,
+  outputs: kDebug ? [ConsoleOutput()] : [],
+  minLevel: _baselineLogLevel,
 );
 final _log = _logController.scope('plugin');
+
+/// Manages the optional remote log sink. Off until the user opts in; installed
+/// during boot from the persisted [DiagnosticsPrefs] and re-applied live from
+/// the settings tab.
+DiagnosticsLogging? _diagnostics;
 
 ISyncEngine? _engine;
 DatabaseConnection? _dbConn;
@@ -63,6 +73,23 @@ Future<void> _guardedStart(ISyncEngine engine) async {
     return;
   }
   await engine.start();
+}
+
+/// Best-effort OS label for [DeviceInfo] on the log collector: `desktop`, or
+/// `iOS`/`Android` sniffed from the user agent on mobile (Obsidian doesn't
+/// expose the OS directly). The bug this diagnostics feature exists to debug is
+/// iOS-specific, so telling iPhone from Android in the collector matters.
+String _diagnosticsOs(bool isMobile) {
+  if (!isMobile) return 'desktop';
+  try {
+    final nav = jsu.getProperty<JSObject?>(jsu.globalThis, 'navigator');
+    final ua = nav != null
+        ? (jsu.getProperty<String?>(nav, 'userAgent') ?? '')
+        : '';
+    return ua.contains('Android') ? 'Android' : 'iOS';
+  } catch (_) {
+    return 'mobile';
+  }
 }
 
 /// Fetches managed-storage usage over the sync connection. Returns null on
@@ -525,26 +552,6 @@ void main() {
           final wasmUri = _resolveWasmUri();
 
           final vaultId = cfg.vaultId;
-          // Dev-only log collector — streams structured logs to a local
-          // rpc_log server for live debugging. Disabled in release builds
-          // so user plugins never reach out to a developer host. Enable
-          // with `--dart-define=RHYOLITE_DEBUG=true` plus
-          // `--dart-define=RHYOLITE_LOG_URI=ws://your-host:9500` during
-          // a dev session.
-          const debugLogUri = String.fromEnvironment('RHYOLITE_LOG_URI');
-          if (kDebug && debugLogUri.isNotEmpty) {
-            _logController.addOutput(
-              LogCollectorOutput(
-                uri: Uri.parse(debugLogUri),
-                device: DeviceInfo(
-                  name: 'Obsidian',
-                  app: 'rhyolite_sync',
-                  os: 'WASM',
-                  appVersion: cfg.vaultName.isNotEmpty ? cfg.vaultName : null,
-                ),
-              ),
-            );
-          }
 
           final bootSw = Stopwatch()..start();
           final raw = await plugin.loadData();
@@ -557,6 +564,11 @@ void main() {
 
           // .obsidian settings sync preferences (opt-in; default off).
           var settingsPrefs = SettingsSyncPrefs.fromData(raw);
+
+          // Remote diagnostics logging (opt-in; default off). The sink itself is
+          // installed after platform detection below so DeviceInfo can carry the
+          // OS — but it's still early enough to capture the whole engine boot.
+          var diagnosticsPrefs = DiagnosticsPrefs.fromData(raw);
 
           // User-requested sync pause (from the side panel). Gates the boot
           // start below; the panel toggles it live.
@@ -592,6 +604,22 @@ void main() {
           } catch (_) {
             platformTag = 'unknown';
           }
+
+          // Install the remote diagnostics sink now that DeviceInfo can carry
+          // the OS (iOS/Android/desktop) so the collector can tell devices
+          // apart — the bug this exists to debug is device-specific. Off unless
+          // the user enabled it; re-applied live from the settings tab.
+          _diagnostics = DiagnosticsLogging(
+            controller: _logController,
+            baselineLevel: _baselineLogLevel,
+            log: _log,
+            device: () => DeviceInfo(
+              name: cfg.vaultName.isNotEmpty ? cfg.vaultName : 'Obsidian',
+              app: 'rhyolite_sync',
+              os: _diagnosticsOs(isMobile),
+            ),
+          );
+          _diagnostics!.apply(diagnosticsPrefs);
 
           // On mobile (Obsidian iOS/Android) RAM is tight. StartupDiff
           // holds N × file_bytes in memory while uploading; with large
@@ -873,6 +901,15 @@ void main() {
                 );
               }
               refreshSettings();
+            },
+            diagnosticsPrefs: () => diagnosticsPrefs,
+            onDiagnosticsChanged: (next) async {
+              // Persist + apply live; deliberately NO refreshSettings() — the
+              // URL text field's onChange fires per keystroke and a tab rebuild
+              // would drop the caret. Obsidian's own widgets hold their state.
+              diagnosticsPrefs = next;
+              await configStorage.saveDiagnostics(next.toJson());
+              _diagnostics?.apply(next);
             },
           );
 
@@ -1313,6 +1350,9 @@ void main() {
       _syncPanel?.closeLeaves();
       _syncPanel?.dispose();
       _syncPanel = null;
+      // Close the remote log sink's WebSocket, if the user had it on.
+      _diagnostics?.dispose();
+      _diagnostics = null;
       await _engine?.stop();
       _engine = null;
       await _scheduler?.dispose();
@@ -1348,6 +1388,8 @@ void Function() _registerSettings({
   required VaultConfig Function(VaultConfig, RpcAccountClient?) buildConfig,
   required SettingsSyncPrefs Function() settingsSyncPrefs,
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
+  required DiagnosticsPrefs Function() diagnosticsPrefs,
+  required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
   required Future<void> Function(VaultInfo vault) onDeleteVault,
   required bool selfHostEnabled,
   required String selfHostUrl,
@@ -1483,6 +1525,8 @@ void Function() _registerSettings({
     },
     settingsSyncPrefs: settingsSyncPrefs,
     onSettingsSyncChanged: onSettingsSyncChanged,
+    diagnosticsPrefs: diagnosticsPrefs,
+    onDiagnosticsChanged: onDiagnosticsChanged,
     onResetSettings: () async {
       final cs = _configSync;
       if (cs == null) {

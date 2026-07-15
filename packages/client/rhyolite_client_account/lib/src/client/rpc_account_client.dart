@@ -160,6 +160,12 @@ class RpcAccountClient {
       return fresh.accessToken;
     } catch (e, st) {
       completer.completeError(e, st);
+      // The completer only exists to de-dup concurrent refreshes. With no
+      // concurrent waiter its error future has NO listener — mark it handled so
+      // the failure doesn't escape as an unhandled async error (which crashes
+      // the app's error zone / systemd restart-loops the bot). THIS caller still
+      // gets the error via rethrow.
+      completer.future.ignore();
       rethrow;
     } finally {
       _refreshInFlight = null;

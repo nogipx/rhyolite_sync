@@ -2,6 +2,12 @@
 /// In production builds this is false and logging is disabled.
 const kDebug = bool.fromEnvironment('RHYOLITE_DEBUG', defaultValue: false);
 
+/// Optional build-time default for the diagnostics log-collector URL. Only used
+/// to prefill the settings field; the runtime value stored in `data.json`
+/// always wins. Empty unless compiled with
+/// `--dart-define=RHYOLITE_LOG_URI=wss://host:port`.
+const kDefaultLogUri = String.fromEnvironment('RHYOLITE_LOG_URI');
+
 class RhyoliteEnvironment {
   const RhyoliteEnvironment({
     required this.accountServiceUrl,

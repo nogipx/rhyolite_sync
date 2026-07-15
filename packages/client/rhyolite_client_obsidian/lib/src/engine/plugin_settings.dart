@@ -10,8 +10,10 @@ import 'package:rhyolite_client_obsidian/src/vault/vault_directory.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:uuid/uuid.dart';
 
+import '../settings/diagnostics_prefs.dart';
 import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
+import 'build_env.dart';
 import 'db_recovery.dart';
 import 'modal_lock.dart';
 import 'obsidian_config_storage.dart';
@@ -55,6 +57,10 @@ void Function() registerSettingsTab({
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
   required Future<void> Function() onResetSettings,
   required Future<void> Function() onRestoreSettings,
+  // Remote diagnostics logging (advanced, off by default). Lets a user stream
+  // this device's debug logs to a collector URL for support/debugging.
+  required DiagnosticsPrefs Function() diagnosticsPrefs,
+  required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
   // Self-host edition state. When [selfHostEnabled] the managed auth section
   // (sign-in / subscription) is replaced by a self-host vault section that
   // uses [selfHostDirectory] (the sync server's registry).
@@ -368,6 +374,39 @@ void Function() registerSettingsTab({
       }
     }
 
+    // Remote diagnostics — advanced, off by default. Set the URL first, then
+    // flip the toggle: the URL field persists silently (no live reconnect
+    // churn), and enabling reads the stored URL and starts streaming. Text
+    // onChange never refreshes the tab, so typing the URL keeps the caret.
+    void addDiagnosticsSection(PluginSettingsTab t) {
+      final prefs = diagnosticsPrefs();
+      t.addSection('Diagnostics');
+      t.addText(
+        name: 'Log collector URL',
+        description:
+            'WebSocket endpoint your logs stream to. Use wss:// — iOS blocks '
+            'plain ws:// silently.',
+        initialValue: prefs.url,
+        placeholder: kDefaultLogUri.isNotEmpty
+            ? kDefaultLogUri
+            : 'wss://collector.example.com:9500',
+        onChange: (v) => onDiagnosticsChanged(
+          diagnosticsPrefs().copyWith(url: v.trim()),
+        ),
+      );
+      t.addToggle(
+        name: 'Send logs to collector',
+        description:
+            'Off by default — nothing is logged until you enable this. Streams '
+            "this device's debug logs to the URL above. Logs include file "
+            'paths, ids, hashes, sizes and timings — never file content.',
+        initialValue: prefs.enabled,
+        onChange: (v) => onDiagnosticsChanged(
+          diagnosticsPrefs().copyWith(enabled: v),
+        ),
+      );
+    }
+
     final isSignedIn = currentAuthClient?.isSignedIn ?? false;
     final userEmail = currentAuthClient?.email ?? '';
 
@@ -497,6 +536,10 @@ void Function() registerSettingsTab({
         },
       );
     }
+
+    // Advanced diagnostics — always shown (useful even before sign-in / vault
+    // connect, e.g. to capture a failing boot), last so it stays out of the way.
+    addDiagnosticsSection(t);
   }
 
   Future<void> buildAsync(PluginSettingsTab t) async {

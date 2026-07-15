@@ -185,6 +185,11 @@ class ObsidianConfigStorage {
   Future<void> saveSettingsSync(Map<String, Object?> json) =>
       _data.update((m) => m['settingsSync'] = json);
 
+  /// Persists the remote diagnostics-logging preferences under their own
+  /// data.json key, preserving all other keys.
+  Future<void> saveDiagnostics(Map<String, Object?> json) =>
+      _data.update((m) => m['diagnostics'] = json);
+
   /// User-requested sync pause (from the side panel). When true, boot skips
   /// the initial `engine.start()`; sync stays off until the user resumes.
   /// Survives restarts. Explicit user actions (sign-in, config change) still

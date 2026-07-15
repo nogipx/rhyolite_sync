@@ -139,10 +139,15 @@ class SyncStatusIndicator {
     final style = jsu.getProperty<JSObject>(div, 'style');
     jsu.setProperty(style, 'position', 'fixed');
     jsu.setProperty(style, 'zIndex', '300');
+    // iOS floats the pill much higher than Android with the same rule: the
+    // home-indicator safe-area inset (~34px) plus 14px pushes it well up the
+    // screen. On iPhone drop the inset and sit near the bottom edge; Android
+    // keeps the inset-aware offset (looks right there).
+    final isAndroid = _userAgent().contains('Android');
     jsu.setProperty(
       style,
       'bottom',
-      'calc(env(safe-area-inset-bottom, 0px) + 14px)',
+      isAndroid ? 'calc(env(safe-area-inset-bottom, 0px) + 14px)' : '8px',
     );
     jsu.setProperty(
       style,
@@ -479,6 +484,18 @@ class SyncStatusIndicator {
       return jsu.getProperty<JSObject>(globalContext, 'document');
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Best-effort navigator.userAgent, '' on failure. Used to place the floating
+  /// pill differently on iOS vs Android.
+  static String _userAgent() {
+    try {
+      final nav = jsu.getProperty<JSObject?>(globalContext, 'navigator');
+      if (nav == null) return '';
+      return jsu.getProperty<String?>(nav, 'userAgent') ?? '';
+    } catch (_) {
+      return '';
     }
   }
 }

@@ -538,6 +538,8 @@ class StateSyncEngine implements ISyncEngine {
     // blob-id key, so recomputed blob ids diverge from what is stored.
     _blobIdKey = null;
     _blobIdKeyResolved = false;
+    _recordIdKey = null;
+    _recordIdKeyResolved = false;
     _textDebounce.cancelAll();
     _userActiveTimer?.cancel();
     _userActiveTimer = null;
@@ -1449,6 +1451,20 @@ class StateSyncEngine implements ISyncEngine {
     return _blobIdKey;
   }
 
+  /// Subkey that KEYS record ids (closes the path-enumeration oracle). Null for
+  /// a non-[VaultCipher] fake (tests) — then ids fall back to the legacy unkeyed
+  /// uuid.v5, which never happens in a real session.
+  Uint8List? _recordIdKey;
+  bool _recordIdKeyResolved = false;
+  Uint8List? _resolveRecordIdKey() {
+    if (!_recordIdKeyResolved) {
+      final c = cipher;
+      _recordIdKey = c is VaultCipher ? c.deriveRecordIdKey() : null;
+      _recordIdKeyResolved = true;
+    }
+    return _recordIdKey;
+  }
+
   /// Builds a ChunkedBlobIO bound to the current remote storage. Returns
   /// null only when no remote storage is configured (offline-only run).
   ChunkedBlobIO? _newChunkedIO() {
@@ -1536,8 +1552,16 @@ class StateSyncEngine implements ISyncEngine {
     endpoint: _conn?.endpoint,
   );
 
-  String _deterministicFileId(String relPath) =>
-      const Uuid().v5(config.vaultId, normalizeVaultPath(relPath));
+  String _deterministicFileId(String relPath) {
+    final path = normalizeVaultPath(relPath);
+    final key = _resolveRecordIdKey();
+    // Keyed id so the server cannot enumerate paths. The unkeyed uuid.v5
+    // fallback only fires for a non-VaultCipher fake (tests), never in a real
+    // session where a VaultCipher is always present.
+    return key == null
+        ? const Uuid().v5(config.vaultId, path)
+        : VaultCipher.recordId(key, config.vaultId, path);
+  }
 
   void _emit(SyncEngineEvent event) {
     if (!_eventsController.isClosed) _eventsController.add(event);

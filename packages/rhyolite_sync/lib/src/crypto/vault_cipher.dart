@@ -111,6 +111,30 @@ class VaultCipher implements IVaultCipher {
     return Uint8List.fromList(pc.Hmac(pc.sha256, _keyBytes).convert(info).bytes);
   }
 
+  /// A SEPARATE HMAC subkey used to KEY record ids (`fileId` for notes,
+  /// `resourceId` for settings). Domain-separated from [deriveBlobIdKey] by its
+  /// info label — same single-block HKDF-Expand over the AES key.
+  ///
+  /// Record ids used to be `uuid.v5(vaultId, path)` — a PUBLIC deterministic
+  /// function of the (server-known) vaultId, so the server could brute-force
+  /// candidate paths and confirm which files a vault holds (the
+  /// path-enumeration oracle), despite E2E-encrypted contents. Keying the id
+  /// with a subkey the server never sees closes that oracle. Every device
+  /// derives the same subkey from the same passphrase-derived key, so ids stay
+  /// deterministic and consistent across devices.
+  Uint8List deriveRecordIdKey() {
+    final info = <int>[...utf8.encode('rhyolite/record-id/v1'), 0x01];
+    return Uint8List.fromList(pc.Hmac(pc.sha256, _keyBytes).convert(info).bytes);
+  }
+
+  /// A keyed, server-opaque record id: `HMAC-SHA256(recordIdKey, "vaultId|path")`
+  /// as hex. The server knows vaultId but not [recordIdKey] (derived from the
+  /// vault key it never sees), so it cannot compute the id for a guessed path.
+  static String recordId(List<int> recordIdKey, String vaultId, String path) =>
+      pc.Hmac(pc.sha256, recordIdKey)
+          .convert(utf8.encode('$vaultId|$path'))
+          .toString();
+
   @override
   Future<Uint8List> encrypt(Uint8List plaintext) async {
     final secretKey = crypto.SecretKey(_keyBytes);

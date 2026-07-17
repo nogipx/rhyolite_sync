@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../contract/state_sync_contract.dart';
 import '../crypto/i_vault_cipher.dart';
+import '../crypto/vault_cipher.dart';
 import 'canonical_json.dart';
 import 'resource_crdt_codec.dart';
 import 'settings_store.dart';
@@ -36,11 +37,16 @@ class SettingsSync {
        _store = store,
        _cipher = cipher,
        _kindOf = kindOf,
+       // Keyed record ids close the path-enumeration oracle (see
+       // VaultCipher.deriveRecordIdKey). Null for a non-VaultCipher fake (tests).
+       _recordIdKey =
+           cipher is VaultCipher ? cipher.deriveRecordIdKey() : null,
        _log = log;
 
   final IStateSyncContract _remote;
   final SettingsStore _store;
   final IVaultCipher _cipher;
+  final Uint8List? _recordIdKey;
   final String vaultId;
   final void Function(String message)? _log;
 
@@ -70,7 +76,9 @@ class SettingsSync {
   /// server even though contents are e2e-encrypted. Mirrors the notes engine
   /// (`uuid.v5(vaultId, relPath)`); the path itself rides inside the encrypted
   /// payload envelope (see [_push] / [pull]) so it can be recovered on pull.
-  String _fileIdFor(String resourceId) => _uuid.v5(vaultId, resourceId);
+  String _fileIdFor(String resourceId) => _recordIdKey == null
+      ? _uuid.v5(vaultId, resourceId)
+      : VaultCipher.recordId(_recordIdKey!, vaultId, resourceId);
 
   /// Marker for our encrypted payload envelope `{t, path, s}`. Records lacking
   /// it are legacy path-keyed rows (pre-hashing) or foreign — ignored on pull;

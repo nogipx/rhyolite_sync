@@ -1,3 +1,14 @@
+## [3.5.3] - 2026-07-17
+
+### Bug Fixes
+
+- key record ids with HMAC to close the path-enumeration oracle (core)
+
+### Other
+
+- bump plugin to 3.5.3 (obsidian)
+
+
 ## [3.5.2] - 2026-07-16
 
 ### Bug Fixes

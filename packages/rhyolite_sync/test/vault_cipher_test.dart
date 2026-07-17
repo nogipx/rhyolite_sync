@@ -65,4 +65,33 @@ void main() {
       expect(a.rawKeyBytes, isNot(equals(other.rawKeyBytes)));
     });
   });
+
+  group('record-id keying (closes the path-enumeration oracle)', () {
+    test('deriveRecordIdKey is deterministic + domain-separated from blob-id',
+        () {
+      final c = VaultCipher.fromRawKey(key32(1));
+      expect(c.deriveRecordIdKey(), c.deriveRecordIdKey());
+      expect(c.deriveRecordIdKey(), isNot(equals(c.deriveBlobIdKey())),
+          reason: 'separate HKDF info label');
+    });
+
+    test('recordId is deterministic per (key, vaultId, path)', () {
+      final k = VaultCipher.fromRawKey(key32(1)).deriveRecordIdKey();
+      expect(VaultCipher.recordId(k, 'v', 'a/b.md'),
+          VaultCipher.recordId(k, 'v', 'a/b.md'));
+      expect(VaultCipher.recordId(k, 'v', 'a/b.md'),
+          isNot(equals(VaultCipher.recordId(k, 'v', 'a/c.md'))),
+          reason: 'different paths → different ids');
+    });
+
+    test('same vaultId+path but a different vault key → different id', () {
+      // The oracle-closure property: the server knows vaultId + can guess a
+      // path, but WITHOUT the vault key it cannot reproduce the id, so it
+      // cannot confirm whether the vault holds that path.
+      final k1 = VaultCipher.fromRawKey(key32(1)).deriveRecordIdKey();
+      final k2 = VaultCipher.fromRawKey(key32(2)).deriveRecordIdKey();
+      expect(VaultCipher.recordId(k1, 'v', 'Secret.md'),
+          isNot(equals(VaultCipher.recordId(k2, 'v', 'Secret.md'))));
+    });
+  });
 }

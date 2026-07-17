@@ -76,9 +76,12 @@ class SettingsSync {
   /// server even though contents are e2e-encrypted. Mirrors the notes engine
   /// (`uuid.v5(vaultId, relPath)`); the path itself rides inside the encrypted
   /// payload envelope (see [_push] / [pull]) so it can be recovered on pull.
-  String _fileIdFor(String resourceId) => _recordIdKey == null
-      ? _uuid.v5(vaultId, resourceId)
-      : VaultCipher.recordId(_recordIdKey!, vaultId, resourceId);
+  String _fileIdFor(String resourceId) {
+    final key = _recordIdKey;
+    return key == null
+        ? _uuid.v5(vaultId, resourceId)
+        : VaultCipher.recordId(key, vaultId, resourceId);
+  }
 
   /// Marker for our encrypted payload envelope `{t, path, s}`. Records lacking
   /// it are legacy path-keyed rows (pre-hashing) or foreign — ignored on pull;

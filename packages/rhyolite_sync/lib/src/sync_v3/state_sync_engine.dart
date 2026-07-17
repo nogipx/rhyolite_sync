@@ -326,6 +326,8 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         isFatalRejection: _rejections.isFatal,
         log: _log,
+        prefetchContentFile: _prefetchContentFile,
+        downloadConcurrency: startupUploadConcurrency,
         clientName: () => config.clientName ?? '',
         clientVersion: config.clientVersion ?? '',
         clientKind: config.clientKind ?? '',
@@ -1476,6 +1478,16 @@ class StateSyncEngine implements ISyncEngine {
       vaultId: config.vaultId,
       blobIdKey: _resolveBlobIdKey(),
     );
+  }
+
+  /// Populates the local blob cache with one file's content (manifest + chunks)
+  /// so the puller can fetch many files in parallel (see StatePuller's prefetch
+  /// worker pool) before the serial apply assembles them from cache. The
+  /// assembled bytes here are discarded — apply re-reads from the cache.
+  Future<void> _prefetchContentFile(String blobRef, {RpcContext? context}) async {
+    final io = _newChunkedIO();
+    if (io == null) return;
+    await io.download(blobRef, context: context);
   }
 
   /// Aggregates every chunk hash referenced by some current file_state

@@ -132,6 +132,8 @@ Future<_Fx> _newPuller(
     emit: events.add,
     isFatalRejection: (_) => false,
     log: LogScope.noop,
+    prefetchContentFile: (blobRef, {context}) async {},
+    downloadConcurrency: 1,
   );
 
   return (puller: puller, store: store, applied: applied, events: events);

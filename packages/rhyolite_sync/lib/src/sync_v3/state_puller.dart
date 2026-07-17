@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import 'bounded_parallel.dart';
+
 /// Pull-side transport mechanics for one sync session.
 ///
 /// Owns the getStates fetch, the interleaved prefetch+apply pipeline,
@@ -35,6 +37,9 @@ class StatePuller {
     required void Function(SyncEngineEvent event) emit,
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
+    required Future<void> Function(String blobRef, {RpcContext? context})
+        prefetchContentFile,
+    required int downloadConcurrency,
     String Function()? clientName,
     String clientVersion = '',
     String clientKind = '',
@@ -46,6 +51,8 @@ class StatePuller {
         _emit = emit,
         _isFatalRejection = isFatalRejection,
         _log = log,
+        _prefetchContentFile = prefetchContentFile,
+        _downloadConcurrency = downloadConcurrency,
         _clientName = clientName ?? (() => ''),
         _clientVersion = clientVersion,
         _clientKind = clientKind;
@@ -68,6 +75,15 @@ class StatePuller {
   final void Function(SyncEngineEvent event) _emit;
   final bool Function(Object error) _isFatalRejection;
   final LogScope _log;
+
+  /// Downloads one file's content (manifest + chunks) into the local blob
+  /// cache. Runs concurrently across files during prefetch so the subsequent
+  /// (serial) apply is an all-cache-hit assemble.
+  final Future<void> Function(String blobRef, {RpcContext? context})
+      _prefetchContentFile;
+
+  /// Max concurrent file prefetches (mirrors the upload worker-pool bound).
+  final int _downloadConcurrency;
 
   /// Human-readable device label reported with the head so the
   /// device-management UI can name this device.
@@ -428,37 +444,28 @@ class StatePuller {
   /// Counts how many distinct blobRefs from [records] are not yet in the
   /// local cache. Used by [pull] to emit a stable progress total across
   /// interleaved prefetch batches.
+  /// Distinct files with content to prefetch in [records] (non-tombstone,
+  /// non-empty ref) — drives the pull's progress total. A cached file still
+  /// counts; its parallel prefetch is just a fast cache hit.
   Future<int> _countMissingBlobRefs(List<StateRecord> records) async {
-    if (records.isEmpty) return 0;
-    final candidates = <String>{};
+    final refs = <String>{};
     for (final r in records) {
-      if (r.tombstone) continue;
-      if (r.blobRef.isEmpty) continue;
-      candidates.add(r.blobRef);
+      if (r.tombstone || r.blobRef.isEmpty) continue;
+      refs.add(r.blobRef);
     }
-    if (candidates.isEmpty) return 0;
-    var missing = 0;
-    for (final ref in candidates) {
-      final cached = await blobStore.read(ref, vaultId: vaultId);
-      if (cached == null) missing += 1;
-    }
-    return missing;
+    return refs.length;
   }
 
-  /// Bulk-download blobs referenced by [records] that aren't already in
-  /// the local cache. Returns the number of blobs newly downloaded.
+  /// Prefetch the CONTENT of every file in [records] (manifest + chunks) into
+  /// the local blob cache, running up to [_downloadConcurrency] file downloads
+  /// in parallel. The subsequent (serial) apply then assembles from cache with
+  /// no network — this replaces the previous one-blob-at-a-time-over-a-single-
+  /// stream download that dominated a full restore. Returns the file count.
   ///
-  /// Internally chunks the work into HTTP batches of 8 (HttpBlobStorage
-  /// fans each chunk into 8 parallel GETs).
-  ///
-  /// When called as a stand-alone prefetch (no [progressTotal]), emits its
-  /// own start/done log lines and `SyncBlobDownloadProgress` against just
-  /// this call's missing count.
-  ///
-  /// When called per-batch from the interleaved pipeline ([progressTotal]
-  /// non-null), suppresses the standalone log/done emission and reports
-  /// progress as `progressOffset + done / progressTotal` so the UI sees a
-  /// single stable bar across the whole pull.
+  /// Stand-alone (no [progressTotal]): emits its own start/done log +
+  /// `SyncBlobDownloadProgress`. Interleaved ([progressTotal] non-null): reports
+  /// `progressOffset + done / progressTotal` so the UI shows one stable bar
+  /// across the whole pull, suppressing the standalone log/done.
   Future<int> _prefetchBlobs(
     List<StateRecord> records, {
     int progressOffset = 0,
@@ -466,76 +473,50 @@ class StatePuller {
     RpcContext? context,
   }) async {
     if (records.isEmpty) return 0;
-    final remote = _getRemoteBlobStorage();
-    if (remote == null) return 0;
-
-    // Collect candidate blob refs (skip tombstones + empty refs).
-    final candidates = <String>{};
+    if (_getRemoteBlobStorage() == null) return 0; // offline — nothing to fetch
+    // Distinct files with content (skip tombstones + empty refs).
+    final refs = <String>{};
     for (final r in records) {
-      if (r.tombstone) continue;
-      if (r.blobRef.isEmpty) continue;
-      candidates.add(r.blobRef);
+      if (r.tombstone || r.blobRef.isEmpty) continue;
+      refs.add(r.blobRef);
     }
-    if (candidates.isEmpty) return 0;
-
-    // Filter out blobs we already have locally — no point re-fetching.
-    final missing = <String>[];
-    for (final ref in candidates) {
-      final cached = await blobStore.read(ref, vaultId: vaultId);
-      if (cached == null) missing.add(ref);
-    }
-    if (missing.isEmpty) return 0;
+    if (refs.isEmpty) return 0;
 
     final interleaved = progressTotal != null;
-    final total = progressTotal ?? missing.length;
+    final total = progressTotal ?? refs.length;
+    final concurrency = _downloadConcurrency.clamp(1, refs.length);
     if (!interleaved) {
-      _log.info('Pull: prefetching ${missing.length} blob(s)…');
+      _log.info(
+          'Pull: prefetching ${refs.length} file(s) (x$concurrency parallel)…');
       _emit(SyncBlobDownloadProgress(completed: 0, total: total));
     }
     final swatch = Stopwatch()..start();
-    const chunkSize = 8;
+
     var done = 0;
-    for (var i = 0; i < missing.length; i += chunkSize) {
-      final end = (i + chunkSize) > missing.length
-          ? missing.length
-          : (i + chunkSize);
-      final chunk = missing.sublist(i, end);
+    await boundedParallel(refs, concurrency, (ref) async {
+      context?.cancellationToken?.throwIfCancelled();
       try {
-        final downloaded = await remote.download(chunk, context: context);
-        for (final entry in downloaded.entries) {
-          await blobStore.write(
-            entry.value,
-            entry.key,
-            vaultId: vaultId,
-          );
-        }
+        await _prefetchContentFile(ref, context: context);
       } catch (e) {
-        // A preempted pull must abort, not swallow-and-continue: re-throw so
-        // pull() unwinds and the engine re-schedules. Other download failures
-        // stay best-effort (the file's apply will hold-and-retry).
+        // A preempted pull must abort so the lane frees for the push; every
+        // other failure stays best-effort — the file's apply hold-and-retries.
         if (e is RpcCancelledException) rethrow;
-        _log.warning('Pull: blob chunk download failed: $e');
+        _log.warning('Pull: prefetch failed for ${ref.substring(0, 8)}...: $e');
       }
-      done += chunk.length;
-      _emit(
-        SyncBlobDownloadProgress(
-          completed: progressOffset + done,
-          total: total,
-        ),
-      );
-    }
+      done += 1;
+      _emit(SyncBlobDownloadProgress(
+        completed: (progressOffset + done).clamp(0, total),
+        total: total,
+      ));
+    });
+
     if (!interleaved) {
-      _emit(
-        SyncBlobDownloadDone(
-          totalDownloaded: missing.length,
-          elapsed: swatch.elapsed,
-        ),
-      );
-      _log.info(
-        'Pull: prefetched ${missing.length} blob(s) in ${swatch.elapsed.inSeconds}s',
-      );
+      _emit(SyncBlobDownloadDone(
+          totalDownloaded: refs.length, elapsed: swatch.elapsed));
+      _log.info('Pull: prefetched ${refs.length} file(s) in '
+          '${swatch.elapsed.inSeconds}s (x$concurrency)');
     }
-    return missing.length;
+    return refs.length;
   }
 
   bool _isEpochAhead(int serverEpoch, int? localEpoch) =>

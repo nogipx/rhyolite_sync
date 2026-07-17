@@ -1,3 +1,14 @@
+## [3.5.4] - 2026-07-17
+
+### Bug Fixes
+
+- parallelize vault download (bounded blob-prefetch worker pool) (core)
+
+### Other
+
+- bump plugin to 3.5.4 (obsidian)
+
+
 ## [3.5.3] - 2026-07-17
 
 ### Bug Fixes

@@ -135,6 +135,8 @@ Future<_Fx> _newPuller(
     emit: events.add,
     isFatalRejection: (_) => false,
     log: LogScope.noop,
+    prefetchContentFile: (blobRef, {context}) async {},
+    downloadConcurrency: 1,
   );
 
   return (puller: puller, store: store, caller: caller, history: history, events: events);
@@ -169,6 +171,8 @@ void main() {
         emit: events.add,
         isFatalRejection: (_) => false,
         log: LogScope.noop,
+        prefetchContentFile: (blobRef, {context}) async {},
+        downloadConcurrency: 1,
       );
 
       await puller.pull();

@@ -4,6 +4,7 @@ import 'dart:js_util' as jsu;
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'obsidian_config_storage.dart';
 
 /// Setup modal: asks for passphrase + confirmation, creates or migrates vault with E2EE.
@@ -19,25 +20,26 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
     plugin,
     build: (ctx) {
       ctx.h3('Rhyolite Sync');
-      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: 'Set up end-to-end encryption for this vault.');
+      ctx.createEl('p',
+          cls: 'rhyolite-setting-desc', text: S.setupDescription);
       ctx.spaceVertical(px: 12);
 
       final passphraseInput = ctx.input(
         type: 'password',
-        placeholder: 'Enter passphrase',
+        placeholder: S.enterPassphrase,
       )..focus();
       ctx.spaceVertical(px: 8);
 
       final confirmInput = ctx.input(
         type: 'password',
-        placeholder: 'Confirm passphrase',
+        placeholder: S.confirmPassphrase,
       );
       ctx.spaceVertical(px: 8);
 
       // Show/hide passphrase toggle
       var showPassphrase = false;
       ctx.toggle(
-        label: 'Show passphrase',
+        label: S.showPassphrase,
         initialValue: false,
         onChange: (value) {
           showPassphrase = value;
@@ -51,7 +53,7 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
       // Remember passphrase toggle with description
       var rememberPassphrase = true;
       ctx.toggle(
-        label: 'Remember on this device',
+        label: S.rememberOnThisDevice,
         initialValue: true,
         onChange: (value) => rememberPassphrase = value,
       );
@@ -60,14 +62,12 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
         col.createEl(
           'p',
           cls: 'rhyolite-setting-desc',
-          text:
-              'Stores a derived key in the system keychain so you are not '
-              'prompted for the passphrase on every launch.',
+          text: S.rememberKeyDescription,
         );
       });
       ctx.spaceVertical(px: 8);
 
-      final loading = ctx.spinner(label: 'Deriving key, please wait…');
+      final loading = ctx.spinner(label: S.derivingKey);
 
       late final List<ButtonRef> buttons;
 
@@ -75,16 +75,16 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
         final passphrase = ctx.valueOf(passphraseInput);
         final confirm = ctx.valueOf(confirmInput);
         if (passphrase.isEmpty) {
-          ctx.showError('Passphrase cannot be empty.');
+          ctx.showError(S.passphraseEmpty);
           return;
         }
         final validation = PassphraseValidator.validate(passphrase);
         if (!validation.isValid) {
-          ctx.showError(validation.error ?? 'Passphrase too weak.');
+          ctx.showError(validation.error ?? S.passphraseTooWeak);
           return;
         }
         if (passphrase != confirm) {
-          ctx.showError('Passphrases do not match.');
+          ctx.showError(S.passphrasesDoNotMatch);
           return;
         }
         buttons[0].setDisabled(value: true);
@@ -100,18 +100,18 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
                 passphrase: passphrase,
               );
         if (rememberPassphrase) {
-          await configStorage.rememberKey(result.$2);
+          await configStorage.rememberKey(result.$2, result.$1.vaultId);
         }
         ctx.close(result);
       }
 
       buttons = ctx.buttonRow([
         ButtonSpec(
-          'Set up encryption',
+          S.setUpEncryption,
           tryCreate,
           variant: ButtonVariant.primary,
         ),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },

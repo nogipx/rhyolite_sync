@@ -1,3 +1,31 @@
+## [3.7.0] - 2026-07-18
+
+### Features
+
+- open settings-sync section + per-vault key secret (obsidian)
+- localize the tail — self-host, db recovery, status indicator, commands, payment activation (obsidian)
+- localize the sync side-panel (status, stats, transfers, warnings) (obsidian)
+- localize the settings tab (auth, vault, troubleshooting, subscription, self-host, external storage, diagnostics) (obsidian)
+- localize file version history modal (obsidian)
+- localize device management modal (obsidian)
+- localize restore-point inspect/diff modal (obsidian)
+- localize storage cleanup (history) modal (obsidian)
+- localize storage overview modal (obsidian)
+- localize storage reclaim (orphan + tombstone sweep) modal (obsidian)
+- localize first-run flow (setup, passphrase, vault picker) (obsidian)
+- i18n scaffold (typed AppStrings, en/ru, auto-locale from Obsidian) + localize backup modal (obsidian)
+- reclaim stable tombstones in the storage cleanup sweep (dry-run + reclaim both) (obsidian)
+- sweepStableTombstones RPC — reclaim deleted-file markers past causal stability (core)
+
+### Bug Fixes
+
+- skip syncing empty (0-byte) new files (core)
+
+### Other
+
+- bump plugin to 3.7.0 (obsidian)
+
+
 ## [3.6.0] - 2026-07-18
 
 ### Features

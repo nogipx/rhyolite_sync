@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart' as pc;
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_client_account/rhyolite_client_account.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
@@ -68,6 +69,17 @@ class ObsidianConfigStorage {
 
   SecretStorageHandle get _secrets => _plugin.app.secretStorage;
 
+  /// The vault encryption key is stored per rhyolite-vault: the keychain secret
+  /// name carries a short hash of the vaultId. Without this, connecting a
+  /// different rhyolite vault inside the same Obsidian vault would overwrite the
+  /// previous vault's remembered key. A 16-hex-char sha256 prefix is collision-
+  /// safe for the handful of vaults one device holds and doesn't leak the raw
+  /// vaultId into the keychain entry name.
+  static String _vaultKeySecretName(String vaultId) {
+    final tag = pc.sha256.convert(utf8.encode(vaultId)).toString();
+    return '$_rawKeySecret-${tag.substring(0, 16)}';
+  }
+
   // ---------------------------------------------------------------------------
   // Load / create
   // ---------------------------------------------------------------------------
@@ -87,18 +99,22 @@ class ObsidianConfigStorage {
   /// key), verifying it against [verificationToken] before use. Returns null
   /// when no valid key is stored — the caller then prompts for the passphrase.
   ///
-  /// The keychain secret is per Obsidian vault, so this is a single key; the
-  /// verification guards the one case that key can be stale: switching the
-  /// rhyolite vault within one Obsidian vault without re-remembering. Boot
-  /// previously used the stored key blind, which would then fail to decrypt.
-  Future<VaultCipher?> tryUnlockFromStorage(String verificationToken) async {
-    final rawKeyB64 = await _secrets.getSecret(_rawKeySecret);
+  /// The keychain secret is keyed per rhyolite-vault (see [_vaultKeySecretName]),
+  /// so different vaults in one Obsidian vault keep independent remembered keys.
+  /// The verification still guards a stale key. Boot previously used the stored
+  /// key blind, which would then fail to decrypt.
+  Future<VaultCipher?> tryUnlockFromStorage(
+    String vaultId,
+    String verificationToken,
+  ) async {
+    final secretName = _vaultKeySecretName(vaultId);
+    final rawKeyB64 = await _secrets.getSecret(secretName);
     if (rawKeyB64 == null) return null;
     final VaultCipher cipher;
     try {
       cipher = VaultCipher.fromRawKey(base64Decode(rawKeyB64));
     } catch (_) {
-      await _secrets.deleteSecret(_rawKeySecret);
+      await _secrets.deleteSecret(secretName);
       return null;
     }
     if (verificationToken.isNotEmpty &&
@@ -209,19 +225,26 @@ class ObsidianConfigStorage {
   // Remember passphrase
   // ---------------------------------------------------------------------------
 
-  Future<void> rememberKey(VaultCipher cipher) async {
-    await _secrets.setSecret(_rawKeySecret, base64Encode(cipher.rawKeyBytes));
+  Future<void> rememberKey(VaultCipher cipher, String vaultId) async {
+    await _secrets.setSecret(
+      _vaultKeySecretName(vaultId),
+      base64Encode(cipher.rawKeyBytes),
+    );
   }
 
-  Future<void> forgetKey() async {
-    await _secrets.deleteSecret(_rawKeySecret);
+  Future<void> forgetKey(String vaultId) async {
+    await _secrets.deleteSecret(_vaultKeySecretName(vaultId));
   }
 
   /// Clears vault config and remembered key — "disconnect from vault".
-  /// Auth config and session are not touched.
+  /// Auth config and session are not touched. The vaultId is resolved from the
+  /// stored config before it is removed, so the right per-vault key is dropped.
   Future<void> disconnectVault() async {
+    final vaultId = (await tryLoad())?.vaultId ?? '';
     await _data.update((m) => m.remove(_configKey));
-    await _secrets.deleteSecret(_rawKeySecret);
+    if (vaultId.isNotEmpty) {
+      await _secrets.deleteSecret(_vaultKeySecretName(vaultId));
+    }
   }
 
   // ---------------------------------------------------------------------------

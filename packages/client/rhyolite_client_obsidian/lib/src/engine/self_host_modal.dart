@@ -1,5 +1,6 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 
+import '../i18n/i18n.dart';
 import 'obsidian_config_storage.dart';
 
 /// Configure self-host mode: point the plugin at a self-hosted sync server
@@ -16,17 +17,13 @@ Future<bool> showSelfHostModal(
   final result = await showModalWith<bool>(
     plugin,
     build: (ctx) {
-      ctx.h3('Self-host server');
+      ctx.h3(S.selfHostModalTitle);
       ctx.spaceVertical(px: 8);
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: 'Sync with your own server instead of the managed service. '
-            'Reload the plugin after saving to apply.',
-      );
+      ctx.createEl('p',
+          cls: 'rhyolite-setting-desc', text: S.selfHostModalDescription);
       ctx.spaceVertical(px: 8);
 
-      ctx.createEl('span', cls: 'rhyolite-vault-label', text: 'Server URL');
+      ctx.createEl('span', cls: 'rhyolite-vault-label', text: S.serverUrl);
       ctx.spaceVertical(px: 4);
       final urlInput = ctx.input(
         placeholder: current.syncUrl.isNotEmpty
@@ -35,17 +32,17 @@ Future<bool> showSelfHostModal(
       )..focus();
       ctx.spaceVertical(px: 8);
 
-      ctx.createEl('span', cls: 'rhyolite-vault-label', text: 'Access token');
+      ctx.createEl('span', cls: 'rhyolite-vault-label', text: S.accessToken);
       ctx.spaceVertical(px: 4);
       final tokenInput = ctx.input(placeholder: 'RHYOLITE_SYNC_TOKEN');
       ctx.spaceVertical(px: 12);
 
       ctx.buttonRow([
-        ButtonSpec('Enable & Save', () async {
+        ButtonSpec(S.enableAndSave, () async {
           final url = ctx.valueOf(urlInput).trim();
           final token = ctx.valueOf(tokenInput).trim();
           if (url.isEmpty || token.isEmpty) {
-            ctx.showError('Server URL and access token are both required.');
+            ctx.showError(S.serverUrlTokenRequired);
             return;
           }
           await configStorage.saveSelfHost(enabled: true, syncUrl: url);
@@ -56,7 +53,7 @@ Future<bool> showSelfHostModal(
           await configStorage.disconnectVault();
           ctx.close(true);
         }, variant: ButtonVariant.primary),
-        ButtonSpec('Disable', () async {
+        ButtonSpec(S.disable, () async {
           await configStorage.saveSelfHost(
             enabled: false,
             syncUrl: current.syncUrl,
@@ -65,7 +62,7 @@ Future<bool> showSelfHostModal(
           await configStorage.disconnectVault();
           ctx.close(true);
         }),
-        ButtonSpec('Cancel', () => ctx.close(false)),
+        ButtonSpec(S.cancel, () => ctx.close(false)),
       ]);
       ctx.onEscape(() => ctx.close(false));
     },

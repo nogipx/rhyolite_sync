@@ -13,6 +13,7 @@ class VaultMaintenanceContractNames {
   static const service = 'RhyoliteVaultMaintenance';
   static String instance(String suffix) => '$service\_$suffix';
   static const sweepOrphanBlobs = 'sweepOrphanBlobs';
+  static const sweepStableTombstones = 'sweepStableTombstones';
 }
 
 class VaultMaintenanceContractCodecs {
@@ -24,6 +25,14 @@ class VaultMaintenanceContractCodecs {
   static const codecSweepOrphanBlobsResponse =
       RpcCodec<SweepOrphanBlobsResponse>.withDecoder(
         SweepOrphanBlobsResponse.fromJson,
+      );
+  static const codecSweepStableTombstonesRequest =
+      RpcCodec<SweepStableTombstonesRequest>.withDecoder(
+        SweepStableTombstonesRequest.fromJson,
+      );
+  static const codecSweepStableTombstonesResponse =
+      RpcCodec<SweepStableTombstonesResponse>.withDecoder(
+        SweepStableTombstonesResponse.fromJson,
       );
 }
 
@@ -53,6 +62,25 @@ class VaultMaintenanceContractCaller extends RpcCallerContract
       context: context,
     );
   }
+
+  @override
+  Future<SweepStableTombstonesResponse> sweepStableTombstones(
+    SweepStableTombstonesRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<
+      SweepStableTombstonesRequest,
+      SweepStableTombstonesResponse
+    >(
+      methodName: VaultMaintenanceContractNames.sweepStableTombstones,
+      requestCodec:
+          VaultMaintenanceContractCodecs.codecSweepStableTombstonesRequest,
+      responseCodec:
+          VaultMaintenanceContractCodecs.codecSweepStableTombstonesResponse,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class VaultMaintenanceContractResponder extends RpcResponderContract
@@ -73,6 +101,14 @@ abstract class VaultMaintenanceContractResponder extends RpcResponderContract
       requestCodec: VaultMaintenanceContractCodecs.codecSweepOrphanBlobsRequest,
       responseCodec:
           VaultMaintenanceContractCodecs.codecSweepOrphanBlobsResponse,
+    );
+    addUnaryMethod<SweepStableTombstonesRequest, SweepStableTombstonesResponse>(
+      methodName: VaultMaintenanceContractNames.sweepStableTombstones,
+      handler: sweepStableTombstones,
+      requestCodec:
+          VaultMaintenanceContractCodecs.codecSweepStableTombstonesRequest,
+      responseCodec:
+          VaultMaintenanceContractCodecs.codecSweepStableTombstonesResponse,
     );
   }
 }

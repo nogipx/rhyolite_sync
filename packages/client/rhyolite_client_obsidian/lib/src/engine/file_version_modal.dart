@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'diff_view.dart';
 
 /// Per-file version history for the currently active note. Mirrors the
@@ -21,7 +22,7 @@ Future<void> showFileVersionModal(
 ) async {
   final activeFile = plugin.app.workspace.getActiveFile();
   if (activeFile == null) {
-    showNotice('No file is open');
+    showNotice(S.noFileOpen);
     return;
   }
   final relPath = activeFile.path;
@@ -30,7 +31,7 @@ Future<void> showFileVersionModal(
       ? engine.createFileVersionViewer()
       : null;
   if (viewer == null) {
-    showNotice('Version history not available — engine is not connected');
+    showNotice(S.versionHistoryUnavailable);
     return;
   }
 
@@ -38,12 +39,12 @@ Future<void> showFileVersionModal(
   try {
     versions = await viewer.versionsOf(relPath);
   } catch (e) {
-    showNotice('Failed to load history for $relPath: $e');
+    showNotice(S.failedToLoadHistory(relPath, e));
     return;
   }
 
   if (versions.isEmpty) {
-    showNotice('No history for $relPath');
+    showNotice(S.noHistoryFor(relPath));
     return;
   }
 
@@ -59,7 +60,7 @@ Future<void> _showVersionList(
   return showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('Version history');
+      ctx.h3(S.versionHistoryTitle);
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
@@ -70,8 +71,7 @@ Future<void> _showVersionList(
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text: '${versions.length} version(s), newest first. '
-            'Select one to preview and restore.',
+        text: S.versionsCountHint(versions.length),
       );
       ctx.spaceVertical(px: 8);
 
@@ -103,7 +103,7 @@ Future<void> _showVersionList(
       }
 
       ctx.spaceVertical(px: 12);
-      ctx.buttonRow([ButtonSpec('Cancel', () => ctx.close(null))]);
+      ctx.buttonRow([ButtonSpec(S.cancel, () => ctx.close(null))]);
       ctx.onEscape(() => ctx.close(null));
     },
   );
@@ -132,28 +132,23 @@ Future<void> _showVersionPreview(
   return showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('Version preview');
+      ctx.h3(S.versionPreviewTitle);
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text: '${entry.path}  ·  ${_fmt(entry.createdAt)}  ·  vs current',
+        text: S.versionPreviewSubtitle(entry.path, _fmt(entry.createdAt)),
       );
       ctx.spaceVertical(px: 12);
 
       if (bytes == null) {
-        ctx.createEl(
-          'p',
-          text: 'The blob for this version is no longer available — '
-              'it may have been removed during a cleanup, or never '
-              'downloaded to this device.',
-        );
+        ctx.createEl('p', text: S.blobNoLongerAvailable);
         ctx.spaceVertical(px: 16);
         ctx.buttonRow([
-          ButtonSpec('Back', () async {
+          ButtonSpec(S.back, () async {
             ctx.close(null);
             await back();
           }),
-          ButtonSpec('Close', () => ctx.close(null)),
+          ButtonSpec(S.close, () => ctx.close(null)),
         ]);
         ctx.onEscape(() async {
           ctx.close(null);
@@ -172,54 +167,45 @@ Future<void> _showVersionPreview(
             current == null ? '' : utf8.decode(current, allowMalformed: true);
         final versionText = utf8.decode(bytes, allowMalformed: true);
         if (current == null) {
-          ctx.createEl(
-            'p',
-            cls: 'rhyolite-setting-desc',
-            text: 'This file does not currently exist on disk — restoring '
-                'will re-create it.',
-          );
+          ctx.createEl('p',
+              cls: 'rhyolite-setting-desc',
+              text: S.fileDoesNotExistWillRecreate);
         }
         final diff = const DiffTextUseCase()(currentText, versionText);
         if (diff == null) {
           // Too many distinct lines to diff — fall back to a plain preview.
           final preview = versionText.length > 8000
-              ? '${versionText.substring(0, 8000)}\n\n…(${versionText.length - 8000} more characters)'
+              ? '${versionText.substring(0, 8000)}\n\n'
+                  '${S.moreCharacters(versionText.length - 8000)}'
               : versionText;
           ctx.createEl('pre', cls: 'rhyolite-version-preview', text: preview);
         } else if (diff.every((l) => l.op == TextDiffOp.equal)) {
-          ctx.createEl(
-            'p',
-            text: 'No differences — this version matches the file on disk.',
-          );
+          ctx.createEl('p', text: S.noDifferencesMatchesDisk);
         } else {
           renderUnifiedDiff(ctx.createEl('div'), diff);
         }
       } else {
-        ctx.createEl(
-          'p',
-          text: 'Binary content (${_fmtSize(bytes.length)}). '
-              'Cannot preview, but Restore will write the original bytes.',
-        );
+        ctx.createEl('p', text: S.binaryContentPreview(_fmtSize(bytes.length)));
       }
       ctx.spaceVertical(px: 16);
 
       Future<void> doRestore() async {
         try {
           await viewer.restore(entry);
-          showNotice('Restored ${entry.path} from ${_fmt(entry.createdAt)}.');
+          showNotice(S.restoredFromVersion(entry.path, _fmt(entry.createdAt)));
           ctx.close(null);
         } catch (e) {
-          ctx.showError('Restore failed: $e');
+          ctx.showError(S.restoreFailed(e));
         }
       }
 
       ctx.buttonRow([
-        ButtonSpec('Restore', doRestore, variant: ButtonVariant.destructive),
-        ButtonSpec('Back', () async {
+        ButtonSpec(S.restoreVerb, doRestore, variant: ButtonVariant.destructive),
+        ButtonSpec(S.back, () async {
           ctx.close(null);
           await back();
         }),
-        ButtonSpec('Close', () => ctx.close(null)),
+        ButtonSpec(S.close, () => ctx.close(null)),
       ]);
       // Escape returns to the version list (drill in → step back), not a full
       // dismiss — that's the Close button.

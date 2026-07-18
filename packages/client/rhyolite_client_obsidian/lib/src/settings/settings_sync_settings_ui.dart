@@ -1,156 +1,129 @@
 // ignore_for_file: deprecated_member_use
-import 'dart:js_interop';
 import 'dart:js_util' as jsu;
 
-import 'package:obsidian_dart/obsidian_dart.dart'
-    show PluginSettingsTab, SettingHandle, createSetting;
+import 'package:obsidian_dart/obsidian_dart.dart' show PluginSettingsTab;
 
+import '../i18n/i18n.dart';
 import 'obsidian_settings_registry.dart';
 import 'settings_sync_prefs.dart';
 
-const _labels = <SettingsCategory, String>{
-  SettingsCategory.appSettings: 'App settings',
-  SettingsCategory.appearance: 'Appearance',
-  SettingsCategory.hotkeys: 'Hotkeys',
-  SettingsCategory.corePluginsEnabled: 'Core plugins (enabled list)',
-  SettingsCategory.corePluginSettings: 'Core plugin settings',
-  SettingsCategory.communityPluginsEnabled: 'Community plugins (enabled list)',
-  SettingsCategory.communityPluginSettings: 'Community plugin settings',
-  SettingsCategory.themesSnippets: 'Themes & snippets',
-};
+String _label(SettingsCategory c) {
+  switch (c) {
+    case SettingsCategory.appSettings:
+      return S.settingsCatAppSettings;
+    case SettingsCategory.appearance:
+      return S.settingsCatAppearance;
+    case SettingsCategory.hotkeys:
+      return S.settingsCatHotkeys;
+    case SettingsCategory.corePluginsEnabled:
+      return S.settingsCatCorePluginsEnabled;
+    case SettingsCategory.corePluginSettings:
+      return S.settingsCatCorePluginSettings;
+    case SettingsCategory.communityPluginsEnabled:
+      return S.settingsCatCommunityPluginsEnabled;
+    case SettingsCategory.communityPluginSettings:
+      return S.settingsCatCommunityPluginSettings;
+    case SettingsCategory.themesSnippets:
+      return S.settingsCatThemesSnippets;
+  }
+}
 
-const _descriptions = <SettingsCategory, String>{
-  SettingsCategory.appSettings: 'app.json, graph.json (editor, files & links)',
-  SettingsCategory.appearance: 'Theme, dark mode, enabled snippets',
-  SettingsCategory.hotkeys: 'Custom hotkeys',
-  SettingsCategory.corePluginsEnabled: 'Which core plugins are enabled',
-  SettingsCategory.corePluginSettings: 'Daily notes, templates, etc.',
-  SettingsCategory.communityPluginsEnabled: 'Which community plugins are enabled',
-  SettingsCategory.communityPluginSettings: "Each plugin's data.json",
-  SettingsCategory.themesSnippets: 'Downloaded themes and CSS snippets',
-};
+String _description(SettingsCategory c) {
+  switch (c) {
+    case SettingsCategory.appSettings:
+      return S.settingsCatAppSettingsDesc;
+    case SettingsCategory.appearance:
+      return S.settingsCatAppearanceDesc;
+    case SettingsCategory.hotkeys:
+      return S.settingsCatHotkeysDesc;
+    case SettingsCategory.corePluginsEnabled:
+      return S.settingsCatCorePluginsEnabledDesc;
+    case SettingsCategory.corePluginSettings:
+      return S.settingsCatCorePluginSettingsDesc;
+    case SettingsCategory.communityPluginsEnabled:
+      return S.settingsCatCommunityPluginsEnabledDesc;
+    case SettingsCategory.communityPluginSettings:
+      return S.settingsCatCommunityPluginSettingsDesc;
+    case SettingsCategory.themesSnippets:
+      return S.settingsCatThemesSnippetsDesc;
+  }
+}
 
-/// Renders the "Settings sync" section into [tab] as a collapsed `<details>`
-/// block (so it stays out of the way at the bottom of the tab): a master toggle
-/// plus one toggle per category (shown only when the master is on).
+/// Renders the "Settings sync" section into [tab] as a normal, always-open
+/// section (like the other settings sections): a master toggle plus one toggle
+/// per category (shown only when the master is on), and re-upload/download
+/// buttons at the bottom.
 ///
 /// [onChanged] is called with the updated prefs; the caller persists, relaunches
-/// config sync, and refreshes the tab. Because a refresh rebuilds the whole tab,
-/// the open/closed state is lifted to the caller via [expanded] /
-/// [onExpandedChanged] so toggling a category does not collapse the section.
+/// config sync, and refreshes the tab.
 void addSettingsSyncSection(
   PluginSettingsTab tab, {
   required SettingsSyncPrefs prefs,
   required void Function(SettingsSyncPrefs next) onChanged,
-  required bool expanded,
-  required void Function(bool expanded) onExpandedChanged,
   void Function()? onReset,
   void Function()? onRestore,
 }) {
-  final details = jsu.callMethod<JSObject>(tab.containerEl, 'createEl', [
-    'details',
-  ]);
-  jsu.setProperty(details, 'className', 'rhyolite-settings-sync');
-  if (expanded) jsu.setProperty(details, 'open', true);
-  // Persist the open/closed state so a tab re-render (any toggle triggers one)
-  // restores it instead of snapping shut.
-  jsu.callMethod<void>(details, 'addEventListener', [
-    'toggle',
-    jsu.allowInterop(
-      (JSObject _) => onExpandedChanged(jsu.getProperty<bool>(details, 'open')),
-    ),
-  ]);
+  tab.addSection(S.settingsSyncSection);
 
-  final summary = jsu.callMethod<JSObject>(details, 'createEl', ['summary']);
-  jsu.setProperty<Object?>(summary, 'textContent', 'Settings sync (.obsidian)');
-
-  _toggleRow(
-    details,
-    name: 'Sync settings (.obsidian)',
-    description:
-        'Sync app settings, hotkeys, themes and plugin settings across your '
-        'devices. Most changes apply after an Obsidian restart.',
-    value: prefs.enabled,
+  tab.addToggle(
+    name: S.syncSettingsName,
+    description: S.syncSettingsDescription,
+    initialValue: prefs.enabled,
     onChange: (v) => onChanged(prefs.copyWith(enabled: v)),
   );
 
   if (!prefs.enabled) return;
 
   for (final category in SettingsCategory.values) {
-    _toggleRow(
-      details,
-      name: _labels[category] ?? category.name,
-      description: _descriptions[category] ?? '',
-      value: prefs.categories.contains(category),
+    tab.addToggle(
+      name: _label(category),
+      description: _description(category),
+      initialValue: prefs.categories.contains(category),
       onChange: (v) => onChanged(prefs.withCategory(category, v)),
     );
   }
 
   // Force full re-send / re-download — the .obsidian analog of the notes
-  // "Re-upload" / "Download from server". Tucked at the bottom of the
-  // collapsed block since they are destructive and rarely needed.
+  // "Re-upload" / "Download from server".
   if (onReset != null) {
-    _buttonRow(
-      details,
-      name: 'Re-upload settings from this device',
-      description:
-          'Use this device as the source of truth. Server settings are '
-          'replaced with this device\'s .obsidian settings; other devices '
-          're-sync automatically.',
-      buttonText: 'Re-upload',
+    _warningButton(
+      tab,
+      name: S.reuploadSettingsRowName,
+      description: S.reuploadSettingsRowDesc,
+      buttonText: S.reupload,
       onClick: onReset,
     );
   }
   if (onRestore != null) {
-    _buttonRow(
-      details,
-      name: 'Download settings from server',
-      description:
-          "Replace this device's .obsidian settings with the server version. "
-          'Use this if settings on this device are outdated or wrong. Most '
-          'changes apply after an Obsidian restart.',
-      buttonText: 'Download',
+    _warningButton(
+      tab,
+      name: S.downloadSettingsRowName,
+      description: S.downloadSettingsRowDesc,
+      buttonText: S.download,
       onClick: onRestore,
     );
   }
 }
 
-/// One Obsidian setting row with a warning-styled button, built into the
-/// `<details>` container (mirrors [_toggleRow]).
-void _buttonRow(
-  JSObject container, {
+/// One setting row with a warning-styled button, built into the tab's own
+/// container. Mirrors [PluginSettingsTab.addButton] but applies the destructive
+/// (warning) style, which the friendly wrapper doesn't expose.
+void _warningButton(
+  PluginSettingsTab tab, {
   required String name,
   required String description,
   required String buttonText,
   required void Function() onClick,
 }) {
-  final SettingHandle setting = createSetting(container)
-    ..setName(name)
-    ..setDesc(description);
-  setting.addButton((button) {
-    button
-      ..setButtonText(buttonText)
-      ..onClick(onClick);
-    // Destructive styling — no wrapper for setWarning, call it on the raw
-    // ButtonComponent.
-    jsu.callMethod<void>(button.raw, 'setWarning', []);
+  tab.addCustom((setting) {
+    setting
+      ..setName(name)
+      ..setDesc(description)
+      ..addButton((button) {
+        button
+          ..setButtonText(buttonText)
+          ..onClick(onClick);
+        jsu.callMethod<void>(button.raw, 'setWarning', []);
+      });
   });
-}
-
-/// Builds one Obsidian setting row (name + description + toggle) directly into
-/// [container] (the `<details>` element). Mirrors `PluginSettingsTab.addToggle`,
-/// which can only target the tab's own container.
-void _toggleRow(
-  JSObject container, {
-  required String name,
-  required String description,
-  required bool value,
-  required void Function(bool) onChange,
-}) {
-  final SettingHandle setting = createSetting(container)
-    ..setName(name)
-    ..setDesc(description);
-  setting.addToggle((toggle) => toggle
-    ..setValue(value)
-    ..onChange(onChange));
 }

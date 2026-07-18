@@ -4,6 +4,7 @@ import 'dart:js_util' as jsu;
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'obsidian_config_storage.dart';
 
 /// Shows a passphrase prompt modal and handles unlock + optional key remembering.
@@ -23,14 +24,14 @@ Future<VaultCipher?> showPassphraseModal(
       ctx.h3('Rhyolite Sync');
       ctx.spaceVertical(px: 8);
 
-      final input = ctx.input(type: 'password', placeholder: 'Vault passphrase')
+      final input = ctx.input(type: 'password', placeholder: S.vaultPassphrase)
         ..focus();
       ctx.spaceVertical(px: 16);
 
       // Show/hide passphrase toggle
       var showPassphrase = false;
       ctx.toggle(
-        label: 'Show passphrase',
+        label: S.showPassphrase,
         initialValue: false,
         onChange: (value) {
           showPassphrase = value;
@@ -46,7 +47,7 @@ Future<VaultCipher?> showPassphraseModal(
       // Remember passphrase toggle with description
       var remember = true;
       ctx.toggle(
-        label: 'Remember on this device',
+        label: S.rememberOnThisDevice,
         initialValue: remember,
         onChange: (value) => remember = value,
       );
@@ -54,14 +55,12 @@ Future<VaultCipher?> showPassphraseModal(
         col.createEl(
           'p',
           cls: 'rhyolite-setting-desc',
-          text:
-              'Stores a derived key in the system keychain so you are not '
-              'prompted for the passphrase on every launch. ',
+          text: S.rememberKeyDescription,
         );
       });
       ctx.spaceVertical(px: 8);
 
-      final loading = ctx.spinner(label: 'Deriving key, please wait…');
+      final loading = ctx.spinner(label: S.derivingKey);
 
       late final List<ButtonRef> buttons;
 
@@ -77,18 +76,18 @@ Future<VaultCipher?> showPassphraseModal(
           loading.hide();
           buttons[0].setDisabled(value: false);
           buttons[1].setDisabled(value: false);
-          ctx.showError('Incorrect passphrase. Please try again.');
+          ctx.showError(S.incorrectPassphrase);
           return;
         }
         if (remember) {
-          await configStorage.rememberKey(cipher);
+          await configStorage.rememberKey(cipher, vaultId);
         }
         ctx.close(cipher);
       }
 
       buttons = ctx.buttonRow([
-        ButtonSpec('Unlock', tryUnlock, variant: ButtonVariant.primary),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.unlock, tryUnlock, variant: ButtonVariant.primary),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx
         ..onEnter(input, tryUnlock)

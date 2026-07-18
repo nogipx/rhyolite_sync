@@ -1,6 +1,7 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import '../vault/vault_directory.dart';
 import 'obsidian_config_storage.dart';
 import 'passphrase_modal.dart';
@@ -61,11 +62,11 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
   return showModalWith<(VaultConfig, VaultCipher)?>(
     plugin,
     build: (ctx) {
-      ctx.h3('Select Vault');
+      ctx.h3(S.selectVault);
       ctx.spaceVertical(px: 8);
 
       if (vaults.isEmpty) {
-        ctx.createEl('p', cls: 'rhyolite-setting-desc', text: 'No vaults found. Create one below.');
+        ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.noVaultsFound);
       } else {
         for (final vault in vaults) {
           final label = vault.vaultName.isNotEmpty
@@ -74,7 +75,7 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
           ctx.createEl('span', cls: 'rhyolite-vault-label', text: label);
           ctx.spaceVertical(px: 4);
           ctx.buttonRow([
-            ButtonSpec('Connect', () async {
+            ButtonSpec(S.connect, () async {
               final result = await _connectToVault(
                 plugin,
                 directory,
@@ -84,15 +85,15 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
               if (result != null) ctx.close(result);
             }, variant: ButtonVariant.primary),
             if (onDeleteVault != null)
-              ButtonSpec('Delete', () async {
+              ButtonSpec(S.delete, () async {
                 final confirmed = await _confirmDeleteVault(plugin, vault);
                 if (!confirmed) return;
                 try {
                   await onDeleteVault(vault);
-                  showNotice('Vault "$label" deleted.');
+                  showNotice(S.vaultDeleted(label));
                   ctx.close(null);
                 } catch (e) {
-                  ctx.showError('Delete failed: $e');
+                  ctx.showError(S.deleteVaultFailed(e));
                 }
               }),
           ]);
@@ -111,29 +112,28 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
           'p',
           cls: 'rhyolite-setting-desc',
           text: maxVaultCount == 1
-              ? 'Your plan includes a single vault. Upgrade to add more.'
-              : 'You have reached your plan\'s vault limit ($maxVaultCount). '
-                    'Upgrade to add more.',
+              ? S.planSingleVault
+              : S.planVaultLimit(maxVaultCount),
         );
         ctx.spaceVertical(px: 8);
         ctx.buttonRow([
-          ButtonSpec('Cancel', () => ctx.close(null)),
+          ButtonSpec(S.cancel, () => ctx.close(null)),
         ]);
         ctx.onEscape(() => ctx.close(null));
         return;
       }
 
-      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: 'Create a new vault:');
+      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.createNewVault);
       ctx.spaceVertical(px: 4);
 
-      final nameInput = ctx.input(placeholder: 'Vault name')..focus();
+      final nameInput = ctx.input(placeholder: S.vaultNamePlaceholder)..focus();
       ctx.spaceVertical(px: 8);
 
       ctx.buttonRow([
-        ButtonSpec('+ Create', () async {
+        ButtonSpec(S.createVault, () async {
           final name = ctx.valueOf(nameInput).trim();
           if (name.isEmpty) {
-            ctx.showError('Vault name cannot be empty.');
+            ctx.showError(S.vaultNameEmpty);
             return;
           }
           final result = await _createNewVault(
@@ -144,7 +144,7 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
           );
           if (result != null) ctx.close(result);
         }, variant: ButtonVariant.primary),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },
@@ -158,33 +158,29 @@ Future<bool> _confirmDeleteVault(PluginHandle plugin, VaultInfo vault) async {
   final result = await showModalWith<bool>(
     plugin,
     build: (ctx) {
-      ctx.h3('Delete vault "$label"?');
+      ctx.h3(S.deleteVaultTitle(label));
       ctx.spaceVertical(px: 8);
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text:
-            'This permanently deletes all of this vault\'s data from the server '
-            '(files, history, blobs). Your local note files on disk are NOT '
-            'deleted. If this vault used your own S3/WebDAV storage, clear that '
-            'bucket separately. This cannot be undone.',
+        text: S.deleteVaultBody,
       );
       ctx.spaceVertical(px: 8);
-      ctx.createEl('p', text: 'Type the vault name to confirm:');
+      ctx.createEl('p', text: S.typeVaultNameToConfirm);
       final input = ctx.input(placeholder: label)..focus();
       ctx.spaceVertical(px: 12);
 
       Future<void> confirm() async {
         if (ctx.valueOf(input).trim() != label) {
-          ctx.showError('Name does not match.');
+          ctx.showError(S.nameDoesNotMatch);
           return;
         }
         ctx.close(true);
       }
 
       ctx.buttonRow([
-        ButtonSpec('Delete permanently', confirm),
-        ButtonSpec('Cancel', () => ctx.close(false)),
+        ButtonSpec(S.deletePermanently, confirm),
+        ButtonSpec(S.cancel, () => ctx.close(false)),
       ]);
       ctx
         ..onEnter(input, confirm)

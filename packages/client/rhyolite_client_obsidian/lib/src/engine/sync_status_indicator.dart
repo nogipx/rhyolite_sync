@@ -7,6 +7,7 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import '../i18n/i18n.dart';
 import 'server_rejections.dart';
 
 /// Unified sync state indicator — a coloured dot followed by a short
@@ -302,7 +303,7 @@ class SyncStatusIndicator {
     final color = overlay
         ? _settingsColor
         : _colorFor(state, hasPending: _hasPending);
-    final label = overlay ? 'settings' : _labelFor(state);
+    final label = overlay ? S.overlaySettings : _labelFor(state);
     final glow = overlay
         ? '0 0 0 1px rgba(0,0,0,0.18), 0 0 6px '
               '${_settingsColor.replaceFirst('rgb(', 'rgba(').replaceFirst(')', ',0.7)')}'
@@ -342,7 +343,7 @@ class SyncStatusIndicator {
     jsu.setProperty(
       el,
       'aria-label',
-      overlay ? 'Rhyolite Sync: syncing settings' : _tooltipFor(state),
+      overlay ? S.tipSyncingSettings : _tooltipFor(state),
     );
   }
 
@@ -378,9 +379,9 @@ class SyncStatusIndicator {
     // — `up 1/1` adds no information over the dot colour.
     if (p == null || p.total <= 1) return '';
     return switch (state) {
-      _State.uploading => 'up ${p.completed}/${p.total}',
-      _State.downloading => 'down ${p.completed}/${p.total}',
-      _State.repairing => 'repair ${p.completed}/${p.total}',
+      _State.uploading => S.labelUp(p.completed, p.total),
+      _State.downloading => S.labelDown(p.completed, p.total),
+      _State.repairing => S.labelRepair(p.completed, p.total),
       _ => '',
     };
   }
@@ -388,32 +389,27 @@ class SyncStatusIndicator {
   String _tooltipFor(_State state) {
     final p = _progress;
     if (state == _State.uploading && p != null) {
-      return 'Rhyolite Sync: uploading ${p.completed} of ${p.total} files';
+      return S.tipUploading(p.completed, p.total);
     }
     if (state == _State.downloading && p != null) {
-      return 'Rhyolite Sync: downloading ${p.completed} of ${p.total} files';
+      return S.tipDownloading(p.completed, p.total);
     }
     if (state == _State.repairing && p != null) {
-      return 'Rhyolite Sync: repairing ${p.completed} of ${p.total} files '
-          '— rebuilding sync state, this can take a while';
+      return S.tipRepairing(p.completed, p.total);
     }
     return switch (state) {
-      _State.off => 'Rhyolite Sync: stopped',
-      _State.offline =>
-        'Rhyolite Sync: offline — can’t reach server, retrying',
-      _State.connecting => 'Rhyolite Sync: connecting…',
-      _State.idle => 'Rhyolite Sync: connected',
-      _State.pushing => 'Rhyolite Sync: uploading changes',
-      _State.pulling => 'Rhyolite Sync: downloading changes',
-      _State.uploading => 'Rhyolite Sync: uploading initial files',
-      _State.downloading => 'Rhyolite Sync: downloading files',
-      _State.repairing =>
-        'Rhyolite Sync: repairing vault — rebuilding sync state',
-      _State.error => 'Rhyolite Sync: error — tap to open settings',
-      _State.authExpired =>
-        'Rhyolite Sync: session expired — tap to open settings',
-      _State.subExpired =>
-        'Rhyolite Sync: subscription expired — tap to open settings',
+      _State.off => S.tipStopped,
+      _State.offline => S.tipOffline,
+      _State.connecting => S.tipConnecting,
+      _State.idle => S.tipConnected,
+      _State.pushing => S.tipUploadingChanges,
+      _State.pulling => S.tipDownloadingChanges,
+      _State.uploading => S.tipUploadingInitial,
+      _State.downloading => S.tipDownloadingFiles,
+      _State.repairing => S.tipRepairingVault,
+      _State.error => S.tipError,
+      _State.authExpired => S.tipAuthExpired,
+      _State.subExpired => S.tipSubExpired,
     };
   }
 

@@ -23,6 +23,7 @@ import 'package:rhyolite_client_obsidian/src/engine/storage_overview_modal.dart'
 import 'package:rhyolite_client_obsidian/src/engine/sync_panel.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_status_indicator.dart';
 import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
+import 'package:rhyolite_client_obsidian/src/i18n/i18n.dart';
 import 'package:rhyolite_client_obsidian/src/platform/obsidian_http_client.dart';
 import 'package:rhyolite_client_obsidian/src/vault/managed_vault_directory.dart';
 import 'package:rpc_blob_sqlite/rpc_blob_sqlite.dart';
@@ -358,6 +359,9 @@ void main() {
       .rhyolite-vault-label { font-weight: 500; }
     ''',
     onLoad: (plugin) async {
+      // Pick UI strings from Obsidian's language before any UI is built.
+      initLocale();
+
       String dbFileName = '';
       String dbName = '';
       bool handlingCorruption = false;
@@ -525,6 +529,7 @@ void main() {
               final snapshot = config;
               cipher =
                   await configStorage.tryUnlockFromStorage(
+                    snapshot.vaultId,
                     snapshot.verificationToken!,
                   ) ??
                   await withModalLock(
@@ -967,7 +972,7 @@ void main() {
           // a vault key, then clears the pause and starts the session.
           plugin.addCommand(
             id: 'rhyolite-sync-start',
-            name: 'Resume sync',
+            name: S.resumeSync,
             callback: () async {
               if (cipher == null) {
                 final verificationToken = config?.verificationToken;
@@ -989,12 +994,12 @@ void main() {
           );
           plugin.addCommand(
             id: 'rhyolite-sync-stop',
-            name: 'Pause sync',
+            name: S.pauseSync,
             callback: () => setSyncPaused(true),
           );
           plugin.addCommand(
             id: 'rhyolite-sync-now',
-            name: 'Sync Now',
+            name: S.cmdSyncNow,
             callback: () async {
               await engine.triggerPull();
               _log.info('Manual sync triggered');
@@ -1002,7 +1007,7 @@ void main() {
           );
           plugin.addCommand(
             id: 'rhyolite-sync-config-now',
-            name: 'Sync settings now (.obsidian)',
+            name: S.cmdSyncSettingsNow,
             callback: () async {
               final cs = _configSync;
               if (cs == null) {
@@ -1015,35 +1020,35 @@ void main() {
           );
           plugin.addCommand(
             id: 'rhyolite-cleanup-storage',
-            name: 'Clean up storage (history + blobs)',
+            name: S.cmdCleanupStorage,
             callback: () {
               showStorageCleanupModal(plugin, engine);
             },
           );
           plugin.addCommand(
             id: 'rhyolite-manage-devices',
-            name: 'Manage sync devices',
+            name: S.cmdManageDevices,
             callback: () {
               showDeviceManagementModal(plugin, engine);
             },
           );
           plugin.addCommand(
             id: 'rhyolite-storage-overview',
-            name: 'Storage overview',
+            name: S.storageOverviewTitle,
             callback: () {
               showStorageOverviewModal(plugin, engine);
             },
           );
           plugin.addCommand(
             id: 'rhyolite-reclaim-orphans',
-            name: 'Reclaim orphaned blobs',
+            name: S.cmdReclaimOrphans,
             callback: () {
               showOrphanSweepModal(plugin, engine);
             },
           );
           plugin.addCommand(
             id: 'rhyolite-configure-selfhost',
-            name: 'Configure self-host server',
+            name: S.cmdConfigureSelfHost,
             callback: () async {
               final changed = await withModalLock(
                 () => showSelfHostModal(plugin, configStorage),
@@ -1056,14 +1061,14 @@ void main() {
           );
           plugin.addCommand(
             id: 'rhyolite-show-file-history',
-            name: 'Show version history for current file',
+            name: S.cmdShowHistory,
             callback: () {
               showFileVersionModal(plugin, engine);
             },
           );
           plugin.addCommand(
             id: 'rhyolite-restore-backup',
-            name: 'Restore from backup',
+            name: S.cmdRestoreBackup,
             callback: () {
               showBackupModal(plugin, engine);
             },
@@ -1643,11 +1648,11 @@ Future<void> _waitForSubscriptionAndStart({
       plugin,
       build: (ctx) {
         modalCtx = ctx;
-        ctx.h3('Activating subscription…');
+        ctx.h3(S.activatingSubscription);
         ctx.spaceVertical(px: 12);
-        ctx.createEl('p', text: 'Please wait while we confirm your payment.');
+        ctx.createEl('p', text: S.confirmingPayment);
         ctx.spaceVertical(px: 12);
-        spinnerRef = ctx.spinner(label: 'Checking…');
+        spinnerRef = ctx.spinner(label: S.checking);
         spinnerRef!.show();
         ctx.spaceVertical(px: 4);
         ctx.onEscape(() {}); // disable accidental close
@@ -1688,16 +1693,13 @@ Future<void> _waitForSubscriptionAndStart({
     await showModalWith<void>(
       plugin,
       build: (ctx2) {
-        ctx2.h3('🎉 Subscription activated!');
+        ctx2.h3('🎉 ${S.subscriptionActivated}');
         ctx2.spaceVertical(px: 12);
-        ctx2.createEl(
-          'p',
-          text: 'Your subscription is now active. Sync will start shortly.',
-        );
+        ctx2.createEl('p', text: S.subscriptionNowActive);
         ctx2.spaceVertical(px: 16);
         ctx2.buttonRow([
           ButtonSpec(
-            'Got it',
+            S.gotIt,
             () => ctx2.close(null),
             variant: ButtonVariant.primary,
           ),
@@ -1715,17 +1717,11 @@ Future<void> _waitForSubscriptionAndStart({
     await showModalWith<void>(
       plugin,
       build: (ctx2) {
-        ctx2.h3('Payment not confirmed');
+        ctx2.h3(S.paymentNotConfirmed);
         ctx2.spaceVertical(px: 12);
-        ctx2.createEl(
-          'p',
-          text:
-              'We could not confirm your payment within 5 minutes. '
-              'If you completed the payment, please restart Obsidian. '
-              'If the issue persists, contact support.',
-        );
+        ctx2.createEl('p', text: S.paymentNotConfirmedBody);
         ctx2.spaceVertical(px: 16);
-        ctx2.buttonRow([ButtonSpec('Close', () => ctx2.close(null))]);
+        ctx2.buttonRow([ButtonSpec(S.close, () => ctx2.close(null))]);
         ctx2.onEscape(() => ctx2.close(null));
       },
     );

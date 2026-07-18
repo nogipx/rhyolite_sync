@@ -384,15 +384,31 @@ void main() {
       expect(await f.fugueStore.get(f.fileIdFor('note.md')), isNull);
     });
 
-    test('empty file fast path -> no spurious push when re-reconciled', () async {
+    test('empty new file -> skipped, no state created, no push', () async {
       final f = await _newFixture();
       f.io.files['$_vaultPath/empty.md'] = _bytes('');
-      await f.reconciler.reconcileWithDisk('empty.md');
-      final hlc1 = f.store.get(f.fileIdFor('empty.md'))?.hlc;
 
       final changed = await f.reconciler.reconcileWithDisk('empty.md');
       expect(changed, isFalse);
-      expect(f.store.get(f.fileIdFor('empty.md'))?.hlc, hlc1);
+      expect(f.store.get(f.fileIdFor('empty.md')), isNull);
+
+      // Re-reconciling an empty file stays a no-op.
+      final changed2 = await f.reconciler.reconcileWithDisk('empty.md');
+      expect(changed2, isFalse);
+      expect(f.store.get(f.fileIdFor('empty.md')), isNull);
+    });
+
+    test('empty file that later gains content -> syncs', () async {
+      final f = await _newFixture();
+      f.io.files['$_vaultPath/note.md'] = _bytes('');
+      expect(await f.reconciler.reconcileWithDisk('note.md'), isFalse);
+      expect(f.store.get(f.fileIdFor('note.md')), isNull);
+
+      f.io.files['$_vaultPath/note.md'] = _bytes('hello');
+      expect(await f.reconciler.reconcileWithDisk('note.md'), isTrue);
+      final state = f.store.get(f.fileIdFor('note.md'));
+      expect(state, isNotNull);
+      expect(state!.tombstone, isFalse);
     });
   });
 

@@ -7,6 +7,7 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import '../i18n/i18n.dart';
 import 'server_rejections.dart';
 
 /// Docked right-side panel surfacing live sync state and the actions/warnings
@@ -439,10 +440,10 @@ class SyncPanel {
     _style(sub, 'color', 'var(--text-muted)');
     _style(sub, 'marginTop', '3px');
     final bits = <String>[
-      if (_encrypted) '🔒 End-to-end encrypted',
-      if (_lastSyncedAt != null) 'synced ${_ago(_lastSyncedAt!)}',
+      if (_encrypted) '🔒 ${S.endToEndEncrypted}',
+      if (_lastSyncedAt != null) S.syncedAgo(_ago(_lastSyncedAt!)),
     ];
-    _setText(sub, bits.isEmpty ? 'Not connected' : bits.join('  ·  '));
+    _setText(sub, bits.isEmpty ? S.notConnected : bits.join('  ·  '));
 
     if (_lastError != null && _blocker == _Blocker.error) {
       final err = _el(root, 'div', text: _lastError!);
@@ -455,14 +456,14 @@ class SyncPanel {
     final table = _el(root, 'div');
     _style(table, 'marginTop', '12px');
     _style(table, 'fontSize', '13px');
-    _kv(table, 'Vault', _vaultName.isEmpty ? '—' : _vaultName);
-    _kv(table, 'Storage', _backendLabel);
+    _kv(table, S.vaultSection, _vaultName.isEmpty ? '—' : _vaultName);
+    _kv(table, S.panelStorageLabel, _backendLabel);
     if (stats != null) {
-      _kv(table, 'Files', '${stats.totalFiles - stats.tombstones}');
-      _kv(table, 'Vault size', _bytes(stats.totalSizeBytes));
+      _kv(table, S.files, '${stats.totalFiles - stats.tombstones}');
+      _kv(table, S.vaultSizeLabel, _bytes(stats.totalSizeBytes));
     }
     if (_settingsBytes != null && _settingsBytes! > 0) {
-      _kv(table, 'Settings size', _bytes(_settingsBytes!));
+      _kv(table, S.settingsSizeLabel, _bytes(_settingsBytes!));
     }
 
     // ── Storage meter (managed) ──
@@ -481,7 +482,7 @@ class SyncPanel {
       _style(row, 'justifyContent', 'space-between');
       _style(row, 'marginTop', '6px');
 
-      final link = _el(row, 'span', text: 'Storage details →');
+      final link = _el(row, 'span', text: S.storageDetails);
       _style(link, 'fontSize', '12px');
       _style(link, 'color', 'var(--text-accent)');
       _style(link, 'cursor', 'pointer');
@@ -493,19 +494,13 @@ class SyncPanel {
         _style(refresh, 'fontSize', '12px');
         _style(refresh, 'color', 'var(--text-muted)');
         _style(refresh, 'cursor', _usageFetching ? 'default' : 'pointer');
-        jsu.setProperty(refresh, 'aria-label', 'Refresh storage usage');
+        jsu.setProperty(refresh, 'aria-label', S.refreshStorageUsage);
         if (!_usageFetching) _onClick(refresh, _refreshUsage);
       }
     }
 
     // ── Text-merge trust line ──
-    final merge = _el(
-      root,
-      'div',
-      text:
-          'Text merges: conflict-free (CRDT) — concurrent edits never '
-          'clobber each other.',
-    );
+    final merge = _el(root, 'div', text: S.textMergesLine);
     _style(merge, 'fontSize', '12px');
     _style(merge, 'color', 'var(--text-muted)');
     _style(merge, 'marginTop', '10px');
@@ -515,7 +510,7 @@ class SyncPanel {
       final report = _el(
         root,
         'div',
-        text: '↑ $_uploaded uploaded   ↓ $_downloaded downloaded',
+        text: S.uploadDownloadReport(_uploaded, _downloaded),
       );
       _style(report, 'fontSize', '12px');
       _style(report, 'marginTop', '6px');
@@ -532,17 +527,17 @@ class SyncPanel {
     final pauseBtn = _el(
       actions,
       'button',
-      text: _isPaused() ? 'Resume sync' : 'Pause sync',
+      text: _isPaused() ? S.resumeSync : S.pauseSync,
     );
     if (_isPaused()) jsu.setProperty(pauseBtn, 'className', 'mod-cta');
     _onClick(pauseBtn, _handleTogglePause);
 
-    final settingsBtn = _el(actions, 'button', text: 'Settings');
+    final settingsBtn = _el(actions, 'button', text: S.settingsButton);
     _onClick(settingsBtn, _onOpenSettings);
 
     // ── Active transfers ──
     if (_transfers.isNotEmpty) {
-      _sectionHeader(root, 'Active transfers (${_transfers.length})');
+      _sectionHeader(root, S.activeTransfers(_transfers.length));
       for (final entry in _transfers.entries) {
         _transferRow(root, entry.key, entry.value);
       }
@@ -550,7 +545,7 @@ class SyncPanel {
 
     // ── Recent activity ──
     if (_recent.isNotEmpty) {
-      _sectionHeader(root, 'Recent');
+      _sectionHeader(root, S.recent);
       for (final e in _recent) {
         final row = _el(root, 'div', text: '${e.up ? '↑' : '↓'} ${e.path}');
         _style(row, 'fontSize', '12px');
@@ -559,21 +554,15 @@ class SyncPanel {
         _style(row, 'overflow', 'hidden');
         _style(row, 'textOverflow', 'ellipsis');
       }
-      final histBtn = _el(root, 'button', text: 'Browse versions');
+      final histBtn = _el(root, 'button', text: S.browseVersions);
       _style(histBtn, 'marginTop', '6px');
       _onClick(histBtn, _onBrowseVersions);
     }
 
     // ── Size-blocked files ──
     if (_blocked.isNotEmpty) {
-      _sectionHeader(root, 'Too large to sync (${_blocked.length})');
-      final hint = _el(
-        root,
-        'div',
-        text:
-            'Over your plan’s per-file limit. Kept local-only until they '
-            'shrink below the limit or you upgrade.',
-      );
+      _sectionHeader(root, S.tooLargeToSync(_blocked.length));
+      final hint = _el(root, 'div', text: S.tooLargeHint);
       _style(hint, 'fontSize', '12px');
       _style(hint, 'color', 'var(--text-muted)');
       _style(hint, 'marginBottom', '4px');
@@ -587,7 +576,7 @@ class SyncPanel {
         final meta = _el(
           row,
           'div',
-          text: '${_bytes(b.sizeBytes)} · limit ${_bytes(b.limitBytes)}',
+          text: S.blockedMeta(_bytes(b.sizeBytes), _bytes(b.limitBytes)),
         );
         _style(meta, 'color', 'var(--text-muted)');
       }
@@ -595,7 +584,7 @@ class SyncPanel {
         final more = _el(
           root,
           'div',
-          text: '…and ${_blocked.length - 20} more',
+          text: S.andMore(_blocked.length - 20),
         );
         _style(more, 'fontSize', '12px');
         _style(more, 'color', 'var(--text-muted)');
@@ -604,7 +593,7 @@ class SyncPanel {
 
     // ── Hard conflict / data-loss warnings ──
     if (_dataLoss.isNotEmpty) {
-      _sectionHeader(root, 'Conflicts with lost content (${_dataLoss.length})');
+      _sectionHeader(root, S.conflictsLostContent(_dataLoss.length));
       for (final d in _dataLoss.reversed.take(20)) {
         final row = _el(root, 'div');
         _style(row, 'fontSize', '12px');
@@ -667,7 +656,7 @@ class SyncPanel {
     _flexRow(head, gap: '8px');
     _style(head, 'justifyContent', 'space-between');
     _style(head, 'fontSize', '12px');
-    final title = _el(head, 'span', text: 'Storage · $_planLabel');
+    final title = _el(head, 'span', text: S.storageMeterTitle(_planLabel));
     _style(title, 'color', 'var(--text-muted)');
     _el(head, 'span', text: '${_bytes(u.usedBytes)} / ${_bytes(u.quotaBytes)}');
     final track = _el(wrap, 'div');
@@ -779,20 +768,18 @@ class SyncPanel {
   }
 
   String _statusLabel() => switch (_effective()) {
-    _Status.stopped => 'Sync stopped',
-    _Status.connecting =>
-      _connectAttempt <= 2 ? 'Connecting…' : 'Reconnecting…',
-    _Status.offline => 'Offline — can’t reach server',
-    _Status.ready => 'Up to date',
-    _Status.pending => 'Pending changes',
-    _Status.syncing =>
-      _progress != null
-          ? 'Syncing ${_progress!.completed}/${_progress!.total}'
-          : 'Syncing…',
-    _Status.error => 'Sync error',
-    _Status.authExpired => 'Session expired',
-    _Status.subExpired => 'Subscription required',
-    _Status.paused => 'Paused',
+    _Status.stopped => S.syncStopped,
+    _Status.connecting => _connectAttempt <= 2 ? S.connecting : S.reconnecting,
+    _Status.offline => S.offlineCantReach,
+    _Status.ready => S.upToDate,
+    _Status.pending => S.pendingChanges,
+    _Status.syncing => _progress != null
+        ? S.syncingProgress(_progress!.completed, _progress!.total)
+        : S.syncingEllipsis,
+    _Status.error => S.syncErrorStatus,
+    _Status.authExpired => S.sessionExpiredStatus,
+    _Status.subExpired => S.subscriptionRequiredStatus,
+    _Status.paused => S.pausedStatus,
   };
 
   String _statusColor() => switch (_effective()) {
@@ -816,10 +803,10 @@ class SyncPanel {
 
   static String _ago(DateTime t) {
     final d = DateTime.now().difference(t);
-    if (d.inSeconds < 45) return 'just now';
-    if (d.inMinutes < 60) return '${d.inMinutes}m ago';
-    if (d.inHours < 24) return '${d.inHours}h ago';
-    return '${d.inDays}d ago';
+    if (d.inSeconds < 45) return S.justNow;
+    if (d.inMinutes < 60) return S.minutesAgo(d.inMinutes);
+    if (d.inHours < 24) return S.hoursAgo(d.inHours);
+    return S.daysAgo(d.inDays);
   }
 
   static String _bytes(int n) {

@@ -1,17 +1,17 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'backup_inspect_modal.dart';
 
 /// Manages this vault's server-side restore points: create one now, restore a
-/// past one NON-destructively into a new `restore-<ts>/` folder (the live vault
-/// is never touched), or delete individual ones / none.
+/// past one in place (reversible via history), or delete individual ones.
 ///
 /// Restore points are a Pro, server-driven feature (daily snapshots, 7 kept); a
 /// free / self-host / disconnected vault simply lists none.
 Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
   if (engine is! StateSyncEngine) {
-    showNotice('Backups not available — engine is not connected');
+    showNotice(S.backupsUnavailable);
     return;
   }
 
@@ -19,25 +19,20 @@ Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
   try {
     snapshots = await engine.listBackups();
   } catch (e) {
-    showNotice('Failed to load backups: $e');
+    showNotice(S.backupsLoadFailed(e));
     return;
   }
 
   await showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('Vault backups');
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: 'Restore a snapshot into a new folder — your live vault is '
-            'untouched, so nothing is overwritten.',
-      );
+      ctx.h3(S.backupsTitle);
+      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.backupsDescription);
       ctx.spaceVertical(px: 8);
 
       ctx.buttonRow([
         ButtonSpec(
-          'Create restore point now',
+          S.createRestorePointNow,
           () => _capture(plugin, ctx, engine),
           variant: ButtonVariant.primary,
         ),
@@ -45,29 +40,27 @@ Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
       ctx.spaceVertical(px: 12);
 
       if (snapshots.isEmpty) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'No restore points yet. Pro vaults keep daily ones (7 newest).',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc', text: S.noRestorePointsYet);
       } else {
         for (final s in snapshots) {
           final when =
               DateTime.fromMillisecondsSinceEpoch(s.createdAtMs).toLocal();
-          ctx.createEl('p', text: '${_fmt(when)}  ·  ${s.recordCount} file(s)');
+          ctx.createEl('p',
+              text: S.restorePointLine(_fmt(when), s.recordCount));
           ctx.buttonRow([
-            ButtonSpec('Details', () async {
+            ButtonSpec(S.details, () async {
               ctx.close(null);
               await showBackupInspectModal(plugin, engine, s);
               await showBackupModal(plugin, engine);
             }),
             ButtonSpec(
-              'Restore all…',
+              S.restoreAllAction,
               () => _restoreAll(plugin, ctx, engine, s),
               variant: ButtonVariant.primary,
             ),
             ButtonSpec(
-              'Delete',
+              S.delete,
               () => _delete(plugin, ctx, engine, s),
               variant: ButtonVariant.destructive,
             ),
@@ -77,7 +70,7 @@ Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
       }
 
       ctx.spaceVertical(px: 8);
-      ctx.buttonRow([ButtonSpec('Close', () => ctx.close(null))]);
+      ctx.buttonRow([ButtonSpec(S.close, () => ctx.close(null))]);
       ctx.onEscape(() => ctx.close(null));
     },
   );
@@ -89,16 +82,14 @@ Future<void> _capture(
   StateSyncEngine engine,
 ) async {
   ctx.close(null);
-  showNotice('Creating restore point …');
+  showNotice(S.creatingRestorePoint);
   try {
     final snap = await engine.captureBackup();
-    if (snap == null) {
-      showNotice('Not connected — no restore point created.');
-    } else {
-      showNotice('Restore point created (${snap.recordCount} file(s)).');
-    }
+    showNotice(snap == null
+        ? S.notConnectedNoCapture
+        : S.restorePointCreated(snap.recordCount));
   } catch (e) {
-    showNotice('Failed to create restore point: $e');
+    showNotice(S.captureFailed(e));
   }
   await showBackupModal(plugin, engine);
 }
@@ -112,9 +103,9 @@ Future<void> _delete(
   ctx.close(null);
   try {
     final ok = await engine.deleteBackup(snapshot.snapshotId);
-    showNotice(ok ? 'Restore point deleted.' : 'Restore point not found.');
+    showNotice(ok ? S.restorePointDeleted : S.restorePointNotFound);
   } catch (e) {
-    showNotice('Failed to delete restore point: $e');
+    showNotice(S.deleteRestorePointFailed(e));
   }
   await showBackupModal(plugin, engine);
 }
@@ -132,38 +123,33 @@ Future<void> _restoreAll(
   await showModalWith<void>(
     plugin,
     build: (c) {
-      c.h3('Restore all · ${_fmt(when)}');
-      c.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: 'Overwrite current files with this restore point wherever they '
-            'differ. Files identical to now are left alone; nothing is deleted. '
-            'Each change syncs and stays reversible via file history.',
-      );
+      c.h3(S.restoreAllTitle(_fmt(when)));
+      c.createEl('p',
+          cls: 'rhyolite-setting-desc', text: S.restoreAllConfirmBody);
       c.spaceVertical(px: 12);
       c.buttonRow([
-        ButtonSpec('Restore all', () async {
+        ButtonSpec(S.restoreAllConfirm, () async {
           c.close(null);
-          showNotice('Restoring …');
+          showNotice(S.restoring);
           try {
             final report = await engine.restoreBackup(snapshot.snapshotId);
             if (report == null) {
-              showNotice('Restore unavailable — not connected.');
+              showNotice(S.restoreUnavailableNotConnected);
               return;
             }
-            final parts = <String>['Restored ${report.restoredFiles} file(s)'];
+            final parts = <String>[S.restoredFilesCount(report.restoredFiles)];
             if (report.skippedIdentical > 0) {
-              parts.add('${report.skippedIdentical} unchanged');
+              parts.add(S.unchangedCount(report.skippedIdentical));
             }
             if (report.errors.isNotEmpty) {
-              parts.add('${report.errors.length} error(s)');
+              parts.add(S.errorsCount(report.errors.length));
             }
             showNotice(parts.join(' · '));
           } catch (e) {
-            showNotice('Restore failed: $e');
+            showNotice(S.restoreFailed(e));
           }
         }, variant: ButtonVariant.primary),
-        ButtonSpec('Cancel', () => c.close(null)),
+        ButtonSpec(S.cancel, () => c.close(null)),
       ]);
       c.onEscape(() => c.close(null));
     },

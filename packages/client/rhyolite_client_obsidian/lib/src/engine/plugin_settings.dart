@@ -10,6 +10,7 @@ import 'package:rhyolite_client_obsidian/src/vault/vault_directory.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:uuid/uuid.dart';
 
+import '../i18n/i18n.dart';
 import '../settings/diagnostics_prefs.dart';
 import '../settings/file_filter_prefs.dart';
 import '../settings/settings_sync_prefs.dart';
@@ -87,9 +88,6 @@ void Function() registerSettingsTab({
   // not yet fetched). Refreshed from getSubscription in buildAsync and passed
   // to the vault picker so a user at their limit isn't offered "+ Create".
   int? maxVaultCount;
-  // Open/closed state of the collapsed settings-sync block; survives the tab
-  // rebuilds that every toggle triggers.
-  var settingsSyncExpanded = false;
 
   late PluginSettingsTab tab;
 
@@ -136,15 +134,15 @@ void Function() registerSettingsTab({
         '&next=${Uri.encodeComponent('/account')}',
       );
     } catch (e) {
-      showNotice('Could not open the account page: $e');
+      showNotice(S.couldNotOpenAccountPage(e));
     }
   }
 
   void build(PluginSettingsTab t) {
     void addSignOutButton(PluginSettingsTab t, String userEmail) => t.addButton(
-      name: 'Auth status',
-      description: 'Signed in as $userEmail. Click to sign out.',
-      buttonText: 'Sign Out',
+      name: S.authStatus,
+      description: S.signedInAs(userEmail),
+      buttonText: S.signOut,
       onClick: () async {
         await currentAuthClient?.signOut();
         await configStorage.clearAuthSession();
@@ -157,11 +155,9 @@ void Function() registerSettingsTab({
     );
 
     void addDisconnectVaultButton(PluginSettingsTab t) => t.addButton(
-      name: 'Disconnect vault',
-      description:
-          'Stop sync and forget this vault on this device. '
-          'Vault data on the server is not affected.',
-      buttonText: 'Disconnect',
+      name: S.disconnectVaultName,
+      description: S.disconnectVaultDescription,
+      buttonText: S.disconnect,
       onClick: () async {
         final vaultName = currentConfig.vaultName.isNotEmpty
             ? currentConfig.vaultName
@@ -179,24 +175,18 @@ void Function() registerSettingsTab({
     );
 
     void addTroubleshootingSection(PluginSettingsTab t) {
-      t.addSection('Troubleshooting');
+      t.addSection(S.troubleshooting);
 
       t.addButton(
-        name: 'Re-upload from this device',
-        description:
-            'Use this device as the source of truth. '
-            'Server history will be replaced with files from this device. '
-            'Other devices will download the updated files automatically.',
-        buttonText: 'Re-upload',
+        name: S.reuploadName,
+        description: S.reuploadDescription,
+        buttonText: S.reupload,
         onClick: () async {
           final confirmed = await _showActionConfirmation(
             plugin,
-            title: 'Re-upload from this device?',
-            body:
-                'Server history will be replaced with files from this device. '
-                'Other devices will re-sync automatically. '
-                'No files are deleted.',
-            confirmText: 'Re-upload',
+            title: S.reuploadConfirmTitle,
+            body: S.reuploadConfirmBody,
+            confirmText: S.reupload,
             destructive: true,
           );
           if (!confirmed) return;
@@ -205,19 +195,15 @@ void Function() registerSettingsTab({
       );
 
       t.addButton(
-        name: 'Download from server',
-        description:
-            'Replace local files with the server version. '
-            'Use this if your files on this device are outdated or corrupted.',
-        buttonText: 'Download',
+        name: S.downloadServerName,
+        description: S.downloadServerDescription,
+        buttonText: S.download,
         onClick: () async {
           final confirmed = await _showActionConfirmation(
             plugin,
-            title: 'Download from server?',
-            body:
-                'Local files will be deleted and replaced with the server version. '
-                'This only affects this device.',
-            confirmText: 'Download',
+            title: S.downloadServerConfirmTitle,
+            body: S.downloadServerConfirmBody,
+            confirmText: S.download,
             destructive: true,
           );
           if (!confirmed) return;
@@ -226,40 +212,32 @@ void Function() registerSettingsTab({
       );
 
       t.addButton(
-        name: 'Repair vault sync state',
-        description:
-            'Rebuild sync state for every note from its current disk '
-            'content and re-upload so the server adopts the fresh '
-            'state. Use this if notes look corrupted, duplicated, or '
-            'sync seems stuck. Your file content on disk is not '
-            'modified.',
-        buttonText: 'Repair',
+        name: S.repairName,
+        description: S.repairDescription,
+        buttonText: S.repairButton,
         onClick: () async {
           final confirmed = await _showActionConfirmation(
             plugin,
-            title: 'Repair vault sync state?',
-            body:
-                'Every note will be re-seeded from its current disk '
-                'content and re-uploaded. This can take a while for '
-                'large vaults. File content on disk is not changed.',
-            confirmText: 'Repair',
+            title: S.repairConfirmTitle,
+            body: S.repairConfirmBody,
+            confirmText: S.repairButton,
             destructive: false,
           );
           if (!confirmed) return;
           try {
             await onRepairVault();
-            showNotice('Vault repair finished — see logs for details.');
+            showNotice(S.repairFinished);
           } catch (e) {
-            showNotice('Vault repair failed: $e');
+            showNotice(S.repairFailed(e));
           }
         },
       );
     }
 
     void addConnectVaultButton(PluginSettingsTab t) => t.addButton(
-      name: 'Vault',
-      description: 'Connect to an existing vault or create a new one.',
-      buttonText: 'Connect Vault',
+      name: S.connectVaultName,
+      description: S.connectVaultDescription,
+      buttonText: S.connectVaultButton,
       onClick: () async {
         final IVaultDirectory? dir;
         if (selfHostEnabled) {
@@ -291,13 +269,13 @@ void Function() registerSettingsTab({
     );
 
     void addSelfHostSection(PluginSettingsTab t) {
-      t.addSection('Self-host');
+      t.addSection(S.selfHostSection);
       t.addButton(
-        name: selfHostEnabled ? 'Self-host enabled' : 'Self-host',
+        name: selfHostEnabled ? S.selfHostEnabledName : S.selfHostName,
         description: selfHostEnabled
-            ? 'Server: $selfHostUrl'
-            : 'Sync with your own server instead of the managed service.',
-        buttonText: selfHostEnabled ? 'Reconfigure' : 'Enable self-host',
+            ? S.selfHostServer(selfHostUrl)
+            : S.selfHostDescription,
+        buttonText: selfHostEnabled ? S.selfHostReconfigure : S.selfHostEnable,
         onClick: () async {
           final changed = await withModalLock(
             () => showSelfHostModal(plugin, configStorage),
@@ -305,7 +283,7 @@ void Function() registerSettingsTab({
           if (changed) {
             // Apply immediately by re-running the plugin's onLoad (disable +
             // re-enable) — no manual reload, no account interaction.
-            showNotice('Applying self-host settings…');
+            showNotice(S.applyingSelfHost);
             reloadPlugin(plugin);
           }
         },
@@ -318,11 +296,9 @@ void Function() registerSettingsTab({
     // in-plugin email/password form to maintain (RF law also bars the site
     // from acting as anything but our own email/password authorizer).
     void addBrowserSignInButton(PluginSettingsTab t) => t.addButton(
-      name: 'Sign in',
-      description:
-          'Sign in or create an account in your browser. Rhyolite opens the '
-          'web login and brings you back here automatically.',
-      buttonText: 'Sign In',
+      name: S.signIn,
+      description: S.signInDescription,
+      buttonText: S.signInButton,
       primary: true,
       onClick: () {
         if (!currentAuthConfig.isConfigured) return;
@@ -331,35 +307,33 @@ void Function() registerSettingsTab({
     );
 
     void addSubscriptionSection(PluginSettingsTab t, DateTime? periodEnd) {
-      t.addSection('Subscription');
+      t.addSection(S.subscriptionSection);
       if (periodEnd != null) {
         final day = periodEnd.day.toString().padLeft(2, '0');
         final month = periodEnd.month.toString().padLeft(2, '0');
         final year = periodEnd.year;
         t.addCustom((s) {
-          s.setName('Active until $day.$month.$year');
-          s.setDesc('Your subscription is active.');
+          s.setName(S.activeUntil('$day.$month.$year'));
+          s.setDesc(S.subscriptionActive);
         });
         t.addButton(
-          name: 'Manage subscription',
-          description: 'Open your account page in the browser (signed in).',
-          buttonText: 'Manage on site',
+          name: S.manageSubscription,
+          description: S.manageSubscriptionDescription,
+          buttonText: S.manageOnSite,
           onClick: openAccountOnSite,
         );
       } else {
         t.addButton(
-          name: 'Subscribe',
-          description:
-              'Subscribe on the site to sync across all your devices. '
-              'Opens your account page in the browser, already signed in.',
-          buttonText: 'Subscribe',
+          name: S.subscribe,
+          description: S.subscribeDescription,
+          buttonText: S.subscribe,
           primary: true,
           onClick: openAccountOnSite,
         );
         t.addButton(
-          name: 'Already paid?',
-          description: 'Check if your payment went through.',
-          buttonText: 'Restore subscription',
+          name: S.alreadyPaid,
+          description: S.alreadyPaidDescription,
+          buttonText: S.restoreSubscription,
           onClick: () async {
             final client = currentAuthClient;
             if (client == null) return;
@@ -385,12 +359,10 @@ void Function() registerSettingsTab({
     // onChange never refreshes the tab, so typing the URL keeps the caret.
     void addDiagnosticsSection(PluginSettingsTab t) {
       final prefs = diagnosticsPrefs();
-      t.addSection('Diagnostics');
+      t.addSection(S.diagnosticsSection);
       t.addText(
-        name: 'Log collector URL',
-        description:
-            'WebSocket endpoint your logs stream to. Use wss:// — iOS blocks '
-            'plain ws:// silently.',
+        name: S.logCollectorUrl,
+        description: S.logCollectorDescription,
         initialValue: prefs.url,
         placeholder: kDefaultLogUri.isNotEmpty
             ? kDefaultLogUri
@@ -400,11 +372,8 @@ void Function() registerSettingsTab({
         ),
       );
       t.addToggle(
-        name: 'Send logs to collector',
-        description:
-            'Off by default — nothing is logged until you enable this. Streams '
-            "this device's debug logs to the URL above. Logs include file "
-            'paths, ids, hashes, sizes and timings — never file content.',
+        name: S.sendLogsToCollector,
+        description: S.sendLogsDescription,
         initialValue: prefs.enabled,
         onChange: (v) => onDiagnosticsChanged(
           diagnosticsPrefs().copyWith(enabled: v),
@@ -417,14 +386,10 @@ void Function() registerSettingsTab({
     // decides what it can afford. Text onChange never refreshes the tab so the
     // caret stays put while typing.
     void addFileFilterSection(PluginSettingsTab t) {
-      t.addSection('File types');
+      t.addSection(S.fileTypesSection);
       t.addText(
-        name: "Don't sync these extensions",
-        description:
-            'Comma-separated list (e.g. pdf, zip, mp4). Files with these '
-            'extensions are skipped on this device only — neither uploaded nor '
-            'downloaded. Other devices are unaffected. Leave empty to sync '
-            'everything. Re-adding a type downloads its files on the next sync.',
+        name: S.dontSyncExtensions,
+        description: S.dontSyncDescription,
         initialValue: fileFilterPrefs().display,
         placeholder: 'pdf, zip, mp4',
         onChange: (v) => onFileFilterChanged(
@@ -442,7 +407,7 @@ void Function() registerSettingsTab({
 
     if (selfHostEnabled) {
       // Self-host: no account service. Vault comes from the sync registry.
-      t.addSection('Vault');
+      t.addSection(S.vaultSection);
       if (currentConfig.vaultId.isNotEmpty) {
         if (vaultUsage != null) {
           _addStorageUsage(t, vaultUsage!);
@@ -453,7 +418,7 @@ void Function() registerSettingsTab({
         addConnectVaultButton(t);
       }
     } else {
-      t.addSection('Authentication');
+      t.addSection(S.authentication);
       if (isSignedIn) {
         addSignOutButton(t, userEmail);
         if (currentConfig.vaultId.isNotEmpty) {
@@ -515,59 +480,51 @@ void Function() registerSettingsTab({
       );
     }
 
-    // Settings sync (.obsidian) — last, collapsed: it's advanced and rarely
-    // touched, so it stays out of the way at the bottom of the tab.
+    // Per-device file-type filter — only meaningful once a vault is connected.
+    if (currentConfig.vaultId.isNotEmpty) {
+      addFileFilterSection(t);
+    }
+
+    // Settings sync (.obsidian) — placed below "File types" as a normal open
+    // section.
     if (currentConfig.vaultId.isNotEmpty) {
       addSettingsSyncSection(
         t,
         prefs: settingsSyncPrefs(),
         onChanged: onSettingsSyncChanged,
-        expanded: settingsSyncExpanded,
-        onExpandedChanged: (v) => settingsSyncExpanded = v,
         onReset: () async {
           final confirmed = await _showActionConfirmation(
             plugin,
-            title: 'Re-upload settings from this device?',
-            body:
-                "Server settings will be replaced with this device's "
-                '.obsidian settings. Other devices re-sync automatically.',
-            confirmText: 'Re-upload',
+            title: S.reuploadSettingsTitle,
+            body: S.reuploadSettingsBody,
+            confirmText: S.reupload,
             destructive: true,
           );
           if (!confirmed) return;
           try {
             await onResetSettings();
-            showNotice('Settings re-upload finished.');
+            showNotice(S.settingsReuploadFinished);
           } catch (e) {
-            showNotice('Settings re-upload failed: $e');
+            showNotice(S.settingsReuploadFailed(e));
           }
         },
         onRestore: () async {
           final confirmed = await _showActionConfirmation(
             plugin,
-            title: 'Download settings from server?',
-            body:
-                "This device's .obsidian settings will be replaced with the "
-                'server version. Most changes apply after an Obsidian restart.',
-            confirmText: 'Download',
+            title: S.downloadSettingsTitle,
+            body: S.downloadSettingsBody,
+            confirmText: S.download,
             destructive: true,
           );
           if (!confirmed) return;
           try {
             await onRestoreSettings();
-            showNotice(
-              'Settings download finished — restart Obsidian to apply.',
-            );
+            showNotice(S.settingsDownloadFinished);
           } catch (e) {
-            showNotice('Settings download failed: $e');
+            showNotice(S.settingsDownloadFailed(e));
           }
         },
       );
-    }
-
-    // Per-device file-type filter — only meaningful once a vault is connected.
-    if (currentConfig.vaultId.isNotEmpty) {
-      addFileFilterSection(t);
     }
 
     // Advanced diagnostics — always shown (useful even before sign-in / vault
@@ -645,7 +602,7 @@ void Function() registerSettingsTab({
           return;
         }
         if (pendingAuthState == null || state != pendingAuthState) {
-          showNotice('This sign-in link is not for this device. Try again.');
+          showNotice(S.signInLinkWrongDevice);
           return;
         }
         pendingAuthState = null;
@@ -653,9 +610,9 @@ void Function() registerSettingsTab({
           try {
             await accountClient.redeemLoginCode(code);
             await applySignedIn();
-            showNotice('Signed in');
+            showNotice(S.signedIn);
           } catch (e) {
-            showNotice('Sign-in failed: $e');
+            showNotice(S.signInFailed(e));
           }
         }();
       }),
@@ -675,7 +632,7 @@ void _addExternalStorageSection(
   required Future<void> Function(VaultConfig updated) onSave,
   required Future<void> Function() onClear,
 }) {
-  t.addSection('External Storage');
+  t.addSection(S.externalStorageSection);
 
   final current = config.externalBlobConfig;
 
@@ -687,20 +644,19 @@ void _addExternalStorageSection(
       _ => 'Custom',
     };
     t.addCustom((s) {
-      s.setName('Connected');
+      s.setName(S.connected);
       s.setDesc(summary);
     });
     t.addButton(
-      name: 'Disconnect storage',
-      description:
-          'Stop using external storage. New blobs will go through the sync server.',
-      buttonText: 'Disconnect',
+      name: S.disconnectStorage,
+      description: S.disconnectStorageDescription,
+      buttonText: S.disconnect,
       onClick: () async {
         try {
           await onClear();
-          showNotice('External storage disconnected.');
+          showNotice(S.externalStorageDisconnected);
         } catch (e) {
-          showNotice('Could not disconnect external storage: $e');
+          showNotice(S.couldNotDisconnectStorage(e));
         }
       },
     );
@@ -709,17 +665,14 @@ void _addExternalStorageSection(
 
   // No external storage — show setup buttons.
   t.addCustom((s) {
-    s.setName('Bring your own storage');
-    s.setDesc(
-      'Store file content in your own S3 or WebDAV server. '
-      'The sync server will only handle lightweight metadata.',
-    );
+    s.setName(S.bringYourOwnStorage);
+    s.setDesc(S.bringYourOwnDescription);
   });
 
   t.addButton(
-    name: 'S3-compatible',
-    description: 'AWS S3, MinIO, Cloudflare R2, Backblaze B2',
-    buttonText: 'Configure',
+    name: S.s3Compatible,
+    description: S.s3Description,
+    buttonText: S.configure,
     onClick: () async {
       final result = await _showS3ConfigModal(t.plugin);
       if (result == null) return;
@@ -728,17 +681,17 @@ void _addExternalStorageSection(
           externalBlobConfig: result,
           externalStorageKind: result.kind,
         ));
-        showNotice('External storage connected: S3');
+        showNotice(S.externalStorageConnected('S3'));
       } catch (e) {
-        showNotice('Could not save external storage: $e');
+        showNotice(S.couldNotSaveStorage(e));
       }
     },
   );
 
   t.addButton(
-    name: 'WebDAV',
-    description: 'Nextcloud, ownCloud, or any WebDAV server',
-    buttonText: 'Configure',
+    name: S.webdavName,
+    description: S.webdavDescription,
+    buttonText: S.configure,
     onClick: () async {
       final result = await _showWebDavConfigModal(t.plugin);
       if (result == null) return;
@@ -747,9 +700,9 @@ void _addExternalStorageSection(
           externalBlobConfig: result,
           externalStorageKind: result.kind,
         ));
-        showNotice('External storage connected: WebDAV');
+        showNotice(S.externalStorageConnected('WebDAV'));
       } catch (e) {
-        showNotice('Could not save external storage: $e');
+        showNotice(S.couldNotSaveStorage(e));
       }
     },
   );
@@ -771,37 +724,37 @@ Future<S3BlobConfig?> _showS3ConfigModal(PluginHandle plugin) async {
   return showModalWith<S3BlobConfig>(
     plugin,
     build: (ctx) {
-      ctx.h3('S3 Storage Configuration');
+      ctx.h3(S.s3ConfigTitle);
 
       final endpointInput = _labeledInput(
         ctx,
-        label: 'Endpoint',
+        label: S.endpoint,
         placeholder: 's3.amazonaws.com',
       );
       final bucketInput = _labeledInput(
         ctx,
-        label: 'Bucket',
+        label: S.bucket,
         placeholder: 'my-vault-backup',
       );
       final accessKeyInput = _labeledInput(
         ctx,
-        label: 'Access Key',
+        label: S.accessKey,
         placeholder: 'AKIA...',
       );
       final secretKeyInput = _labeledInput(
         ctx,
-        label: 'Secret Key',
+        label: S.secretKey,
         type: 'password',
       );
       final regionInput = _labeledInput(
         ctx,
-        label: 'Region',
+        label: S.region,
         placeholder: 'us-east-1',
       );
 
       ctx.spaceVertical(px: 16);
       ctx.buttonRow([
-        ButtonSpec('Save', () {
+        ButtonSpec(S.save, () {
           final endpoint = ctx.valueOf(endpointInput).trim();
           final bucket = ctx.valueOf(bucketInput).trim();
           final accessKey = ctx.valueOf(accessKeyInput).trim();
@@ -822,7 +775,7 @@ Future<S3BlobConfig?> _showS3ConfigModal(PluginHandle plugin) async {
             ),
           );
         }, variant: ButtonVariant.primary),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },
@@ -833,23 +786,23 @@ Future<WebDavBlobConfig?> _showWebDavConfigModal(PluginHandle plugin) async {
   return showModalWith<WebDavBlobConfig>(
     plugin,
     build: (ctx) {
-      ctx.h3('WebDAV Storage Configuration');
+      ctx.h3(S.webdavConfigTitle);
 
       final endpointInput = _labeledInput(
         ctx,
-        label: 'Endpoint',
+        label: S.endpoint,
         placeholder: 'dav.example.com/remote.php/dav/files/user',
       );
-      final usernameInput = _labeledInput(ctx, label: 'Username');
+      final usernameInput = _labeledInput(ctx, label: S.username);
       final passwordInput = _labeledInput(
         ctx,
-        label: 'Password',
+        label: S.password,
         type: 'password',
       );
 
       ctx.spaceVertical(px: 16);
       ctx.buttonRow([
-        ButtonSpec('Save', () {
+        ButtonSpec(S.save, () {
           final endpoint = ctx.valueOf(endpointInput).trim();
           final username = ctx.valueOf(usernameInput).trim();
           final password = ctx.valueOf(passwordInput).trim();
@@ -862,7 +815,7 @@ Future<WebDavBlobConfig?> _showWebDavConfigModal(PluginHandle plugin) async {
             ),
           );
         }, variant: ButtonVariant.primary),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },
@@ -892,7 +845,7 @@ Future<bool> _showActionConfirmation(
               ? ButtonVariant.destructive
               : ButtonVariant.primary,
         ),
-        ButtonSpec('Cancel', () => ctx.close(false)),
+        ButtonSpec(S.cancel, () => ctx.close(false)),
       ]);
       ctx.onEscape(() => ctx.close(false));
     },
@@ -908,26 +861,23 @@ Future<bool> _showDisconnectConfirmation(
   final confirmed = await showModalWith<bool>(
     plugin,
     build: (ctx) {
-      ctx.h3('Disconnect Vault?');
+      ctx.h3(S.disconnectVaultTitle);
       ctx.spaceVertical(px: 12);
-      ctx.createEl('p', text: 'Disconnect from "$vaultName" on this device?');
+      ctx.createEl('p', text: S.disconnectFromVault(vaultName));
       ctx.spaceVertical(px: 8);
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text:
-            'Sync will stop. The vault config and remembered passphrase '
-            'will be removed from this device. '
-            'Your data on the server and files on disk are not affected.',
+        text: S.disconnectVaultBody,
       );
       ctx.spaceVertical(px: 16);
       ctx.buttonRow([
         ButtonSpec(
-          'Disconnect',
+          S.disconnect,
           () => ctx.close(true),
           variant: ButtonVariant.destructive,
         ),
-        ButtonSpec('Cancel', () => ctx.close(false)),
+        ButtonSpec(S.cancel, () => ctx.close(false)),
       ]);
       ctx.onEscape(() => ctx.close(false));
     },
@@ -949,7 +899,7 @@ void _addStorageUsage(
       '(${percent.toStringAsFixed(0)}%)';
 
   t.addCustom((s) {
-    s.setName('Storage');
+    s.setName(S.storageSection);
     s.setDesc(label);
   });
 }
@@ -964,14 +914,14 @@ Future<void> _showRestoreSubscriptionModal(
   await showModalWith<void>(
     plugin,
     build: (ctx) {
-      final title = ctx.h3('Checking subscription...');
+      final title = ctx.h3(S.checkingSubscription);
       ctx.spaceVertical(px: 12);
-      final spin = ctx.spinner(label: 'Contacting server');
+      final spin = ctx.spinner(label: S.contactingServer);
       spin.show();
       ctx.spaceVertical(px: 4);
       final message = ctx.createEl('p', cls: 'rhyolite-setting-desc');
       ctx.spaceVertical(px: 16);
-      final buttons = ctx.buttonRow([ButtonSpec('OK', () => ctx.close(null))]);
+      final buttons = ctx.buttonRow([ButtonSpec(S.ok, () => ctx.close(null))]);
       buttons.first.setDisabled(value: true);
 
       Future(() async {
@@ -983,16 +933,12 @@ Future<void> _showRestoreSubscriptionModal(
         }
         spin.hide();
         if (restored) {
-          setText(title, 'Subscription activated!');
-          setText(message, 'Your subscription has been successfully restored.');
+          setText(title, S.subscriptionActivated);
+          setText(message, S.subscriptionRestored);
           onSubscribed();
         } else {
-          setText(title, 'No subscription found');
-          setText(
-            message,
-            'No completed payment was found for your account. '
-            'If you just paid, please wait a moment and try again.',
-          );
+          setText(title, S.noSubscriptionFound);
+          setText(message, S.noPaymentFound);
         }
         buttons.first.setDisabled(value: false);
       });

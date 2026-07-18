@@ -260,6 +260,14 @@ class StateStartupDiff {
         continue;
       }
 
+      // Skip empty files with no live state — mirrors DiskReconciler. Obsidian
+      // mints 0-byte notes on "new note"; they shouldn't create sync records.
+      // A legacy already-synced empty file (current live, sizeBytes 0) falls
+      // through to the fast-path skip below and stays untouched.
+      if (bytes.isEmpty && (current == null || current.tombstone)) {
+        continue;
+      }
+
       // Fast-path checks. Three patterns to short-circuit:
       //
       //   (a) Empty file: bytes are zero and the stored state reflects

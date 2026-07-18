@@ -7,6 +7,7 @@ import 'dart:js_util' as jsu;
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'diff_view.dart';
 
 /// Inspects one restore point against the current vault as an interactive file
@@ -23,11 +24,11 @@ Future<void> showBackupInspectModal(
   try {
     inspection = await engine.inspectBackup(snapshot.snapshotId);
   } catch (e) {
-    showNotice('Failed to inspect restore point: $e');
+    showNotice(S.inspectFailed(e));
     return;
   }
   if (inspection == null) {
-    showNotice('Not connected — cannot inspect.');
+    showNotice(S.notConnectedCannotInspect);
     return;
   }
 
@@ -42,21 +43,21 @@ Future<void> showBackupInspectModal(
   await showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('Restore point · ${_fmt(when)}');
+      ctx.h3(S.restorePointTitle(_fmt(when)));
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text: '${inspection!.changed} changed · '
-            '${inspection.restoresDeleted} to restore (deleted since) · '
-            '${inspection.identical} identical'
-            '${inspection.deletedInBackup > 0 ? ' · ${inspection.deletedInBackup} deletion' : ''}',
+        text: S.inspectSummary(inspection!.changed, inspection.restoresDeleted,
+                inspection.identical) +
+            (inspection.deletedInBackup > 0
+                ? S.deletionSuffix(inspection.deletedInBackup)
+                : ''),
       );
       ctx.spaceVertical(px: 8);
 
       if (changedEntries.isEmpty) {
         ctx.createEl('p',
-            cls: 'rhyolite-setting-desc',
-            text: 'No changes vs the current vault — every file is identical.');
+            cls: 'rhyolite-setting-desc', text: S.noChangesVsCurrent);
       } else {
         final treeRoot = ctx.createEl('div', cls: 'rhyolite-backup-tree');
         _renderNode(
@@ -67,7 +68,7 @@ Future<void> showBackupInspectModal(
       }
 
       ctx.spaceVertical(px: 12);
-      ctx.buttonRow([ButtonSpec('Close', () => ctx.close(null))]);
+      ctx.buttonRow([ButtonSpec(S.close, () => ctx.close(null))]);
       ctx.onEscape(() => ctx.close(null));
     },
   );
@@ -155,9 +156,9 @@ void _renderNode(
 
 String _flair(BackupEntryStatus s) => switch (s) {
       BackupEntryStatus.identical => '',
-      BackupEntryStatus.changed => 'changed',
-      BackupEntryStatus.restoresDeleted => 'deleted now',
-      BackupEntryStatus.deletedInBackup => 'tombstone',
+      BackupEntryStatus.changed => S.flairChanged,
+      BackupEntryStatus.restoresDeleted => S.flairDeletedNow,
+      BackupEntryStatus.deletedInBackup => S.flairTombstone,
     };
 
 // ---------------------------------------------------------------------------
@@ -171,10 +172,10 @@ Future<void> _showEntryDetail(
 ) async {
   switch (entry.status) {
     case BackupEntryStatus.identical:
-      showNotice('${entry.path}: identical to current — nothing would change.');
+      showNotice(S.entryIdenticalNotice(entry.path));
       return;
     case BackupEntryStatus.deletedInBackup:
-      showNotice('${entry.path}: was deleted in this restore point.');
+      showNotice(S.entryDeletedInBackupNotice(entry.path));
       return;
     case BackupEntryStatus.changed:
     case BackupEntryStatus.restoresDeleted:
@@ -191,22 +192,24 @@ Future<void> _showEntryDetail(
     await showModalWith<void>(
       plugin,
       build: (ctx) {
-        ctx.h3('${restoresDeleted ? 'Restores' : 'Diff'} · ${entry.path}');
+        ctx.h3(restoresDeleted
+            ? S.restoresTitle(entry.path)
+            : S.diffTitle(entry.path));
         ctx.createEl(
           'p',
           cls: 'rhyolite-setting-desc',
           text: restoresDeleted
-              ? 'Binary file — would be restored (${entry.sizeBytes} bytes).'
-              : 'Binary file — content differs (not shown as text).',
+              ? S.binaryWouldRestore(entry.sizeBytes)
+              : S.binaryContentDiffers,
         );
         ctx.spaceVertical(px: 12);
         ctx.buttonRow([
           ButtonSpec(
-            restoresDeleted ? 'Restore this file' : 'Restore this version',
+            restoresDeleted ? S.restoreThisFile : S.restoreThisVersion,
             () => _restoreOne(plugin, ctx, engine, entry),
             variant: ButtonVariant.primary,
           ),
-          ButtonSpec('Close', () => ctx.close(null)),
+          ButtonSpec(S.close, () => ctx.close(null)),
         ]);
         ctx.onEscape(() => ctx.close(null));
       },
@@ -214,7 +217,7 @@ Future<void> _showEntryDetail(
     return;
   }
 
-  showNotice('Loading ${entry.path} …');
+  showNotice(S.loadingPath(entry.path));
   // Text content is materialised server-side into plain text (the blob is the
   // Fugue serialization) by engine.backupFileContent — no \0fg1 leaks here.
   final String backupText;
@@ -222,7 +225,7 @@ Future<void> _showEntryDetail(
   try {
     final backupBytes = await engine.backupFileContent(entry.blobRef, entry.path);
     if (backupBytes == null) {
-      showNotice('Backup content for ${entry.path} is unavailable.');
+      showNotice(S.backupContentUnavailable(entry.path));
       return;
     }
     backupText = utf8.decode(backupBytes, allowMalformed: true);
@@ -231,7 +234,7 @@ Future<void> _showEntryDetail(
           utf8.decode(await engine.io.readFile(entry.path), allowMalformed: true);
     }
   } catch (e) {
-    showNotice('Could not load ${entry.path}: $e');
+    showNotice(S.couldNotLoadPath(entry.path, e));
     return;
   }
 
@@ -242,22 +245,20 @@ Future<void> _showEntryDetail(
   await showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('${restoresDeleted ? 'Restores' : 'Diff'} · ${entry.path}');
+      ctx.h3(restoresDeleted
+          ? S.restoresTitle(entry.path)
+          : S.diffTitle(entry.path));
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text: restoresDeleted
-            ? 'Deleted from the vault since — restoring adds this content:'
-            : 'Restoring would apply these changes (- current, + backup):',
+        text: restoresDeleted ? S.restoringAddsContent : S.restoringWouldApply,
       );
       if (diff == null) {
         ctx.createEl('p',
-            cls: 'rhyolite-setting-desc',
-            text: 'Too many changes to diff — restore to inspect.');
+            cls: 'rhyolite-setting-desc', text: S.tooManyChangesToDiff);
       } else if (diff.every((l) => l.op == TextDiffOp.equal)) {
         ctx.createEl('p',
-            cls: 'rhyolite-setting-desc',
-            text: 'No differences — identical to the file on disk.');
+            cls: 'rhyolite-setting-desc', text: S.noDifferencesOnDisk);
       } else {
         renderUnifiedDiff(ctx.createEl('div'), diff);
       }
@@ -265,11 +266,11 @@ Future<void> _showEntryDetail(
       ctx.spaceVertical(px: 12);
       ctx.buttonRow([
         ButtonSpec(
-          restoresDeleted ? 'Restore this file' : 'Restore this version',
+          restoresDeleted ? S.restoreThisFile : S.restoreThisVersion,
           () => _restoreOne(plugin, ctx, engine, entry),
           variant: ButtonVariant.primary,
         ),
-        ButtonSpec('Close', () => ctx.close(null)),
+        ButtonSpec(S.close, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },
@@ -285,14 +286,13 @@ Future<void> _restoreOne(
   BackupEntry entry,
 ) async {
   ctx.close(null);
-  showNotice('Restoring ${entry.path} …');
+  showNotice(S.restoringPath(entry.path));
   try {
     final ok = await engine.restoreBackupFile(entry.blobRef, entry.path);
-    showNotice(ok
-        ? '${entry.path} restored (reversible via history).'
-        : 'Could not restore ${entry.path} — not connected or blob gone.');
+    showNotice(
+        ok ? S.fileRestored(entry.path) : S.couldNotRestorePath(entry.path));
   } catch (e) {
-    showNotice('Restore failed: $e');
+    showNotice(S.restoreFailed(e));
   }
 }
 

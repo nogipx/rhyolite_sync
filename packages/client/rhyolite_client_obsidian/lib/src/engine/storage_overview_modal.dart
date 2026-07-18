@@ -1,6 +1,7 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'backup_modal.dart';
 import 'device_management_modal.dart';
 import 'orphan_sweep_modal.dart';
@@ -19,7 +20,7 @@ Future<void> showStorageOverviewModal(
   ISyncEngine engine,
 ) async {
   if (engine is! StateSyncEngine) {
-    showNotice('Storage overview not available — engine is not connected');
+    showNotice(S.storageOverviewUnavailable);
     return;
   }
 
@@ -50,39 +51,36 @@ Future<void> showStorageOverviewModal(
   return showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('Storage overview');
+      ctx.h3(S.storageOverviewTitle);
       ctx.spaceVertical(px: 8);
 
       // ── Content (this device) ──
-      ctx.createEl('p', text: 'Content (this device)');
+      ctx.createEl('p', text: S.contentThisDevice);
       if (stats == null) {
-        ctx.createEl('p', cls: 'rhyolite-setting-desc', text: 'Not synced yet.');
+        ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.notSyncedYet);
       } else {
         final liveFiles = stats.totalFiles - stats.tombstones;
-        _kv(ctx, 'Files', '$liveFiles');
-        _kv(ctx, 'Content size', _fmtSize(stats.totalSizeBytes));
-        _kv(ctx, 'Unique blobs', '${stats.uniqueBlobs}');
-        if (stats.conflicting > 0) _kv(ctx, 'Conflicts', '${stats.conflicting}');
+        _kv(ctx, S.files, '$liveFiles');
+        _kv(ctx, S.contentSize, _fmtSize(stats.totalSizeBytes));
+        _kv(ctx, S.uniqueBlobs, '${stats.uniqueBlobs}');
+        if (stats.conflicting > 0) _kv(ctx, S.conflicts, '${stats.conflicting}');
         if (stats.tombstones > 0) {
-          _kv(ctx, 'Deleted (tombstoned)', '${stats.tombstones}');
+          _kv(ctx, S.deletedTombstoned, '${stats.tombstones}');
         }
       }
 
       // ── History (server) ──
       ctx.spaceVertical(px: 12);
-      ctx.createEl('p', text: 'History (server)');
+      ctx.createEl('p', text: S.historyServer);
       if (plan == null) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'Could not read history (not connected?).',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc', text: S.couldNotReadHistory);
       } else {
-        _kv(ctx, 'Versions kept', '${plan.totalEvents}');
+        _kv(ctx, S.versionsKept, '${plan.totalEvents}');
         if (plan.oldestRemainingAt != null && plan.newestRemainingAt != null) {
           _kv(
             ctx,
-            'Range',
+            S.range,
             '${_fmtDate(plan.oldestRemainingAt!)} → '
                 '${_fmtDate(plan.newestRemainingAt!)}',
           );
@@ -91,85 +89,71 @@ Future<void> showStorageOverviewModal(
 
       // ── Devices ──
       ctx.spaceVertical(px: 12);
-      ctx.createEl('p', text: 'Devices');
+      ctx.createEl('p', text: S.devices);
       if (devices.isEmpty) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'No devices have reported yet.',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc', text: S.noDevicesReported);
       } else {
         for (final d in devices) {
-          final suffix = d.isCurrent ? '  (this device)' : '';
-          final behind = d.behindBySeq > 0 ? '  ·  ${d.behindBySeq} behind' : '';
+          final suffix = d.isCurrent ? S.thisDeviceSuffix : '';
+          final behind = d.behindBySeq > 0 ? S.behindBy(d.behindBySeq) : '';
           ctx.createEl(
             'p',
             cls: 'rhyolite-setting-desc',
-            text: '${d.name}$suffix  —  seen ${_ago(d.lastSeen)}$behind',
+            text: S.deviceLine(d.name, suffix, _ago(d.lastSeen), behind),
           );
         }
       }
 
       // ── Restore points (server) ──
       ctx.spaceVertical(px: 12);
-      ctx.createEl('p', text: 'Restore points (server)');
+      ctx.createEl('p', text: S.restorePointsServer);
       if (restorePointsUnavailable) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'Unavailable — the server does not support restore points yet '
-              '(update the server, or this vault is offline).',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc',
+            text: S.restorePointsUnavailableText);
       } else if (restorePoints.isEmpty) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'None yet. Open Restore points… to create one; Pro vaults also '
-              'keep daily ones (7 newest).',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc', text: S.restorePointsNoneYet);
       } else {
-        _kv(ctx, 'Kept', '${restorePoints.length}');
+        _kv(ctx, S.kept, '${restorePoints.length}');
         final oldest =
             DateTime.fromMillisecondsSinceEpoch(restorePoints.last.createdAtMs);
         final newest =
             DateTime.fromMillisecondsSinceEpoch(restorePoints.first.createdAtMs);
-        _kv(ctx, 'Range', '${_fmtDate(oldest)} → ${_fmtDate(newest)}');
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'These hold on to older blobs, so some storage will not free '
-              'until they age out (or you clear them).',
-        );
+        _kv(ctx, S.range, '${_fmtDate(oldest)} → ${_fmtDate(newest)}');
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc', text: S.restorePointsHoldBlobs);
       }
 
       ctx.spaceVertical(px: 16);
       final actions = <ButtonSpec>[
-        ButtonSpec('Clean up storage…', () async {
+        ButtonSpec(S.cleanUpStorage, () async {
           ctx.close(null);
           await showStorageCleanupModal(plugin, engine);
         }),
-        ButtonSpec('Reclaim orphans…', () async {
+        ButtonSpec(S.reclaimOrphans, () async {
           ctx.close(null);
           await showOrphanSweepModal(plugin, engine);
         }),
-        ButtonSpec('Manage devices…', () async {
+        ButtonSpec(S.manageDevices, () async {
           ctx.close(null);
           await showDeviceManagementModal(plugin, engine);
         }),
       ];
       if (!restorePointsUnavailable) {
-        actions.add(ButtonSpec('Restore points…', () async {
+        actions.add(ButtonSpec(S.restorePointsAction, () async {
           ctx.close(null);
           await showBackupModal(plugin, engine);
         }));
       }
       if (restorePoints.isNotEmpty) {
-        actions.add(ButtonSpec('Clear restore points…', () async {
+        actions.add(ButtonSpec(S.clearRestorePointsAction, () async {
           ctx.close(null);
           await _clearRestorePoints(plugin, engine, restorePoints.length);
         }));
       }
-      actions.add(ButtonSpec('Close', () => ctx.close(null)));
+      actions.add(ButtonSpec(S.close, () => ctx.close(null)));
       ctx.buttonRow(actions);
       ctx.onEscape(() => ctx.close(null));
     },
@@ -186,31 +170,26 @@ Future<void> _clearRestorePoints(
   return showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3('Clear restore points');
+      ctx.h3(S.clearRestorePointsTitle);
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text: 'Drop all $count restore point(s)? You will no longer be able to '
-            'restore an earlier state. This frees the blobs they pin — run '
-            'Reclaim orphans afterwards to actually reclaim the space.',
+        text: S.clearRestorePointsBody(count),
       );
       ctx.spaceVertical(px: 12);
       ctx.buttonRow([
-        ButtonSpec('Clear', () async {
+        ButtonSpec(S.clearVerb, () async {
           ctx.close(null);
           try {
             final n = await engine.clearBackups();
-            if (n == null) {
-              showNotice('Not connected — nothing cleared.');
-            } else {
-              showNotice('Cleared $n restore point(s). Run Reclaim orphans to '
-                  'free the space.');
-            }
+            showNotice(n == null
+                ? S.notConnectedNothingCleared
+                : S.clearedRestorePoints(n));
           } catch (e) {
-            showNotice('Failed to clear restore points: $e');
+            showNotice(S.clearRestorePointsFailed(e));
           }
         }, variant: ButtonVariant.destructive),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },
@@ -238,8 +217,8 @@ String _fmtDate(DateTime d) {
 
 String _ago(DateTime t) {
   final d = DateTime.now().difference(t);
-  if (d.inMinutes < 1) return 'just now';
-  if (d.inMinutes < 60) return '${d.inMinutes}m ago';
-  if (d.inHours < 24) return '${d.inHours}h ago';
-  return '${d.inDays}d ago';
+  if (d.inMinutes < 1) return S.justNow;
+  if (d.inMinutes < 60) return S.minutesAgo(d.inMinutes);
+  if (d.inHours < 24) return S.hoursAgo(d.inHours);
+  return S.daysAgo(d.inDays);
 }

@@ -505,6 +505,16 @@ class DiskReconciler {
     }
 
     final bytes = await io.readFile(absPath);
+
+    // Don't create sync state for a 0-byte file that isn't already tracked
+    // as a live (non-tombstone) record. Obsidian mints empty notes on "new
+    // note"; syncing them just churns records. A later edit that fills the
+    // file promotes it into sync; an existing live file truncated to empty
+    // still syncs (current is live), so real deletions/truncations propagate.
+    if (bytes.isEmpty && (current == null || current.tombstone)) {
+      return false;
+    }
+
     final monitor = bytes.length >= _transferMonitorMinBytes;
     final ({String manifestHash, List<String> chunkHashes}) result;
     try {
@@ -583,6 +593,13 @@ class DiskReconciler {
     final swTotal = Stopwatch()..start();
     _log.info('text reconcile begin path=$relPath');
     final bytes = await io.readFile(absPath);
+
+    // Skip empty new/tombstoned files — see _reconcileBinary. No Fugue seed
+    // for a 0-byte note until it actually has content.
+    if (bytes.isEmpty && (current == null || current.tombstone)) {
+      return false;
+    }
+
     final newText = utf8.decode(bytes, allowMalformed: true);
     _log.info('text reconcile read path=$relPath chars=${newText.length}');
 

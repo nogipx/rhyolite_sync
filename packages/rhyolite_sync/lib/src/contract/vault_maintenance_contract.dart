@@ -72,6 +72,59 @@ class SweepOrphanBlobsResponse implements IRpcSerializable {
       };
 }
 
+/// Reclaims tombstone rows (deleted files) from the vault's state once every
+/// ACTIVE device has pulled past them — i.e. the delete has propagated to
+/// everyone, so the marker is no longer needed. Server-authoritative: the server
+/// reads device heads itself (no client can under-report and cause a premature
+/// delete). Content recovery of a deleted file is via history / restore points,
+/// not this marker.
+class SweepStableTombstonesRequest implements IRpcSerializable {
+  const SweepStableTombstonesRequest({required this.vaultId, this.dryRun = true});
+
+  final String vaultId;
+  final bool dryRun;
+
+  factory SweepStableTombstonesRequest.fromJson(Map<String, dynamic> json) =>
+      SweepStableTombstonesRequest(
+        vaultId: json['vaultId'] as String,
+        dryRun: (json['dryRun'] as bool?) ?? true,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {'vaultId': vaultId, 'dryRun': dryRun};
+}
+
+class SweepStableTombstonesResponse implements IRpcSerializable {
+  const SweepStableTombstonesResponse({
+    required this.totalTombstones,
+    required this.stableTombstones,
+    required this.deletedTombstones,
+  });
+
+  /// Deleted-file (tombstone-only) records currently held.
+  final int totalTombstones;
+
+  /// Of those, how many every active device has already seen — reclaimable.
+  final int stableTombstones;
+
+  /// Actually deleted (0 on a dry run).
+  final int deletedTombstones;
+
+  factory SweepStableTombstonesResponse.fromJson(Map<String, dynamic> json) =>
+      SweepStableTombstonesResponse(
+        totalTombstones: (json['totalTombstones'] as num?)?.toInt() ?? 0,
+        stableTombstones: (json['stableTombstones'] as num?)?.toInt() ?? 0,
+        deletedTombstones: (json['deletedTombstones'] as num?)?.toInt() ?? 0,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'totalTombstones': totalTombstones,
+        'stableTombstones': stableTombstones,
+        'deletedTombstones': deletedTombstones,
+      };
+}
+
 @RpcService(
   name: 'RhyoliteVaultMaintenance',
   transferMode: RpcDataTransferMode.codec,
@@ -80,6 +133,12 @@ abstract class IVaultMaintenanceContract {
   @RpcMethod.unary(name: 'sweepOrphanBlobs')
   Future<SweepOrphanBlobsResponse> sweepOrphanBlobs(
     SweepOrphanBlobsRequest request, {
+    RpcContext? context,
+  });
+
+  @RpcMethod.unary(name: 'sweepStableTombstones')
+  Future<SweepStableTombstonesResponse> sweepStableTombstones(
+    SweepStableTombstonesRequest request, {
     RpcContext? context,
   });
 }

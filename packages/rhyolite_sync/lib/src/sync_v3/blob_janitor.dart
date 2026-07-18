@@ -50,6 +50,20 @@ class BlobJanitor {
     );
   }
 
+  /// Reclaims tombstone rows (deleted files) from server state once every active
+  /// device has pulled past them — the delete has propagated to everyone, so the
+  /// marker is no longer needed (content stays recoverable via history / restore
+  /// points). Server-authoritative (it reads device heads itself). [dryRun]
+  /// (default) only reports; pass false to delete. Null when not connected.
+  Future<SweepStableTombstonesResponse?> sweepStableTombstones(
+      {bool dryRun = true}) async {
+    final caller = maintenanceCaller;
+    if (caller == null) return null;
+    return caller.sweepStableTombstones(
+      SweepStableTombstonesRequest(vaultId: vaultId, dryRun: dryRun),
+    );
+  }
+
   /// Maximum events fetched per scan. For typical Obsidian vaults a
   /// single batch is sufficient. Larger vaults would need pagination —
   /// not yet implemented.

@@ -1,6 +1,7 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import '../i18n/i18n.dart';
 import 'device_management_modal.dart';
 
 const _defaultDays = 30;
@@ -19,7 +20,7 @@ Future<void> showStorageCleanupModal(
 ) async {
   final janitor = engine is StateSyncEngine ? engine.createBlobJanitor() : null;
   if (janitor == null) {
-    showNotice('Storage cleanup not available — engine is not connected');
+    showNotice(S.storageCleanupUnavailable);
     return;
   }
 
@@ -31,12 +32,12 @@ Future<void> showStorageCleanupModal(
   try {
     plan = await janitor.scan(olderThanDays: daysSelected);
   } catch (e) {
-    showNotice('Storage cleanup scan failed: $e');
+    showNotice(S.cleanupScanFailed(e));
     return;
   }
 
   if (plan.isEmpty) {
-    showNotice('Nothing to clean up older than $daysSelected days.');
+    showNotice(S.nothingToCleanOlderThan(daysSelected));
     return;
   }
 
@@ -47,19 +48,15 @@ Future<void> showStorageCleanupModal(
     final result = await janitor.execute(plan);
     if (result.hadFailures) {
       showNotice(
-        'Cleanup incomplete: ${result.deletedBlobs} blobs deleted, '
-        '${result.failedBlobs} failed — history kept so a re-run can retry.'
-        '${result.firstError != null ? '\n${result.firstError}' : ''}',
+        S.cleanupIncomplete(result.deletedBlobs, result.failedBlobs) +
+            (result.firstError != null ? '\n${result.firstError}' : ''),
         timeoutMs: 12000,
       );
     } else {
-      showNotice(
-        'Cleanup done: ${result.deletedEvents} history entries and '
-        '${result.deletedBlobs} blobs deleted.',
-      );
+      showNotice(S.cleanupDone(result.deletedEvents, result.deletedBlobs));
     }
   } catch (e) {
-    showNotice('Storage cleanup failed: $e');
+    showNotice(S.cleanupFailed(e));
   }
 }
 
@@ -67,24 +64,14 @@ Future<int?> _askDays(PluginHandle plugin) {
   return showModalWith<int?>(
     plugin,
     build: (ctx) {
-      ctx.h3('Storage Cleanup');
+      ctx.h3(S.storageCleanupTitle);
       ctx.spaceVertical(px: 8);
 
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text:
-            'Permanently remove history entries older than the chosen '
-            'number of days. Blobs referenced only by those entries are '
-            'also deleted from blob storage.',
-      );
+      ctx.createEl('p',
+          cls: 'rhyolite-setting-desc', text: S.storageCleanupDescription);
       ctx.spaceVertical(px: 12);
 
-      ctx.createEl(
-        'p',
-        text: 'Delete events older than (days) — use 0 to clear all history '
-            'that every active device has already synced:',
-      );
+      ctx.createEl('p', text: S.deleteEventsOlderThanLabel);
       final input = ctx.input(
         type: 'number',
         placeholder: '$_defaultDays',
@@ -95,15 +82,15 @@ Future<int?> _askDays(PluginHandle plugin) {
         final text = ctx.valueOf(input).trim();
         final days = int.tryParse(text) ?? _defaultDays;
         if (days < _minDays || days > _maxDays) {
-          ctx.showError('Days must be between $_minDays and $_maxDays.');
+          ctx.showError(S.daysMustBeBetween(_minDays, _maxDays));
           return;
         }
         ctx.close(days);
       }
 
       ctx.buttonRow([
-        ButtonSpec('Scan', doScan, variant: ButtonVariant.primary),
-        ButtonSpec('Cancel', () => ctx.close(null)),
+        ButtonSpec(S.scanAction, doScan, variant: ButtonVariant.primary),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx
         ..onEnter(input, doScan)
@@ -120,108 +107,80 @@ Future<bool?> _confirmDeletion(
   return showModalWith<bool>(
     plugin,
     build: (ctx) {
-      ctx.h3('Confirm cleanup');
+      ctx.h3(S.confirmCleanupTitle);
       ctx.spaceVertical(px: 12);
-      ctx.createEl(
-        'p',
-        text: 'Events to delete: '
-            '${plan.eventsToDelete} of ${plan.totalEvents}',
-      );
-      ctx.createEl(
-        'p',
-        text: 'Orphan blobs to delete: ${plan.orphanBlobCount}',
-      );
+      ctx.createEl('p',
+          text: S.eventsToDelete(plan.eventsToDelete, plan.totalEvents));
+      ctx.createEl('p', text: S.orphanBlobsToDelete(plan.orphanBlobCount));
       if (plan.oldestDeletedAt != null) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'Oldest entry to delete: ${_fmt(plan.oldestDeletedAt!)}',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc',
+            text: S.oldestEntryToDelete(_fmt(plan.oldestDeletedAt!)));
       }
       if (plan.newestDeletedAt != null) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'Newest entry to delete: ${_fmt(plan.newestDeletedAt!)}',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc',
+            text: S.newestEntryToDelete(_fmt(plan.newestDeletedAt!)));
       }
       if (plan.oldestRemainingAt != null) {
         ctx.spaceVertical(px: 8);
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'Oldest entry remaining: ${_fmt(plan.oldestRemainingAt!)}',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc',
+            text: S.oldestEntryRemaining(_fmt(plan.oldestRemainingAt!)));
       }
 
       // Device-head safety section. Always surface this so the user
       // understands what's protecting their data (or what's missing).
       ctx.spaceVertical(px: 16);
-      ctx.createEl('p', text: 'Device safety:');
+      ctx.createEl('p', text: S.deviceSafety);
       if (plan.knownDevices.isEmpty) {
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: 'No devices have reported a history head yet. Only the '
-              'age cutoff is protecting events from deletion.',
-        );
+        ctx.createEl('p',
+            cls: 'rhyolite-setting-desc', text: S.noDeviceHeadYet);
       } else {
         for (final h in plan.knownDevices) {
           final age = DateTime.now().toUtc().millisecondsSinceEpoch -
               h.updatedAtMs;
           final ageDays = (age / 86400000).floor();
-          final ageLabel = ageDays == 0
-              ? '<1 day ago'
-              : '$ageDays day${ageDays == 1 ? '' : 's'} ago';
+          final ageLabel =
+              ageDays == 0 ? S.ageLessThanDay : S.cleanupDaysAgo(ageDays);
           final tag = plan.activeDeviceCount > 0 && ageDays <= 30
-              ? '[active]'
-              : '[stale]';
+              ? S.activeTag
+              : S.staleTag;
           ctx.createEl(
             'p',
             cls: 'rhyolite-setting-desc',
-            text: '$tag  ${h.deviceId.substring(0, 8)}…  '
-                'head=${h.headSeq}  ($ageLabel)',
+            text: S.deviceHeadLine(
+                tag, h.deviceId.substring(0, 8), h.headSeq, ageLabel),
           );
         }
         if (plan.minSafeHead != null && plan.eventsProtectedByHead > 0) {
-          ctx.createEl(
-            'p',
-            cls: 'rhyolite-setting-desc',
-            text:
-                'Protected by min head ${plan.minSafeHead}: ${plan.eventsProtectedByHead} '
-                'event(s) older than the cutoff would be deletable but are '
-                'kept because at least one active device has not seen them.',
-          );
+          ctx.createEl('p',
+              cls: 'rhyolite-setting-desc',
+              text: S.protectedByMinHead(
+                  plan.minSafeHead!, plan.eventsProtectedByHead));
         } else if (plan.activeDeviceCount == 0) {
-          ctx.createEl(
-            'p',
-            cls: 'rhyolite-setting-desc',
-            text: 'No devices considered active (last seen within 30 days). '
-                'Only the age cutoff applies.',
-          );
+          ctx.createEl('p',
+              cls: 'rhyolite-setting-desc',
+              text: S.noActiveDevicesForCleanup);
         }
       }
 
       ctx.spaceVertical(px: 12);
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: 'This cannot be undone.',
-      );
+      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.cannotBeUndone);
       ctx.spaceVertical(px: 8);
       ctx.buttonRow([
         ButtonSpec(
-          'Delete',
+          S.delete,
           () => ctx.close(true),
           variant: ButtonVariant.destructive,
         ),
         // Jump to device management to forget a stale device that's pinning
         // events, then re-run cleanup.
-        ButtonSpec('Manage devices…', () async {
+        ButtonSpec(S.manageDevices, () async {
           ctx.close(false);
           await showDeviceManagementModal(plugin, engine);
         }),
-        ButtonSpec('Cancel', () => ctx.close(false)),
+        ButtonSpec(S.cancel, () => ctx.close(false)),
       ]);
       ctx.onEscape(() => ctx.close(false));
     },

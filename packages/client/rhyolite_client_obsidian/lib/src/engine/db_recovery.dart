@@ -3,6 +3,8 @@ import 'dart:js_util' as jsu;
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 
+import '../i18n/i18n.dart';
+
 /// Shows a modal informing the user that the local database is corrupted,
 /// and offers to delete it so it can be recreated on next reload.
 Future<void> showDbCorruptionModal(
@@ -13,30 +15,20 @@ Future<void> showDbCorruptionModal(
   final confirmed = await showModalWith<bool>(
     plugin,
     build: (ctx) {
-      ctx.h3('Database Corrupted');
+      ctx.h3(S.dbRecoveryTitle);
       ctx.spaceVertical(px: 12);
-      ctx.createEl(
-        'p',
-        text: 'The local sync database is corrupted and cannot be used.',
-      );
+      ctx.createEl('p', text: S.dbCorruptedText);
       ctx.spaceVertical(px: 8);
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text:
-            'This can happen after a crash or an interrupted write. '
-            'Resetting the database will delete local cached data — '
-            'your files and server data are not affected. '
-            'After reset, the plugin will reload and re-sync from the server.',
-      );
+      ctx.createEl('p',
+          cls: 'rhyolite-setting-desc', text: S.dbRecoveryDescription);
       ctx.spaceVertical(px: 16);
       ctx.buttonRow([
         ButtonSpec(
-          'Reset Database',
+          S.resetDatabase,
           () => ctx.close(true),
           variant: ButtonVariant.destructive,
         ),
-        ButtonSpec('Cancel', () => ctx.close(false)),
+        ButtonSpec(S.cancel, () => ctx.close(false)),
       ]);
       ctx.onEscape(() => ctx.close(false));
     },

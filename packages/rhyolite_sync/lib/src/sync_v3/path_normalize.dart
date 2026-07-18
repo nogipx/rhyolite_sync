@@ -2,8 +2,9 @@ import 'package:unorm_dart/unorm_dart.dart' as unorm;
 
 /// NFC-normalizes a vault-relative path.
 ///
-/// A file's identity is `Uuid().v5(vaultId, relPath)` (SHA-1 over the path
-/// bytes) and its stored FileState.path is written back to disk verbatim.
+/// A file's identity is derived from its relative path — `HMAC-SHA256(recordIdKey,
+/// "vaultId|relPath")` once a vault key exists (keyless fallback: `Uuid().v5`) —
+/// and its stored FileState.path is written back to disk verbatim.
 /// Filesystems disagree on Unicode form: macOS/APFS and iOS commonly return
 /// decomposed (NFD) filenames, while Linux/Windows keep whatever bytes they
 /// were given. Without normalization the *same* logical file — e.g. a Russian

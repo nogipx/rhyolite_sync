@@ -40,7 +40,10 @@ class SyncServerModule extends RpcServerModule {
     final notifyRepository = container.get<INotifyRepository>();
 
     final contracts = <RpcResponderContract>[
-      RhyoliteBlobResponder(client: blobClient),
+      // dataClient enables the backup delete-guard: a client-driven blob delete
+      // is refused for chunks a retained snapshot pins. No-op without backups
+      // (self-host / free), so it's safe in the shared module.
+      RhyoliteBlobResponder(client: blobClient, dataClient: dataClient),
       // Orphan-blob sweep: reads state + history to build the live set, lists
       // the shared blob bucket, reclaims the difference (dry-run by default).
       RhyoliteVaultMaintenanceResponder(
@@ -70,6 +73,9 @@ class SyncServerModule extends RpcServerModule {
         recordSizeLimit: 3 << 20,
       ),
       HistoryResponder(client: dataClient),
+      // Read-only backup access (notes keyspace). Snapshots are captured by the
+      // managed edition; self-host simply has none, so this lists empty.
+      RhyoliteBackupResponder(dataClient: dataClient),
       NotifySubscribeResponder(
         subscriber: INotifySubscriber.repository(notifyRepository),
       ),

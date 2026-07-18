@@ -1,6 +1,7 @@
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
+import 'backup_modal.dart';
 import 'device_management_modal.dart';
 import 'orphan_sweep_modal.dart';
 import 'storage_cleanup_modal.dart';
@@ -38,6 +39,13 @@ Future<void> showStorageOverviewModal(
   try {
     devices = await registry?.call() ?? const [];
   } catch (_) {}
+  List<BackupSnapshotInfo> restorePoints = const [];
+  var restorePointsUnavailable = false;
+  try {
+    restorePoints = await engine.listBackups();
+  } catch (_) {
+    restorePointsUnavailable = true;
+  }
 
   return showModalWith<void>(
     plugin,
@@ -102,8 +110,40 @@ Future<void> showStorageOverviewModal(
         }
       }
 
+      // ── Restore points (server) ──
+      ctx.spaceVertical(px: 12);
+      ctx.createEl('p', text: 'Restore points (server)');
+      if (restorePointsUnavailable) {
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: 'Unavailable — the server does not support restore points yet '
+              '(update the server, or this vault is offline).',
+        );
+      } else if (restorePoints.isEmpty) {
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: 'None yet. Open Restore points… to create one; Pro vaults also '
+              'keep daily ones (7 newest).',
+        );
+      } else {
+        _kv(ctx, 'Kept', '${restorePoints.length}');
+        final oldest =
+            DateTime.fromMillisecondsSinceEpoch(restorePoints.last.createdAtMs);
+        final newest =
+            DateTime.fromMillisecondsSinceEpoch(restorePoints.first.createdAtMs);
+        _kv(ctx, 'Range', '${_fmtDate(oldest)} → ${_fmtDate(newest)}');
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: 'These hold on to older blobs, so some storage will not free '
+              'until they age out (or you clear them).',
+        );
+      }
+
       ctx.spaceVertical(px: 16);
-      ctx.buttonRow([
+      final actions = <ButtonSpec>[
         ButtonSpec('Clean up storage…', () async {
           ctx.close(null);
           await showStorageCleanupModal(plugin, engine);
@@ -116,7 +156,61 @@ Future<void> showStorageOverviewModal(
           ctx.close(null);
           await showDeviceManagementModal(plugin, engine);
         }),
-        ButtonSpec('Close', () => ctx.close(null)),
+      ];
+      if (!restorePointsUnavailable) {
+        actions.add(ButtonSpec('Restore points…', () async {
+          ctx.close(null);
+          await showBackupModal(plugin, engine);
+        }));
+      }
+      if (restorePoints.isNotEmpty) {
+        actions.add(ButtonSpec('Clear restore points…', () async {
+          ctx.close(null);
+          await _clearRestorePoints(plugin, engine, restorePoints.length);
+        }));
+      }
+      actions.add(ButtonSpec('Close', () => ctx.close(null)));
+      ctx.buttonRow(actions);
+      ctx.onEscape(() => ctx.close(null));
+    },
+  );
+}
+
+/// Confirms, then drops all restore points to release their blob pin. Space is
+/// reclaimed by a subsequent orphan sweep, not immediately — so we point there.
+Future<void> _clearRestorePoints(
+  PluginHandle plugin,
+  StateSyncEngine engine,
+  int count,
+) async {
+  return showModalWith<void>(
+    plugin,
+    build: (ctx) {
+      ctx.h3('Clear restore points');
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: 'Drop all $count restore point(s)? You will no longer be able to '
+            'restore an earlier state. This frees the blobs they pin — run '
+            'Reclaim orphans afterwards to actually reclaim the space.',
+      );
+      ctx.spaceVertical(px: 12);
+      ctx.buttonRow([
+        ButtonSpec('Clear', () async {
+          ctx.close(null);
+          try {
+            final n = await engine.clearBackups();
+            if (n == null) {
+              showNotice('Not connected — nothing cleared.');
+            } else {
+              showNotice('Cleared $n restore point(s). Run Reclaim orphans to '
+                  'free the space.');
+            }
+          } catch (e) {
+            showNotice('Failed to clear restore points: $e');
+          }
+        }, variant: ButtonVariant.destructive),
+        ButtonSpec('Cancel', () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
     },

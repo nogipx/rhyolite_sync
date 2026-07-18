@@ -8,6 +8,7 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_client_account/rhyolite_client_account.dart'
     hide VaultInfo;
 import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
+import 'package:rhyolite_client_obsidian/src/engine/backup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/diagnostics_logging.dart';
@@ -1058,6 +1059,13 @@ void main() {
             name: 'Show version history for current file',
             callback: () {
               showFileVersionModal(plugin, engine);
+            },
+          );
+          plugin.addCommand(
+            id: 'rhyolite-restore-backup',
+            name: 'Restore from backup',
+            callback: () {
+              showBackupModal(plugin, engine);
             },
           );
 

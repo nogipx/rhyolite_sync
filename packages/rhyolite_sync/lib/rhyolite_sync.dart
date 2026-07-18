@@ -16,6 +16,7 @@
 library;
 
 // --- Wire protocol (contracts + DTOs) ----------------------------------
+export 'src/contract/backup_contract.dart';
 export 'src/contract/blob_contract.dart';
 export 'src/contract/history_contract.dart';
 export 'src/contract/vault_maintenance_contract.dart';
@@ -65,6 +66,7 @@ export 'src/engine/sync_engine_event.dart';
 export 'src/engine/vault_config.dart';
 export 'src/sync_v3/blob_janitor.dart';
 export 'src/sync_v3/chunked_blob_io.dart';
+export 'src/sync_v3/content_materializer.dart';
 export 'src/sync_v3/file_state.dart';
 export 'src/sync_v3/file_state_store.dart';
 export 'src/sync_v3/file_version_viewer.dart';
@@ -93,6 +95,8 @@ export 'src/use_cases/conflict_list_use_case.dart';
 export 'src/use_cases/device_registry_use_case.dart';
 export 'src/use_cases/diff_text_use_case.dart';
 export 'src/use_cases/export_vault_use_case.dart';
+export 'src/use_cases/inspect_backup_use_case.dart';
 export 'src/use_cases/repair_vault_use_case.dart';
+export 'src/use_cases/restore_backup_use_case.dart';
 export 'src/use_cases/vault_stats_use_case.dart';
 export 'src/use_cases/verify_blobs_use_case.dart';

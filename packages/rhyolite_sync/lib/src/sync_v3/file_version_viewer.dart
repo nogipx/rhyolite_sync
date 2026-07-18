@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
@@ -59,19 +58,9 @@ class FileVersionViewer {
       return null;
     }
     if (bytes == null) return null;
-
-    if (const FileTypeDetector().isText(entry.path)) {
-      final fugue = FugueStore.tryDecodeBlob(bytes);
-      if (fugue != null) {
-        return Uint8List.fromList(utf8.encode(fugue.values.join()));
-      }
-      // A pre-Fugue Sequence blob is not document text — decoding it here
-      // would show CBOR/JSON garbage. Report the version as unavailable.
-      if (FugueStore.isLegacySequenceBlob(bytes)) return null;
-      // Otherwise a genuine pre-Fugue plain-text blob → already the
-      // document; fall through and return the bytes as-is.
-    }
-    return bytes;
+    // Text is stored as the Fugue serialization; a legacy Sequence blob decodes
+    // to null (unavailable). Shared with backup restore/diff via one helper.
+    return materializeFileContent(bytes, entry.path);
   }
 
   /// Current on-disk bytes for [relPath], or null when the file no longer

@@ -1,3 +1,34 @@
+## [3.6.0] - 2026-07-18
+
+### Features
+
+- in-place restore UI — explorer shows only changed files, per-file + bulk restore (obsidian)
+- restore in place (not to a folder) + per-file restoreBackupFile (core)
+- reuse the history git-style diff view for restore-point diffs (obsidian)
+- storage overview — 'Restore points…' entry button + distinguish unavailable vs empty (obsidian)
+- restore-point explorer — collapsible tree reusing Obsidian's native tree UI (tree-item/collapse-icon/setIcon), click any file for detail/diff (obsidian)
+- restore point details — file tree + per-file text diff (obsidian)
+- InspectBackupUseCase — per-file status vs current + engine inspectBackup/backupFileContent (core)
+- backup modal — 'Create restore point now' + per-snapshot delete (obsidian)
+- captureBackup + deleteBackup RPC + engine methods (core)
+- storage overview shows restore points + 'Clear restore points' (obsidian)
+- clearBackups RPC + engine.clearBackups() — release restore-point pin (core)
+- 'Restore from backup' command + snapshot picker modal (obsidian)
+- backup restore — RestoreBackupUseCase + engine listBackups/restoreBackup (core)
+
+### Bug Fixes
+
+- resolve concurrent versions by LWW in backup inspect/restore, not 'conflict' (core)
+- materialise text (Fugue -> plain) for backup restore + diff (core)
+- decide diff binary-ness by extension (FileTypeDetector), not strict utf8 decode (obsidian)
+
+### Other
+
+- bump plugin to 3.6.0 (obsidian)
+- drop 'conflict' status from restore-point UI (resolved by LWW now) (obsidian)
+- fileId is keyed HMAC-SHA256, not v5/SHA-1 (comment drift) (core)
+
+
 ## [3.5.4] - 2026-07-17
 
 ### Bug Fixes

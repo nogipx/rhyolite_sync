@@ -1408,6 +1408,139 @@ class StateSyncEngine implements ISyncEngine {
     );
   }
 
+  /// Server-side backup snapshots for this vault, newest first. Empty when
+  /// offline or on a backend without backups (self-host / free).
+  Future<List<BackupSnapshotInfo>> listBackups() async {
+    final ep = endpoint;
+    if (ep == null) return const [];
+    final resp = await BackupContractCaller(ep)
+        .listBackups(ListBackupsRequest(vaultId: config.vaultId));
+    return resp.snapshots;
+  }
+
+  /// Restore a whole snapshot IN PLACE: every file whose content differs from
+  /// the current vault is written back to its original path (identical files are
+  /// skipped). Each write syncs as a normal edit and stays reversible via file
+  /// history — no scratch folder. Null if not started.
+  Future<RestoreReport?> restoreBackup(
+    String snapshotId, {
+    void Function(int completed, int total)? onProgress,
+  }) async {
+    final ep = endpoint;
+    final codec = _recordCodec;
+    final chunkedIO = _newChunkedIO();
+    final store = _store;
+    if (ep == null || codec == null || chunkedIO == null || store == null) {
+      return null;
+    }
+    final resp = await BackupContractCaller(ep).getBackup(
+      GetBackupRequest(vaultId: config.vaultId, snapshotId: snapshotId),
+    );
+    final current = _currentEffectiveBlobByPath();
+    return RestoreBackupUseCase(
+      records: resp.records,
+      decodeRecord: (r) async => (await codec.decode(r)).value,
+      downloadContent: (ref, path) async {
+        final bytes = await chunkedIO.download(ref);
+        return bytes == null ? null : materializeFileContent(bytes, path);
+      },
+      targetIO: io,
+      targetRoot: vaultPath,
+      currentLiveBlobByPath: current,
+    )(onProgress: onProgress);
+  }
+
+  /// Restore ONE file from a restore point in place — write the frozen version
+  /// back to its original path. Syncs as a normal edit (reversible via history).
+  /// Returns false when offline or the blob is unavailable.
+  Future<bool> restoreBackupFile(String blobRef, String path) async {
+    final bytes = await backupFileContent(blobRef, path);
+    if (bytes == null) return false;
+    await io.writeFile('$vaultPath/$path', bytes);
+    return true;
+  }
+
+  /// Capture a restore point of the current server state right now (bypasses the
+  /// 24h auto-cadence), applying the same retention. Null when offline.
+  Future<BackupSnapshotInfo?> captureBackup() async {
+    final ep = endpoint;
+    if (ep == null) return null;
+    final resp = await BackupContractCaller(ep)
+        .captureBackup(CaptureBackupRequest(vaultId: config.vaultId));
+    return resp.snapshot;
+  }
+
+  /// Delete one restore point, releasing any blob it alone pinned. Returns false
+  /// when offline or when the snapshot no longer exists.
+  Future<bool> deleteBackup(String snapshotId) async {
+    final ep = endpoint;
+    if (ep == null) return false;
+    final resp = await BackupContractCaller(ep).deleteBackup(
+      DeleteBackupRequest(vaultId: config.vaultId, snapshotId: snapshotId),
+    );
+    return resp.deleted;
+  }
+
+  /// Inspect a restore point against the current vault: per-file status (same /
+  /// changed / restores-a-deleted-file / tombstoned) for a tree + diff preview.
+  /// Null when offline or not started. Content is not decrypted — matching is by
+  /// cleartext fileId + blobRef; only paths are decoded.
+  Future<BackupInspection?> inspectBackup(String snapshotId) async {
+    final ep = endpoint;
+    final codec = _recordCodec;
+    final store = _store;
+    if (ep == null || codec == null || store == null) return null;
+    final resp = await BackupContractCaller(ep).getBackup(
+      GetBackupRequest(vaultId: config.vaultId, snapshotId: snapshotId),
+    );
+    final current = _currentEffectiveBlobByPath();
+    return InspectBackupUseCase(
+      records: resp.records,
+      decodeRecord: (r) async => (await codec.decode(r)).value,
+      currentLiveBlobByPath: current,
+    )();
+  }
+
+  /// Readable file content of a restore point's blob by its manifest ref — used
+  /// to show a per-file diff of a snapshot version. Materialises text (the blob
+  /// is the Fugue serialization, not the document), so the caller gets the same
+  /// bytes a restore would write. Null when offline or the blob is unavailable.
+  Future<Uint8List?> backupFileContent(String blobRef, String path) async {
+    final chunkedIO = _newChunkedIO();
+    if (chunkedIO == null) return null;
+    final bytes = await chunkedIO.download(blobRef);
+    return bytes == null ? null : materializeFileContent(bytes, path);
+  }
+
+  /// path -> effective (max-HLC, LWW) blobRef of every live file now — the same
+  /// resolution the engine materialises on disk. Resolving per path (not
+  /// `store.all`, which drops multi-value registers) means a currently-
+  /// concurrent binary file still maps to one version instead of looking absent.
+  Map<String, String> _currentEffectiveBlobByPath() {
+    final store = _store;
+    if (store == null) return const {};
+    final winners = <String, FileState>{};
+    for (final fs in store.allValuesFlat) {
+      final cur = winners[fs.path];
+      if (cur == null || fs.hlc > cur.hlc) winners[fs.path] = fs;
+    }
+    return {
+      for (final e in winners.entries)
+        if (!e.value.tombstone) e.key: e.value.blobRef,
+    };
+  }
+
+  /// Drop ALL restore points, releasing their blob pin so the freed blobs can be
+  /// reclaimed by an orphan sweep. An escape valve for tight storage. Returns the
+  /// number of snapshots dropped, or null when offline.
+  Future<int?> clearBackups() async {
+    final ep = endpoint;
+    if (ep == null) return null;
+    final resp = await BackupContractCaller(ep)
+        .clearBackups(ClearBackupsRequest(vaultId: config.vaultId));
+    return resp.clearedSnapshots;
+  }
+
   IStateConflictResolver _newResolver() {
     final chunkedIO = _newChunkedIO();
     final factory = _resolverFactory;

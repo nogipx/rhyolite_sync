@@ -243,15 +243,30 @@ class StateConflictResolver implements IStateConflictResolver {
       return StateMergeMerged(merged: winner, newBlobRef: winner.blobRef);
     }
 
-    // Tombstone vs edit: add-wins, with the deleter's "tombstone marker"
-    // surfaced as a conflict-copy file for visibility.
+    // Tombstone vs edit: add-wins by default (a concurrent edit beats a
+    // delete), surfacing the deleter's marker as a conflict-copy file.
+    //
+    // BUT the "edit" can be an illusion. A peer that still had the file on disk
+    // when another device deleted it re-observes it as a live value that is
+    // byte-identical to the last converged version — its blobRef equals the LCA
+    // `lastSyncedBlobRef`. The delete causally follows that exact version, so it
+    // must win; otherwise a rename/move (modelled as tombstone(old path) +
+    // create(new path)) resurrects the old path on every peer that hasn't
+    // applied the delete yet. Only when the live side GENUINELY diverged from
+    // the LCA (blobRef != LCA) is it a real edit-vs-delete race → add-wins.
+    // Unknown/empty LCA → keep the safe add-wins default (never delete data we
+    // cannot prove is just a stale copy).
     if (local.tombstone != remote.tombstone) {
-      final winner = local.tombstone ? remote : local;
-      final loser = local.tombstone ? local : remote;
+      final tomb = local.tombstone ? local : remote;
+      final live = local.tombstone ? remote : local;
+      final lca = baseRef ?? store.lastSyncedBlobRefFor(local.fileId);
+      if (lca != null && lca.isNotEmpty && live.blobRef == lca) {
+        return StateMergeMerged(merged: tomb, newBlobRef: tomb.blobRef);
+      }
       return StateMergeConflictCopy(
-        winner: winner,
-        loser: loser,
-        suggestedCopyPath: _conflictCopyPath(winner.path, loser.hlc),
+        winner: live,
+        loser: tomb,
+        suggestedCopyPath: _conflictCopyPath(live.path, tomb.hlc),
       );
     }
 

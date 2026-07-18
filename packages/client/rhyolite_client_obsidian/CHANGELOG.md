@@ -1,3 +1,15 @@
+## [3.7.1] - 2026-07-19
+
+### Bug Fixes
+
+- a delete no longer resurrects a peer's stale on-disk copy (core)
+
+### Other
+
+- bump plugin to 3.7.1 (obsidian)
+- correct restore-points comment — manual works for free, only auto-capture is Pro (obsidian)
+
+
 ## [3.7.0] - 2026-07-18
 
 ### Features

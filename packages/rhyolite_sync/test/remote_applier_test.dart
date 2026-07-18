@@ -411,4 +411,94 @@ void main() {
       expect(copyContents, containsAll(<String>{'version A', 'version B'}));
     });
   });
+
+  group('RemoteApplier — a delete is not resurrected by a stale on-disk copy',
+      () {
+    test(
+        'text: converged file + concurrent tombstone -> deleted, not '
+        'resurrected/duplicated', () async {
+      final f = await _newApplier();
+      final fileId = f.fileIdFor('note.md');
+
+      // Step 1: a text file converges here — Fugue blob uploaded, projected to
+      // disk, LCA recorded (mirrors a normal pull/materialise).
+      final seq = FugueTextSync.seedFromText('hello world');
+      final blob = FugueStore.encodeBlob(seq);
+      final up = await f.builder()!.upload(blob, <String>{});
+      final live = FileState(
+        fileId: fileId,
+        path: 'note.md',
+        blobRef: up.manifestHash,
+        sizeBytes: blob.length,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: up.chunkHashes,
+      );
+      await f.applier.apply(
+          fileId, [await _record(f.codec, live, 1)], _UnusedResolver());
+      expect(utf8.decode(f.io.files['$_vaultPath/note.md']!), 'hello world');
+      expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash);
+
+      // Step 2: another device deleted the file (moved it away). The incoming
+      // tombstone is concurrent with our still-live value (its causal context
+      // doesn't cover ours), and our on-disk copy is unchanged since the LCA —
+      // a stale copy, not a concurrent edit.
+      final tomb = FileState(
+        fileId: fileId,
+        path: 'note.md',
+        blobRef: '',
+        sizeBytes: 0,
+        hlc: Hlc(500, 0, 'device-B'),
+        tombstone: true,
+      );
+      await f.applier.apply(
+          fileId, [await _record(f.codec, tomb, 2)], _UnusedResolver());
+
+      expect(f.io.files.containsKey('$_vaultPath/note.md'), isFalse,
+          reason: 'the stale on-disk copy must be deleted, not resurrected');
+      expect(f.store.get(fileId)?.tombstone, isTrue,
+          reason: 'register collapses to a tombstone');
+    });
+
+    test(
+        'binary: converged file + concurrent tombstone -> deleted, not '
+        'resurrected', () async {
+      final f = await _newApplier();
+      final fileId = f.fileIdFor('photo.bin'); // non-text -> binary resolver
+      final resolver = StateConflictResolver(
+        store: f.store,
+        blobStore: f.localBlobs,
+        vaultId: _vaultId,
+        nodeId: 'test',
+        chunkedBlobIO: f.builder(),
+      );
+
+      final up = await f.builder()!.upload(_bytes('binary content'), <String>{});
+      final live = FileState(
+        fileId: fileId,
+        path: 'photo.bin',
+        blobRef: up.manifestHash,
+        sizeBytes: 14,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: up.chunkHashes,
+      );
+      await f.applier.apply(fileId, [await _record(f.codec, live, 1)], resolver);
+      expect(f.io.files.containsKey('$_vaultPath/photo.bin'), isTrue);
+      expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash);
+
+      final tomb = FileState(
+        fileId: fileId,
+        path: 'photo.bin',
+        blobRef: '',
+        sizeBytes: 0,
+        hlc: Hlc(500, 0, 'device-B'),
+        tombstone: true,
+      );
+      await f.applier.apply(fileId, [await _record(f.codec, tomb, 2)], resolver);
+
+      expect(f.io.files.containsKey('$_vaultPath/photo.bin'), isFalse,
+          reason: 'the stale on-disk binary must be deleted, not resurrected');
+      expect(f.store.get(fileId)?.tombstone, isTrue,
+          reason: 'register collapses to a tombstone');
+    });
+  });
 }

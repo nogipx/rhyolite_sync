@@ -7,8 +7,9 @@ import 'backup_inspect_modal.dart';
 /// Manages this vault's server-side restore points: create one now, restore a
 /// past one in place (reversible via history), or delete individual ones.
 ///
-/// Restore points are a Pro, server-driven feature (daily snapshots, 7 kept); a
-/// free / self-host / disconnected vault simply lists none.
+/// Manual restore points work for any connected vault (free, Pro, self-host) —
+/// only the *automatic* daily snapshot (once/24h, 7 kept) is Pro-gated, by the
+/// managed server's BackupCaptureInterceptor. A disconnected vault lists none.
 Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
   if (engine is! StateSyncEngine) {
     showNotice(S.backupsUnavailable);

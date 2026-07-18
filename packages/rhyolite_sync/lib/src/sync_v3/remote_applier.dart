@@ -312,18 +312,45 @@ class RemoteApplier {
     final chunkedIO = _newChunkedIO();
     if (chunkedIO == null) return;
 
+    // A tombstone in the register means some device deleted this file. A live
+    // sibling whose content is still exactly the last converged version (its
+    // blobRef equals the LCA `lastSyncedBlobRef`) is NOT a concurrent edit —
+    // it's a peer that still had the file on disk when another device deleted
+    // it. The classic trigger is a rename/move: the engine models it as
+    // tombstone(old path) + create(new path), so every peer that hasn't applied
+    // the delete yet re-observes the old file. Skipping the tombstone (as the
+    // loop below does) would resurrect that stale copy and, across repeated
+    // moves, union its content into a duplicate. The delete causally follows
+    // that exact version, so such a stale-base live value is dropped here —
+    // letting the all-tombstones path below honour the delete. Genuine edits
+    // (blobRef != LCA) are kept and still win under add-wins. Unknown/empty LCA
+    // → drop nothing (safe: never delete data we cannot prove is stale).
+    final hasTombstone = joined.allValues.any((s) => s.tombstone);
+    final lca = store.lastSyncedBlobRefFor(fileId);
+    bool isStaleBaseUnderDelete(FileState s) =>
+        hasTombstone &&
+        lca != null &&
+        lca.isNotEmpty &&
+        !s.tombstone &&
+        s.blobRef == lca;
+
     // Real (non-tombstone, content-bearing) concurrent values we must
     // account for. If any of these can't be downloaded, resolving now
     // would drop that side.
     final realValues = joined.allValues
-        .where((s) => !s.tombstone && s.blobRef.isNotEmpty)
+        .where((s) =>
+            !s.tombstone && s.blobRef.isNotEmpty && !isStaleBaseUnderDelete(s))
         .toList(growable: false);
 
     final sequences = <Fugue<String>>[];
     String? path;
     for (final state in joined.allValues) {
       if (state.path.isNotEmpty) path = state.path;
-      if (state.tombstone || state.blobRef.isEmpty) continue;
+      if (state.tombstone ||
+          state.blobRef.isEmpty ||
+          isStaleBaseUnderDelete(state)) {
+        continue;
+      }
       Uint8List? bytes;
       try {
         bytes = await chunkedIO.download(state.blobRef, context: context);
@@ -605,6 +632,16 @@ class RemoteApplier {
           final fullPath = '$vaultPath/${sealed.path}';
           changeProvider.suppress(sealed.path);
           await io.writeFile(fullPath, newBlobBytes);
+        }
+        // A tombstone winner must actually remove the on-disk file (and prune
+        // the file's sibling rows / stat signature). Without this a resolved
+        // delete — e.g. a rename/move whose old-path tombstone won over a
+        // peer's stale on-disk copy — would seal the register as deleted yet
+        // leave the file sitting on disk, resurrecting on the next reconcile.
+        // _materialise is idempotent (only deletes when present), so the
+        // both-tombstones case where the file is already gone is a no-op.
+        if (sealed.tombstone) {
+          await _materialise(sealed, context: context);
         }
         // Seal the conflict: write under ownContext that dominates every
         // losing TaggedValue's hlc → register cardinality goes back to 1

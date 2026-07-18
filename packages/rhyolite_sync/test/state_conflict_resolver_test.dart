@@ -94,6 +94,41 @@ void main() {
       expect(c.winner.tombstone, isFalse);
       expect(c.loser.tombstone, isTrue);
     });
+
+    test(
+        'tombstone vs stale-base live (blobRef == LCA) → delete wins, '
+        'no resurrect', () async {
+      // The live side is byte-identical to the last converged version (its
+      // blobRef equals the LCA). A peer that merely still has the file on disk
+      // after another device deleted it — the rename/move resurrection. The
+      // delete must win.
+      final ref = await _writeBlob(blobStore, 'unchanged since sync');
+      final stale = _state('f1', blobRef: ref, hlc: Hlc(100, 0, 'B'));
+      final tomb = _state('f1',
+          blobRef: '', hlc: Hlc(200, 0, 'A'), tombstone: true);
+
+      final outcome = await resolver.resolve([stale, tomb], baseRef: ref);
+      expect(outcome, isA<StateMergeMerged>());
+      expect((outcome as StateMergeMerged).merged.tombstone, isTrue,
+          reason: 'a stale-base live copy must not resurrect over a delete');
+    });
+
+    test('tombstone vs genuine edit (blobRef != LCA) → edit still wins',
+        () async {
+      // The live side diverged from the LCA — a real concurrent edit. Add-wins
+      // must be preserved.
+      final baseR = await _writeBlob(blobStore, 'base');
+      final editR = await _writeBlob(blobStore, 'a genuine later edit');
+      final edit = _state('f1', blobRef: editR, hlc: Hlc(100, 0, 'B'));
+      final tomb = _state('f1',
+          blobRef: '', hlc: Hlc(200, 0, 'A'), tombstone: true);
+
+      final outcome = await resolver.resolve([edit, tomb], baseRef: baseR);
+      expect(outcome, isA<StateMergeConflictCopy>());
+      final c = outcome as StateMergeConflictCopy;
+      expect(c.winner.tombstone, isFalse);
+      expect(c.winner.blobRef, editR);
+    });
   });
 
   group('StateConflictResolver — N>2 preserves every value (L1-5)', () {

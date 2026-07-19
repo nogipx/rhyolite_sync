@@ -1,3 +1,19 @@
+## [3.7.2] - 2026-07-19
+
+### Bug Fixes
+
+- drop the BYO secret from the discovery event (kind only) (core)
+- refuse credentialed BYO requests over plaintext http to public hosts (core)
+- reject cloud-metadata/loopback BYO storage endpoints (SSRF) (core)
+- reject weak/dictionary passphrases, not just low charset entropy (core)
+- confine remote paths to the vault + cap blob downloads (core)
+
+### Other
+
+- bump plugin to 3.7.2 (obsidian)
+- drop stale Supabase anon-key comment (obsidian)
+
+
 ## [3.7.1] - 2026-07-19
 
 ### Bug Fixes

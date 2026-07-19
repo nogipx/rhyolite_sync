@@ -1327,10 +1327,14 @@ class StateSyncEngine implements ISyncEngine {
         externalBlobConfig: remote,
         externalStorageKind: remote.kind,
       );
+      // Signal discovery with the NON-SECRET kind only. The config (with
+      // credentials) is already applied above; the host reads it from
+      // `engine.config` if needed. The secret must never travel on the
+      // broadcast events stream, which any listener can observe.
       _emit(_rejections.build(
         'feature.external_blob_config_discovered',
         'external blob config available on the server',
-        {'config': remote.toJson()},
+        {'kind': remote.kind},
       ));
     } else if (isByo) {
       throw StateError(
@@ -1610,6 +1614,9 @@ class StateSyncEngine implements ISyncEngine {
       remoteBlobStorage: remote,
       vaultId: config.vaultId,
       blobIdKey: _resolveBlobIdKey(),
+      // Cap downloads at the same per-file ceiling the upload path enforces, so
+      // a peer can't push a many-chunk multi-GiB blob that OOMs this client.
+      maxDownloadBytes: _maxFileSizeBytes(),
     );
   }
 

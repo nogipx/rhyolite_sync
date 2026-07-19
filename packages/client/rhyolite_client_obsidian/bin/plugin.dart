@@ -1263,40 +1263,45 @@ void main() {
             }
 
             switch (event) {
-              case ExternalBlobConfigDiscovered(:final configJson):
-                _log.info('External blob config discovered from server');
-                final extConfig = ExternalBlobConfig.fromJson(configJson);
-                if (extConfig != null) {
-                  // Build on top of the *current* config, not the initial
-                  // load-time snapshot — `cfg` is `final` and misses any
-                  // post-load edits (verification token rotation, vault
-                  // rename, etc.). Persist only the non-secret kind marker
-                  // (VaultConfig.toJson drops the secret); the secret stays in
-                  // memory + on the E2EE server.
-                  final base = config ?? cfg;
-                  final updated = base.copyWith(
-                    externalBlobConfig: extConfig,
-                    externalStorageKind: extConfig.kind,
-                  );
-                  config = updated;
-                  await configStorage.save(updated);
-                  if (engine.config.externalBlobConfig == null) {
-                    // Runtime discovery — the engine wasn't started with the
-                    // secret, so adopt it and restart to pick up the backend.
-                    engine.config = buildConfig(updated, authClient);
-                    await _scheduleBoot(() async {
-                      await engine.stop();
-                      await _guardedStart(engine);
-                    });
-                    await relaunchConfigSync();
-                    _log.info('Restarted with external blob storage');
-                  }
-                  // Otherwise the engine already self-applied the secret in
-                  // _checkExternalBlobConfig during this start() — no restart.
-                  // Re-render the settings tab so it shows "Connected: ..."
-                  // instead of the snapshot's "Configure" buttons.
-                  refreshSettings();
+              case ExternalBlobConfigDiscovered(:final kind):
+                _log.info('External blob config ($kind) discovered from server');
+                // The engine already fetched, decrypted and applied the config
+                // synchronously (_checkExternalBlobConfig) BEFORE emitting this
+                // event, so read the applied config from the engine — the secret
+                // must never travel on the broadcast events stream. copyWith
+                // treats null as "no change", so a missing config is a no-op.
+                final extConfig = engine.config.externalBlobConfig;
+                // Build on top of the *current* config, not the initial
+                // load-time snapshot — `cfg` is `final` and misses any
+                // post-load edits (verification token rotation, vault
+                // rename, etc.). Persist only the non-secret kind marker
+                // (VaultConfig.toJson drops the secret); the secret stays in
+                // memory + on the E2EE server.
+                final base = config ?? cfg;
+                final updated = base.copyWith(
+                  externalBlobConfig: extConfig,
+                  externalStorageKind: extConfig?.kind ?? kind,
+                );
+                config = updated;
+                await configStorage.save(updated);
+                if (engine.config.externalBlobConfig == null) {
+                  // Runtime discovery — the engine wasn't started with the
+                  // secret, so adopt it and restart to pick up the backend.
+                  // (Unreachable at start-time now that the engine self-applies;
+                  // kept for the historical runtime-discovery path.)
+                  engine.config = buildConfig(updated, authClient);
+                  await _scheduleBoot(() async {
+                    await engine.stop();
+                    await _guardedStart(engine);
+                  });
+                  await relaunchConfigSync();
+                  _log.info('Restarted with external blob storage');
                 }
+                // Otherwise the engine already self-applied the secret in
+                // _checkExternalBlobConfig during this start() — no restart.
+                // Re-render the settings tab so it shows "Connected: ..."
+                // instead of the snapshot's "Configure" buttons.
+                refreshSettings();
                 return;
               case SubscriptionRequired():
                 return;

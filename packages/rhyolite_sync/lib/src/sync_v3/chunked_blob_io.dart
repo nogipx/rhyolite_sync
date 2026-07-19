@@ -36,6 +36,7 @@ class ChunkedBlobIO {
     required this.vaultId,
     Uint8List? blobIdKey,
     ContentDefinedChunker? chunker,
+    this.maxDownloadBytes,
   })  : _hasher = hasherFor(blobIdKey),
         _chunker =
             chunker ?? ContentDefinedChunker(blobIdHasher: hasherFor(blobIdKey));
@@ -44,6 +45,13 @@ class ChunkedBlobIO {
   final IBlobStorage remoteBlobStorage;
   final String vaultId;
   final ContentDefinedChunker _chunker;
+
+  /// Optional ceiling (plain bytes) on what [download] will assemble. A peer
+  /// holding the vault key could store a many-chunk manifest whose assembled
+  /// size is multiple GiB; without a cap a pull would fetch it all into memory
+  /// and OOM the (small-heap, dart2js) client. The upload path is already
+  /// size-gated; this mirrors that on download. Null = no cap (offline/tests).
+  final int? maxDownloadBytes;
 
   /// Content-address function for the manifest blob; the chunker uses an
   /// equivalent one for chunk ids. Keyed HMAC when a vault subkey is present.
@@ -199,6 +207,18 @@ class ChunkedBlobIO {
       return (hash: m['h'] as String, size: (m['s'] as int?) ?? 0);
     }).toList();
 
+    // Size admission (see [maxDownloadBytes]). Reject early on the DECLARED
+    // sizes so an oversized blob is never fetched. The declared sizes are
+    // attacker-controlled, so the fetch/assembly below ALSO guards the actual
+    // running byte count — an understated manifest can't slip a multi-GiB blob
+    // into memory.
+    final max = maxDownloadBytes;
+    if (max != null && max > 0) {
+      final declaredChunkTotal =
+          chunkRefs.fold<int>(0, (a, r) => a + (r.size < 0 ? 0 : r.size));
+      if (size > max || declaredChunkTotal > max) return null;
+    }
+
     final cached = <String, Uint8List>{};
     final missing = <String>[];
     var localBytes = 0;
@@ -234,6 +254,10 @@ class ChunkedBlobIO {
       const batchLimitBytes = 2 * 1024 * 1024;
       var batch = <String>[];
       var batchBytes = 0;
+      // Sum of ACTUAL fetched-chunk bytes; guards against a manifest that
+      // understates chunk sizes to slip past the declared-size gate above.
+      var fetchedBytes = 0;
+      var oversize = false;
       Future<void> fetch() async {
         if (batch.isEmpty) return;
         token?.throwIfCancelled();
@@ -250,6 +274,11 @@ class ChunkedBlobIO {
           cached[entry.key] = entry.value;
           await blobStore.write(entry.value, entry.key, vaultId: vaultId);
           localBytes += sizeOf[entry.key] ?? entry.value.length;
+          fetchedBytes += entry.value.length;
+          if (max != null && max > 0 && fetchedBytes > max) {
+            oversize = true;
+            return;
+          }
         }
         onProgress?.call(localBytes > size ? size : localBytes, size);
         batch = <String>[];
@@ -259,9 +288,13 @@ class ChunkedBlobIO {
       for (final h in missing) {
         batch.add(h);
         batchBytes += sizeOf[h] ?? 0;
-        if (batchBytes >= batchLimitBytes) await fetch();
+        if (batchBytes >= batchLimitBytes) {
+          await fetch();
+          if (oversize) return null;
+        }
       }
       await fetch();
+      if (oversize) return null;
     }
     onProgress?.call(size, size);
 

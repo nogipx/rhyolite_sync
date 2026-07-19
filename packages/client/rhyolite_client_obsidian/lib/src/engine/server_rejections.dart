@@ -142,27 +142,29 @@ class StorageQuotaExceeded extends SyncServerRejected {
       );
 }
 
-/// External blob storage config the server is holding for this vault.
-/// Carries the decoded config JSON in [configJson].
+/// The server holds an external blob storage config for this vault. Carries
+/// only the NON-SECRET [kind] ('s3' / 'webdav'); the actual config (with
+/// credentials) is applied by the engine itself and read from `engine.config`,
+/// never sent on the broadcast events stream.
 class ExternalBlobConfigDiscovered extends SyncServerRejected {
   ExternalBlobConfigDiscovered({
-    required this.configJson,
+    required this.kind,
     required String message,
   }) : super(
           code: 'feature.external_blob_config_discovered',
           message: message,
-          params: {'config': configJson},
+          params: {'kind': kind},
         );
 
-  final Map<String, dynamic> configJson;
+  final String kind;
 
   static ExternalBlobConfigDiscovered? tryFromParams(
     String message,
     Map<String, dynamic> params,
   ) {
-    final raw = params['config'];
-    if (raw is! Map<String, dynamic>) return null;
-    return ExternalBlobConfigDiscovered(configJson: raw, message: message);
+    final kind = params['kind'];
+    if (kind is! String || kind.isEmpty) return null;
+    return ExternalBlobConfigDiscovered(kind: kind, message: message);
   }
 }
 

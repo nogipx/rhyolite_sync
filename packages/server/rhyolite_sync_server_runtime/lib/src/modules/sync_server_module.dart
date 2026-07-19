@@ -57,6 +57,12 @@ class SyncServerModule extends RpcServerModule {
         // OOM guard: notes records are tiny manifests; the cap only bounds the
         // opaque-ciphertext vector. Over-cap items are rejected per-item.
         recordSizeLimit: 5 << 20,
+        // Whole-batch DoS caps — generous vs any real first-sync (manifests are
+        // KB-scale), tight vs the GiB-batch OOM attack. A transport-level
+        // max-message-size + client-side batch chunking are the complementary
+        // complete fix (deserialization happens before the responder runs).
+        maxBatchItems: 100000,
+        maxBatchBytes: 64 << 20,
       ),
       // Second keyspace for .obsidian settings sync. Same vaultId (so it
       // reuses vault ownership), but isolated collections (<vaultId>_config_*),
@@ -71,6 +77,9 @@ class SyncServerModule extends RpcServerModule {
         // Settings records are KB-scale even with whole-file inlining; keep a
         // tighter cap than notes.
         recordSizeLimit: 3 << 20,
+        // Fewer settings resources than notes → a tighter batch bound.
+        maxBatchItems: 10000,
+        maxBatchBytes: 32 << 20,
       ),
       HistoryResponder(client: dataClient),
       // Read-only backup access (notes keyspace). Snapshots are captured by the

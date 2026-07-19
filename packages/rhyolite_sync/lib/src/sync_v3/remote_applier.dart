@@ -6,6 +6,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
 import 'disk_reconciler.dart';
+import 'path_normalize.dart';
 import 'state_record_codec.dart';
 import 'text_union_merge.dart';
 
@@ -91,8 +92,30 @@ class RemoteApplier {
     for (final r in records) {
       try {
         swDecodeSum.start();
-        tagged.add(await codec.decode(r));
+        final decoded = await codec.decode(r);
         swDecodeSum.stop();
+        // Confinement: reject a record whose path would escape the vault root
+        // BEFORE it enters the store. Every disk write downstream (materialise,
+        // conflict-copy, union) derives its path from the stored FileState, so
+        // this single gate confines them all. The path rides inside the AES-GCM
+        // payload, so only a peer holding the vault key can craft it (malicious
+        // or compromised device) — but that must not become an arbitrary
+        // file-write/delete primitive on every other device.
+        if (!isSafeVaultRelPath(decoded.value.path)) {
+          _log.warning(
+            'Rejecting record with unsafe path fileId=${r.fileId} '
+            'path="${decoded.value.path}"',
+          );
+          _emit(
+            SyncRecordSkipped(
+              fileId: r.fileId,
+              hlcPacked: r.hlcPacked,
+              reason: 'unsafe path (traversal/absolute)',
+            ),
+          );
+        } else {
+          tagged.add(decoded);
+        }
       } catch (e) {
         swDecodeSum.stop();
         // Per-record decode failures are usually isolated (corrupted

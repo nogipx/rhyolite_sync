@@ -16,3 +16,31 @@ import 'package:unorm_dart/unorm_dart.dart' as unorm;
 /// the stored path stable regardless of the platform's form. Pure ASCII paths
 /// are unchanged (NFC is a no-op on them), so the common case pays nothing.
 String normalizeVaultPath(String relPath) => unorm.nfc(relPath);
+
+/// Whether [relPath] is a safe vault-relative path — i.e. writing
+/// `<vaultRoot>/<relPath>` cannot escape the vault directory.
+///
+/// A pulled record's path comes from the (decrypted) payload of a peer that
+/// holds the vault key. A crafted `..`/absolute/NUL path would otherwise let a
+/// malicious or compromised device write or delete files anywhere the client
+/// process can reach (`~/.ssh/authorized_keys`, shell rc files, autostart
+/// entries…). Every remote path is validated here BEFORE it enters the
+/// FileStateStore, so the downstream disk writes (materialise, conflict-copy,
+/// union) — which all derive their path from the stored FileState — are
+/// confined by construction. This mirrors the settings-sync `classify()` guard.
+///
+/// An empty path is treated as safe: it carries no location and downstream
+/// writers skip it (`if (path.isNotEmpty)`).
+bool isSafeVaultRelPath(String relPath) {
+  if (relPath.isEmpty) return true;
+  if (relPath.contains('\x00')) return false; // NUL byte
+  // Absolute paths escape the vault root: POSIX "/…", Windows "\…" / UNC
+  // "\\host\share", and drive-qualified "C:\…".
+  if (relPath.startsWith('/') || relPath.startsWith(r'\')) return false;
+  if (RegExp(r'^[A-Za-z]:').hasMatch(relPath)) return false;
+  // Any ".." segment (under either separator) can climb out of the vault.
+  for (final segment in relPath.split(RegExp(r'[/\\]'))) {
+    if (segment == '..') return false;
+  }
+  return true;
+}

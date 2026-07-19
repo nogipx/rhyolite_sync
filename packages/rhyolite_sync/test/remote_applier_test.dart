@@ -501,4 +501,58 @@ void main() {
           reason: 'register collapses to a tombstone');
     });
   });
+
+  group('RemoteApplier — path confinement (C2)', () {
+    test('a record with a traversal path is rejected: nothing written, not '
+        'stored', () async {
+      final f = await _newApplier();
+      final fileId = f.fileIdFor('../evil.md');
+      // Real, retrievable content — proves the record is dropped at the path
+      // gate, not merely because the blob was unavailable.
+      final up = await f.builder()!.upload(_bytes('malicious payload'), <String>{});
+      final evil = FileState(
+        fileId: fileId,
+        path: '../evil.md',
+        blobRef: up.manifestHash,
+        sizeBytes: 17,
+        hlc: Hlc(1000, 0, 'attacker'),
+        chunks: up.chunkHashes,
+      );
+
+      await f.applier
+          .apply(fileId, [await _record(f.codec, evil, 1)], _UnusedResolver());
+
+      // Nothing was written to disk anywhere.
+      expect(f.io.files, isEmpty,
+          reason: 'a "../" path must never reach a disk write');
+      // The record never entered the store.
+      expect(f.store.get(fileId), isNull);
+      // Surfaced as a skipped record with the reason.
+      expect(
+        f.events
+            .whereType<SyncRecordSkipped>()
+            .any((e) => e.reason.contains('unsafe path')),
+        isTrue,
+        reason: 'the drop must be observable, not silent',
+      );
+    });
+
+    test('an absolute path record is rejected too', () async {
+      final f = await _newApplier();
+      final fileId = f.fileIdFor('/etc/passwd');
+      final up = await f.builder()!.upload(_bytes('x'), <String>{});
+      final evil = FileState(
+        fileId: fileId,
+        path: '/etc/passwd',
+        blobRef: up.manifestHash,
+        sizeBytes: 1,
+        hlc: Hlc(1000, 0, 'attacker'),
+        chunks: up.chunkHashes,
+      );
+      await f.applier
+          .apply(fileId, [await _record(f.codec, evil, 1)], _UnusedResolver());
+      expect(f.io.files, isEmpty);
+      expect(f.store.get(fileId), isNull);
+    });
+  });
 }

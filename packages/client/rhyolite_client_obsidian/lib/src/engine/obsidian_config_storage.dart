@@ -248,12 +248,8 @@ class ObsidianConfigStorage {
   }
 
   // ---------------------------------------------------------------------------
-  // Auth config — Supabase URL + anon key come from compile-time dart-define
-  // constants only and are never stored in data.json.
-  // ---------------------------------------------------------------------------
-
-  // ---------------------------------------------------------------------------
-  // Supabase session (access + refresh token stored in system keychain)
+  // Account session (access + refresh token stored in the system keychain).
+  // No API keys are embedded in the build — build_env.kEnv holds only URLs.
   // ---------------------------------------------------------------------------
 
   Future<AuthSession?> loadAuthSession() async {

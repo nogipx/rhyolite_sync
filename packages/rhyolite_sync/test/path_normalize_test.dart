@@ -45,4 +45,58 @@ void main() {
           reason: 'proves NFD/NFC really split identity absent the fix');
     });
   });
+
+  group('isSafeVaultRelPath (vault confinement)', () {
+    test('ordinary vault-relative paths are safe', () {
+      for (final p in const [
+        'note.md',
+        'folder/note.md',
+        'a/b/c/deep.png',
+        'Проекты/Клиент/договор.md',
+        'name with spaces.md',
+        '', // empty carries no location; downstream skips it
+      ]) {
+        expect(isSafeVaultRelPath(p), isTrue, reason: p);
+      }
+    });
+
+    test('".." traversal is rejected', () {
+      for (final p in const [
+        '../outside.md',
+        '../../etc/passwd',
+        'a/../../b.md',
+        'notes/../../.ssh/authorized_keys',
+        '..',
+        'a/..',
+      ]) {
+        expect(isSafeVaultRelPath(p), isFalse, reason: p);
+      }
+    });
+
+    test('absolute POSIX / Windows / UNC / drive paths are rejected', () {
+      for (final p in const [
+        '/etc/passwd',
+        '/Users/x/.zshrc',
+        r'\Windows\System32\x',
+        r'\\host\share\x',
+        r'C:\Users\x\file',
+        'C:/Users/x/file',
+      ]) {
+        expect(isSafeVaultRelPath(p), isFalse, reason: p);
+      }
+    });
+
+    test('backslash-separated ".." is rejected too', () {
+      expect(isSafeVaultRelPath(r'a\..\..\b'), isFalse);
+    });
+
+    test('a NUL byte is rejected', () {
+      expect(isSafeVaultRelPath('note\x00.md'), isFalse);
+    });
+
+    test('a name that merely contains ".." (not a segment) is safe', () {
+      expect(isSafeVaultRelPath('my..notes.md'), isTrue);
+      expect(isSafeVaultRelPath('folder/a..b.md'), isTrue);
+    });
+  });
 }

@@ -238,4 +238,42 @@ void main() {
         reason: 'download must report intermediate progress');
     expect(down.last, big.length);
   });
+
+  group('maxDownloadBytes (M5 — download size admission)', () {
+    ChunkedBlobIO _capped(int max) => ChunkedBlobIO(
+          blobStore: local,
+          remoteBlobStorage: remote,
+          vaultId: _v,
+          maxDownloadBytes: max,
+          chunker: ContentDefinedChunker(
+            minChunkSize: 64,
+            avgChunkSize: 128,
+            maxChunkSize: 256,
+          ),
+        );
+
+    test('rejects a blob whose declared size exceeds the cap', () async {
+      final content = _bytes('x' * 4000); // spans many tiny chunks
+      final up = await io.upload(content, {}); // uncapped upload
+      final got = await _capped(500).download(up.manifestHash);
+      expect(got, isNull,
+          reason: 'an oversized blob must not be assembled into memory');
+    });
+
+    test('a blob within the cap still downloads intact', () async {
+      final content = _bytes('hello world, still within the cap');
+      final up = await io.upload(content, {});
+      final got = await _capped(1 << 20).download(up.manifestHash);
+      expect(got, isNotNull);
+      expect(got!.toList(), content.toList());
+    });
+
+    test('no cap (null) downloads any size', () async {
+      final content = _bytes('y' * 4000);
+      final up = await io.upload(content, {});
+      final got = await io.download(up.manifestHash); // io has no cap
+      expect(got, isNotNull);
+      expect(got!.length, content.length);
+    });
+  });
 }

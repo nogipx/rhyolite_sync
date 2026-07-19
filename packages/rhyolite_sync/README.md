@@ -442,7 +442,7 @@ Standard codes (embedders may define more):
 | `app_policy.quota.file_size` | File-size limit exceeded | `{current, limit}` |
 | `app_policy.quota.vault_count` | Vault-count limit exceeded | `{current, limit}` |
 | `app_policy.rate.push` | Push rate-limited | `{retry_after_ms}` |
-| `feature.external_blob_config_discovered` | Server has a saved external blob config | `{config: <json>}` |
+| `feature.external_blob_config_discovered` | Server has a saved external blob config (engine already applied it) | `{kind: <string>}` (non-secret; no credentials) |
 
 **Recommended:** define typed subclasses for the codes you care about
 and pass a [`ServerRejectionFactory`](https://pub.dev/...) to the

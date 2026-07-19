@@ -904,6 +904,8 @@ class EnStrings extends AppStrings {
   @override
   String get reconnecting => 'Reconnecting…';
   @override
+  String get reconnect => 'Reconnect';
+  @override
   String get offlineCantReach => 'Offline — can’t reach server';
   @override
   String get upToDate => 'Up to date';
@@ -1009,6 +1011,8 @@ class EnStrings extends AppStrings {
   // ── Commands ──
   @override
   String get cmdSyncNow => 'Sync now';
+  @override
+  String get cmdReconnect => 'Reconnect now';
   @override
   String get cmdSyncSettingsNow => 'Sync settings now (.obsidian)';
   @override

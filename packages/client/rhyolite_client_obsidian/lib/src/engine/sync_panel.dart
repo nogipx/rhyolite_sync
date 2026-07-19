@@ -31,6 +31,7 @@ class SyncPanel {
     required Future<void> Function() onBrowseVersions,
     required bool Function() isPaused,
     required Future<void> Function(bool paused) onSetPaused,
+    Future<void> Function()? onReconnect,
     Future<({int usedBytes, int quotaBytes})?> Function()? onFetchUsage,
     Future<int> Function()? onSettingsSize,
     void Function()? onStorageDetails,
@@ -45,6 +46,7 @@ class SyncPanel {
        _onBrowseVersions = onBrowseVersions,
        _isPaused = isPaused,
        _onSetPaused = onSetPaused,
+       _onReconnect = onReconnect,
        _onFetchUsage = onFetchUsage,
        _onSettingsSize = onSettingsSize,
        _onStorageDetails = onStorageDetails,
@@ -62,6 +64,7 @@ class SyncPanel {
   final Future<void> Function() _onBrowseVersions;
   final bool Function() _isPaused;
   final Future<void> Function(bool paused) _onSetPaused;
+  final Future<void> Function()? _onReconnect;
   final Future<({int usedBytes, int quotaBytes})?> Function()? _onFetchUsage;
   final Future<int> Function()? _onSettingsSize;
   final void Function()? _onStorageDetails;
@@ -522,15 +525,30 @@ class SyncPanel {
     _style(actions, 'marginTop', '12px');
     _style(actions, 'flexWrap', 'wrap');
 
-    // Single sync control: one toggle button, Pause when running / Resume when
-    // paused. Resume is highlighted so a paused vault is obviously actionable.
-    final pauseBtn = _el(
-      actions,
-      'button',
-      text: _isPaused() ? S.resumeSync : S.pauseSync,
-    );
-    if (_isPaused()) jsu.setProperty(pauseBtn, 'className', 'mod-cta');
-    _onClick(pauseBtn, _handleTogglePause);
+    // When sync is stuck (offline / error / auth-expired) the primary control
+    // becomes Reconnect — a Pause toggle is useless when we can't reach the
+    // server, and the user's intent there is "get me back online". Otherwise the
+    // single sync control is the Pause/Resume toggle (Resume highlighted so a
+    // paused vault is obviously actionable).
+    final status = _effective();
+    final stuck = !_isPaused() &&
+        (status == _Status.offline ||
+            status == _Status.error ||
+            status == _Status.authExpired);
+    final onReconnect = _onReconnect;
+    if (stuck && onReconnect != null) {
+      final reconnectBtn = _el(actions, 'button', text: S.reconnect);
+      jsu.setProperty(reconnectBtn, 'className', 'mod-cta');
+      _onClick(reconnectBtn, onReconnect);
+    } else {
+      final pauseBtn = _el(
+        actions,
+        'button',
+        text: _isPaused() ? S.resumeSync : S.pauseSync,
+      );
+      if (_isPaused()) jsu.setProperty(pauseBtn, 'className', 'mod-cta');
+      _onClick(pauseBtn, _handleTogglePause);
+    }
 
     final settingsBtn = _el(actions, 'button', text: S.settingsButton);
     _onClick(settingsBtn, _onOpenSettings);

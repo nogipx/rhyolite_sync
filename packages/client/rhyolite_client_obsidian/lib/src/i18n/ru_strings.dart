@@ -918,6 +918,8 @@ class RuStrings extends AppStrings {
   @override
   String get reconnecting => 'Переподключение…';
   @override
+  String get reconnect => 'Переподключить';
+  @override
   String get offlineCantReach => 'Офлайн — сервер недоступен';
   @override
   String get upToDate => 'Актуально';
@@ -1022,6 +1024,8 @@ class RuStrings extends AppStrings {
   // ── Commands ──
   @override
   String get cmdSyncNow => 'Синхронизировать сейчас';
+  @override
+  String get cmdReconnect => 'Переподключиться сейчас';
   @override
   String get cmdSyncSettingsNow => 'Синхронизировать настройки (.obsidian)';
   @override

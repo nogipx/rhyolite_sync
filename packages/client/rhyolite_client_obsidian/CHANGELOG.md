@@ -1,3 +1,14 @@
+## [3.8.0] - 2026-07-19
+
+### Features
+
+- recover a stuck/offline session without an Obsidian restart (obsidian)
+
+### Other
+
+- bump plugin to 3.8.0 (obsidian)
+
+
 ## [3.7.2] - 2026-07-19
 
 ### Bug Fixes

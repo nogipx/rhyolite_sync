@@ -394,6 +394,7 @@ abstract class AppStrings {
   String get syncStopped;
   String get connecting;
   String get reconnecting;
+  String get reconnect;
   String get offlineCantReach;
   String get upToDate;
   String get pendingChanges;
@@ -443,6 +444,7 @@ abstract class AppStrings {
 
   // ── Commands ─────────────────────────────────────────────────────────────
   String get cmdSyncNow;
+  String get cmdReconnect;
   String get cmdSyncSettingsNow;
   String get cmdCleanupStorage;
   String get cmdManageDevices;

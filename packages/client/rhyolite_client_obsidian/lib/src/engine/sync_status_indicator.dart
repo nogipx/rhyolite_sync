@@ -31,10 +31,12 @@ class SyncStatusIndicator {
     required ISyncEngine engine,
     LogScope? logger,
     void Function()? onTap,
+    void Function()? onReconnect,
   }) : _plugin = plugin,
        _engine = engine,
        _log = logger,
-       _onTap = onTap;
+       _onTap = onTap,
+       _onReconnect = onReconnect;
 
   final PluginHandle _plugin;
   final ISyncEngine _engine;
@@ -43,6 +45,12 @@ class SyncStatusIndicator {
   /// Click action. Defaults to opening settings; the plugin overrides it to
   /// reveal the docked sync panel.
   final void Function()? _onTap;
+
+  /// Recovery action, run instead of [_onTap] when the dot is in a stuck state
+  /// (offline / error / auth-expired). Lets the user force a reconnect+refresh
+  /// by tapping the red dot they already reach for, without waiting for a DOM
+  /// online/visibility event.
+  final void Function()? _onReconnect;
 
   static const _pluginId = 'rhyolite-sync';
   static const _revertDelay = Duration(seconds: 3);
@@ -177,10 +185,22 @@ class SyncStatusIndicator {
   }
 
   void _registerClick(JSObject el) {
-    final onTap = _onTap;
-    final handler = jsu.allowInterop(
-      (JSAny? _) => onTap != null ? onTap() : _openSettings(),
-    );
+    final handler = jsu.allowInterop((JSAny? _) {
+      // In a stuck state, the tap becomes "reconnect now" — the dot is the
+      // surface the user instinctively reaches for when sync looks dead.
+      final stuck =
+          _currentState == _State.offline ||
+          _currentState == _State.error ||
+          _currentState == _State.authExpired;
+      final onReconnect = _onReconnect;
+      if (stuck && onReconnect != null) {
+        _log?.info('sync indicator: tap in $_currentState — reconnecting');
+        onReconnect();
+        return;
+      }
+      final onTap = _onTap;
+      onTap != null ? onTap() : _openSettings();
+    });
     // Route the listener through Obsidian's plugin lifecycle so the
     // handler is auto-unregistered when the plugin unloads — required
     // by Obsidian's community plugin review (no leaked listeners on

@@ -128,6 +128,32 @@ StreamSubscription<SyncEngineEvent>? _engineAuthEventsSub;
 /// others to avoid leaking a listener across soft reloads.
 StreamSubscription<SyncEngineEvent>? _deletedVaultWatchSub;
 
+/// Drives the offline self-heal: watches connection events to arm/cancel the
+/// periodic recovery timer. Held so onUnload can cancel it.
+StreamSubscription<SyncEngineEvent>? _selfHealSub;
+
+/// Periodic self-heal timer. Armed when the engine reports it lost the backend
+/// (SyncDisconnected) and rpc_dart's own reconnect loop gave up; cancelled on
+/// SyncConnected. Drives recovery on a capped backoff so getting back online no
+/// longer depends on a DOM online/visibility event firing — those never fire
+/// when the OS network stayed up but the server/token dropped.
+Timer? _selfHealTimer;
+int _selfHealAttempt = 0;
+
+/// Debounce for the auth-rejection -> token-refresh path. A burst of auth.*
+/// rejections (every pending RPC failing at once) must not spawn a refresh
+/// grind loop — refresh at most once per cooldown, one in flight at a time.
+bool _authRefreshInFlight = false;
+DateTime? _lastAuthRefreshAt;
+
+/// Stops the offline self-heal loop and resets its backoff. Called on connect,
+/// on pause and on unload.
+void _cancelSelfHeal() {
+  _selfHealTimer?.cancel();
+  _selfHealTimer = null;
+  _selfHealAttempt = 0;
+}
+
 /// Latest known plan capabilities (managed edition). Populated from
 /// getSubscription; the engine reads `maxFileSizeBytes` from it for the
 /// per-file size gate. Null in self-host / before the first fetch → no limit.
@@ -735,12 +761,21 @@ void main() {
             _syncPaused = paused;
             await configStorage.savePaused(paused);
             if (paused) {
+              _cancelSelfHeal();
               _stopConfigSync();
               await engine.stop();
             } else {
               await startSyncSession();
             }
           }
+
+          // Assigned in the recovery block below (needs the engine + config-sync
+          // deps that exist further down). Held here so the status-indicator tap,
+          // the "Reconnect now" command, the panel button and the offline
+          // self-heal timer can all force a recovery through the one code path.
+          // Nullable + null-guarded: an early return before assignment simply
+          // makes those triggers no-ops (the engine isn't up yet anyway).
+          Future<void> Function({required bool requireVisible})? recover;
 
           // Backend/tier labels for the panel — stable at construction, so
           // derived from the connection mode rather than (later-fetched) caps.
@@ -786,6 +821,10 @@ void main() {
             onBrowseVersions: () => showFileVersionModal(plugin, engine),
             isPaused: () => _syncPaused,
             onSetPaused: setSyncPaused,
+            // Shown as a button only while sync looks stuck; runs the same
+            // recovery path as the indicator tap and the command.
+            onReconnect: () => recover?.call(requireVisible: false) ??
+                Future<void>.value(),
             // Managed-only usage meter; self-host/BYO have no managed quota.
             onFetchUsage: (selfHostActive || byo)
                 ? null
@@ -805,6 +844,9 @@ void main() {
             engine: engine,
             logger: _logController.scope('plugin'),
             onTap: () => unawaited(syncPanel.reveal()),
+            // In offline/error/auth-expired the tap forces a recovery instead of
+            // just opening the panel (see recover assignment below).
+            onReconnect: () => unawaited(recover?.call(requireVisible: false)),
           )..init();
 
           // The settings notify subscription is an in-flight call too, so it
@@ -1005,6 +1047,18 @@ void main() {
               _log.info('Manual sync triggered');
             },
           );
+          // Force a recovery: health-check, and if the transport is stale
+          // restart the engine (which re-connects and, on a stale token, chains
+          // into token refresh). Distinct from "Sync now" — a pull over a dead
+          // socket just hangs; this rebuilds the connection.
+          plugin.addCommand(
+            id: 'rhyolite-sync-reconnect',
+            name: S.cmdReconnect,
+            callback: () async {
+              _log.info('Manual reconnect triggered');
+              await recover?.call(requireVisible: false);
+            },
+          );
           plugin.addCommand(
             id: 'rhyolite-sync-config-now',
             name: S.cmdSyncSettingsNow,
@@ -1169,6 +1223,60 @@ void main() {
               }
             }
 
+            // Publish the recovery closure so the indicator tap, the "Reconnect
+            // now" command and the panel button can all drive it.
+            recover = recoverConnection;
+
+            // Offline self-heal. rpc_dart's reconnect loop eventually gives up
+            // and the engine emits SyncDisconnected, then does nothing — leaving
+            // recovery to the DOM online/visibility hooks, which never fire when
+            // the OS network stayed up but the server/token dropped. Arm a capped
+            // backoff timer on disconnect so the engine climbs back on its own;
+            // cancel it the moment we reconnect.
+            // A failed start() emits SyncError, NOT SyncDisconnected, and never
+            // wires the connection watcher — so the event stream alone can't keep
+            // the ladder going across failed reconnects. The timer re-arms itself
+            // instead, capped so a persistently-down server (or the rare
+            // healthCheck-passes-without-a-connect-event case) can't spin forever;
+            // past the cap the indicator/command/panel button remain.
+            const maxSelfHeal = 10;
+            var selfHealOnline = false;
+            void scheduleHeal() {
+              if (_syncPaused || selfHealOnline || _selfHealTimer != null) return;
+              if (_selfHealAttempt >= maxSelfHeal) {
+                _log.warning(
+                  'Self-heal gave up after $maxSelfHeal attempts — '
+                  'tap the status dot or run "Reconnect now"',
+                );
+                return;
+              }
+              // Backoff 5s,10s,20s,40s,60s(cap). Reset to 5s on any reconnect.
+              final delaySec = [5, 10, 20, 40, 60][_selfHealAttempt.clamp(0, 4)];
+              _selfHealTimer = Timer(Duration(seconds: delaySec), () async {
+                _selfHealTimer = null;
+                if (_syncPaused || selfHealOnline || _engine == null) return;
+                _selfHealAttempt++;
+                _log.info('Self-heal attempt $_selfHealAttempt — recovering');
+                // requireVisible:false — the point is to recover with no user
+                // action. recoverConnection restarts the engine on failure; on
+                // success the connection watcher emits SyncConnected which cancels
+                // + resets the ladder. Re-arm here to cover the failed-start case.
+                await recoverConnection(requireVisible: false);
+                if (!selfHealOnline && _selfHealTimer == null) scheduleHeal();
+              });
+            }
+
+            _selfHealSub?.cancel();
+            _selfHealSub = engine.events.listen((e) {
+              if (e is SyncConnected) {
+                selfHealOnline = true;
+                _cancelSelfHeal();
+              } else if (e is SyncDisconnected) {
+                selfHealOnline = false;
+                scheduleHeal();
+              }
+            });
+
             // Resume-from-background: WebSocket can die silently while the WebView
             // is suspended; check on return to visibility. Leaving (hidden) is
             // also a settings sync point: `.obsidian` has no vault events, so
@@ -1309,25 +1417,42 @@ void main() {
                 // Self-host has no account session — never prompt for sign-in.
                 if (selfHostActive) return;
                 break; // fall through to refresh handler below
-              // Catch-all for every other policy/auth rejection (managed
-              // storage unavailable, quota exceeded, permission denied,
-              // unrecognised app_policy code, etc.). Engine has already
-              // stopped via its own fatal-rejection handler; we just log
-              // and let the sync indicator surface the state. Crucially:
-              // no auto-restart — that's what was creating the per-record
-              // grind loop that froze Obsidian.
+              // A stale token surfaces as auth.* on an active RPC (not only as
+              // SessionExpired). Funnel it into the same debounced refresh path
+              // so an expired session heals without an Obsidian restart. Self-
+              // host has no account session, so never refresh/prompt there.
+              case SyncServerRejected(:final code) when code.startsWith('auth.'):
+                if (selfHostActive) return;
+                break; // fall through to refresh handler below
+              // Every other policy rejection (managed storage unavailable, quota
+              // exceeded, permission denied, unrecognised app_policy code). A
+              // real policy state, not a token problem: log and let the sync
+              // indicator surface it. Crucially no auto-restart — that's what
+              // created the per-record grind loop that froze Obsidian.
               case SyncServerRejected(:final code, :final message)
-                  when code.startsWith('auth.') ||
-                      code.startsWith('app_policy.'):
+                  when code.startsWith('app_policy.'):
                 _log.warning('Sync paused — server refused ($code): $message');
                 return;
               default:
                 return;
             }
+            // Debounce: a burst of rejections (every pending RPC failing at
+            // once, or repeated auth.* from a stale token) must not each spawn a
+            // refresh+restart. At most one refresh in flight, and no more than
+            // once per cooldown.
+            final nowAuth = DateTime.now();
+            if (_authRefreshInFlight ||
+                (_lastAuthRefreshAt != null &&
+                    nowAuth.difference(_lastAuthRefreshAt!) <
+                        const Duration(seconds: 8))) {
+              return;
+            }
             _log.warning('Auth rejected — attempting token refresh');
 
             final client = authClient;
             if (client != null) {
+              _authRefreshInFlight = true;
+              _lastAuthRefreshAt = nowAuth;
               try {
                 final session = await client.refreshSession();
                 await configStorage.saveAuthSession(session);
@@ -1339,6 +1464,8 @@ void main() {
                 return;
               } catch (_) {
                 _log.warning('Refresh failed — prompting re-authentication');
+              } finally {
+                _authRefreshInFlight = false;
               }
             }
 
@@ -1420,6 +1547,9 @@ void main() {
       _engineAuthEventsSub = null;
       await _deletedVaultWatchSub?.cancel();
       _deletedVaultWatchSub = null;
+      await _selfHealSub?.cancel();
+      _selfHealSub = null;
+      _cancelSelfHeal();
       _syncIndicator?.dispose();
       _syncIndicator = null;
       _syncPanel?.closeLeaves();

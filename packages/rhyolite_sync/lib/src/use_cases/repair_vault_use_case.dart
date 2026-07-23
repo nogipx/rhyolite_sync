@@ -61,6 +61,7 @@ class RepairVaultUseCase {
     required this.uploadSequenceBlob,
     required this.emit,
     required this.logWarning,
+    this.forcedBinaryExtensions = const <String>{},
   });
 
   final IPlatformIO io;
@@ -68,6 +69,10 @@ class RepairVaultUseCase {
   final String vaultId;
   final FileStateStore store;
   final FugueStore fugueStore;
+
+  /// Snapshot of the vault-global force-binary extension policy, so a
+  /// user-forced-binary file is NOT rebuilt as a Fugue text tree here.
+  final Set<String> forcedBinaryExtensions;
 
   /// Caller-supplied uploader. The engine wires this to its
   /// chunked-blob + cipher + remote-storage pipeline so this use case
@@ -88,11 +93,13 @@ class RepairVaultUseCase {
   Future<RepairResult> call() async {
     final sw = Stopwatch()..start();
     final all = await io.listFiles(vaultPath);
+    final detector =
+        FileTypeDetector(extraBinaryExtensions: forcedBinaryExtensions);
     final textPaths = <String>[];
     for (final abs in all) {
       final rel = abs.substring(vaultPath.length + 1);
       if (_isHidden(rel)) continue;
-      if (!const FileTypeDetector().isText(rel)) continue;
+      if (!detector.isText(rel)) continue;
       textPaths.add(rel);
     }
 

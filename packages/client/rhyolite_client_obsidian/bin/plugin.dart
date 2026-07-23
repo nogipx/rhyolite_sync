@@ -1007,6 +1007,22 @@ void main() {
               await configStorage.saveFileFilter(next.toJson());
               engine.triggerPull();
             },
+            // Vault-global force-binary list — read from / written to the
+            // engine's encrypted vault-meta so it is the same on every device.
+            // Only available while the real engine is running.
+            forcedBinaryExtensions: () => engine is StateSyncEngine
+                ? engine.forcedBinaryExtensions
+                : <String>{},
+            onForcedBinaryChanged: (next) async {
+              if (engine is! StateSyncEngine) {
+                throw StateError('sync engine is not running');
+              }
+              // Persists to the server (vault-meta) and updates the live set;
+              // the engine's classification callback picks it up immediately,
+              // so the next edit to an affected file uses the binary path.
+              // Existing files convert lazily (no re-scan forced).
+              await engine.setForcedBinaryExtensions(next);
+            },
           );
 
           // Resume/Pause commands mirror the panel buttons — same persisted
@@ -1597,6 +1613,8 @@ void Function() _registerSettings({
   required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
   required FileFilterPrefs Function() fileFilterPrefs,
   required Future<void> Function(FileFilterPrefs next) onFileFilterChanged,
+  required Set<String> Function() forcedBinaryExtensions,
+  required Future<void> Function(Set<String> next) onForcedBinaryChanged,
   required Future<void> Function(VaultInfo vault) onDeleteVault,
   required bool selfHostEnabled,
   required String selfHostUrl,
@@ -1736,6 +1754,8 @@ void Function() _registerSettings({
     onDiagnosticsChanged: onDiagnosticsChanged,
     fileFilterPrefs: fileFilterPrefs,
     onFileFilterChanged: onFileFilterChanged,
+    forcedBinaryExtensions: forcedBinaryExtensions,
+    onForcedBinaryChanged: onForcedBinaryChanged,
     onResetSettings: () async {
       final cs = _configSync;
       if (cs == null) {

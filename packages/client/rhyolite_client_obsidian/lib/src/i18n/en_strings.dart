@@ -704,6 +704,22 @@ class EnStrings extends AppStrings {
       'are skipped on this device only — neither uploaded nor downloaded. Other '
       'devices are unaffected. Leave empty to sync everything. Re-adding a type '
       'downloads its files on the next sync.';
+  @override
+  String get forceBinaryExtensions => 'Sync these extensions as whole files';
+  @override
+  String get forceBinaryDescription =>
+      'Comma-separated list (e.g. excalidraw, drawio). These files are synced '
+      'as whole snapshots with last-writer-wins instead of line-by-line merge — '
+      'the right choice for structured formats (drawings, diagrams) a text '
+      'merge would corrupt. Shared across all your devices. .excalidraw.md and '
+      '.canvas are always treated this way. Existing files convert on their '
+      'next edit. Save to apply.';
+  @override
+  String get forceBinarySave => 'Save';
+  @override
+  String get forceBinarySaved => 'Sync list saved. It applies on all devices.';
+  @override
+  String forceBinarySaveFailed(Object error) => 'Could not save: $error';
 
   // ── Settings: external storage ──
   @override

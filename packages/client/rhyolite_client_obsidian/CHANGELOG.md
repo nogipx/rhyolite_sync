@@ -1,3 +1,15 @@
+## [3.9.0] - 2026-07-23
+
+### Features
+
+- setting for which extensions sync as whole files (obsidian)
+- sync structured formats (excalidraw, canvas) as whole files (core)
+
+### Other
+
+- bump plugin to 3.9.0 (obsidian)
+
+
 ## [3.8.0] - 2026-07-19
 
 ### Features

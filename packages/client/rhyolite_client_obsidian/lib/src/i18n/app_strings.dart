@@ -308,6 +308,11 @@ abstract class AppStrings {
   String get fileTypesSection;
   String get dontSyncExtensions;
   String get dontSyncDescription;
+  String get forceBinaryExtensions;
+  String get forceBinaryDescription;
+  String get forceBinarySave;
+  String get forceBinarySaved;
+  String forceBinarySaveFailed(Object error);
 
   // ── Settings: external storage ───────────────────────────────────────────
   String get externalStorageSection;

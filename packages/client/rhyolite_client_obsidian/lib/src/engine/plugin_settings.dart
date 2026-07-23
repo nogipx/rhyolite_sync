@@ -67,6 +67,12 @@ void Function() registerSettingsTab({
   // both uploading and downloading). Device-local; default empty (sync all).
   required FileFilterPrefs Function() fileFilterPrefs,
   required Future<void> Function(FileFilterPrefs next) onFileFilterChanged,
+  // Vault-global force-binary list (synced across devices via the engine's
+  // encrypted vault-meta). Getter reads the engine's currently-loaded policy;
+  // the save callback persists it server-side and applies it live. Unlike the
+  // per-device denylist above, this list is the SAME on every device.
+  required Set<String> Function() forcedBinaryExtensions,
+  required Future<void> Function(Set<String> next) onForcedBinaryChanged,
   // Self-host edition state. When [selfHostEnabled] the managed auth section
   // (sign-in / subscription) is replaced by a self-host vault section that
   // uses [selfHostDirectory] (the sync server's registry).
@@ -400,6 +406,35 @@ void Function() registerSettingsTab({
       );
     }
 
+    // Vault-global "sync as whole files" list. Server round-trip, so unlike the
+    // per-device denylist it commits on an explicit Save button (not per
+    // keystroke). The text field feeds an edit buffer; Save persists via the
+    // engine, which writes it to the encrypted vault-meta slot for every device.
+    void addForcedBinarySection(PluginSettingsTab t) {
+      var buffer = forcedBinaryExtensions();
+      t.addText(
+        name: S.forceBinaryExtensions,
+        description: S.forceBinaryDescription,
+        initialValue: (forcedBinaryExtensions().toList()..sort()).join(', '),
+        placeholder: 'excalidraw, drawio',
+        onChange: (v) => buffer = FileFilterPrefs.parse(v),
+      );
+      t.addButton(
+        name: '',
+        description: '',
+        buttonText: S.forceBinarySave,
+        onClick: () async {
+          try {
+            await onForcedBinaryChanged(buffer);
+            showNotice(S.forceBinarySaved);
+            tab.show();
+          } catch (e) {
+            showNotice(S.forceBinarySaveFailed(e));
+          }
+        },
+      );
+    }
+
     final isSignedIn = currentAuthClient?.isSignedIn ?? false;
     final userEmail = currentAuthClient?.email ?? '';
 
@@ -483,6 +518,8 @@ void Function() registerSettingsTab({
     // Per-device file-type filter — only meaningful once a vault is connected.
     if (currentConfig.vaultId.isNotEmpty) {
       addFileFilterSection(t);
+      // Vault-global "sync as whole files" list lives in the same section.
+      addForcedBinarySection(t);
     }
 
     // Settings sync (.obsidian) — placed below "File types" as a normal open

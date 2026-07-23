@@ -105,15 +105,21 @@ class StateStartupDiff {
     Uint8List? blobIdKey,
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
+    Set<String> Function()? forcedBinaryExtensions,
     LogScope? logger,
   })  : _blobIdKey = blobIdKey,
         _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
         _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
         _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+        _forcedBinaryExtensions =
+            forcedBinaryExtensions ?? (() => const <String>{}),
         log = logger ?? LogScope.noop;
 
   /// Live per-device denylist of extensions (no dot) not synced on this device.
   final Set<String> Function() _excludedExtensions;
+
+  /// Live vault-global set of extensions (no dot) forced onto the binary path.
+  final Set<String> Function() _forcedBinaryExtensions;
 
   /// Current per-file upload size limit in bytes (null = unlimited). Over-limit
   /// binaries are skipped (not read/chunked/uploaded) to avoid re-freezing on
@@ -150,7 +156,8 @@ class StateStartupDiff {
     var pendingNew = 0;
     var pendingTombstoneRevive = 0;
     var pendingMissingChunks = 0;
-    final typeDetector = const FileTypeDetector();
+    final typeDetector =
+        FileTypeDetector(extraBinaryExtensions: _forcedBinaryExtensions());
     final blocked = <({String path, int sizeBytes, int limitBytes})>[];
     final excluded = <({String path, String extension})>[];
     final denylist = _excludedExtensions();

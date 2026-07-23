@@ -112,6 +112,20 @@ class StateSyncEngine implements ISyncEngine {
   /// engine; the host restarts the engine on change to re-evaluate all files.
   final Set<String> Function() _excludedExtensions;
 
+  /// Vault-global set of extensions (lowercase, no dot) the user forces onto
+  /// the binary LWW + conflict-copy path (e.g. `excalidraw` alongside the
+  /// built-in `.excalidraw.md`/`.canvas`). Loaded from the encrypted vault-meta
+  /// slot on [start] so it is IDENTICAL on every device — a per-device mismatch
+  /// would route the same file through different conflict resolvers and fail to
+  /// converge. Mutable: [setForcedBinaryExtensions] updates it live and the
+  /// children read it through a callback, so a change takes effect on the next
+  /// edit without an engine restart (existing files convert lazily).
+  Set<String> _forcedBinaryExtensions = <String>{};
+
+  /// Detector configured with the current force-binary policy.
+  FileTypeDetector get _detector =>
+      FileTypeDetector(extraBinaryExtensions: _forcedBinaryExtensions);
+
   /// Paths currently skipped for exceeding the size limit. Shared between the
   /// startup diff (seeds it) and the reconciler (clears it + emits
   /// [SyncFileSizeUnblocked] when a blocked path is deleted or shrinks). Lives
@@ -289,6 +303,7 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         maxFileSizeBytes: _maxFileSizeBytes,
         excludedExtensions: _excludedExtensions,
+        forcedBinaryExtensions: () => _forcedBinaryExtensions,
         sizeBlocked: _sizeBlockedPaths,
         sigStore: _sigStore,
         logger: _log,
@@ -311,6 +326,7 @@ class StateSyncEngine implements ISyncEngine {
         isFatalRejection: _rejections.isFatal,
         log: _log,
         excludedExtensions: _excludedExtensions,
+        forcedBinaryExtensions: () => _forcedBinaryExtensions,
       );
       _puller = StatePuller(
         stateCaller: conn.stateCaller,
@@ -386,6 +402,13 @@ class StateSyncEngine implements ISyncEngine {
       );
       if (!_running) return;
 
+      // Load the vault-global force-binary policy BEFORE the initial pull and
+      // StartupDiff — both classify files (resolver routing / upload routing),
+      // so the policy must be in place first. The children read it live via a
+      // callback over [_forcedBinaryExtensions].
+      await _loadForcedBinaryPolicy();
+      if (!_running) return;
+
       // Initial pull: brings local in line with whatever the server knows.
       final swPull = Stopwatch()..start();
       await _pull();
@@ -418,6 +441,7 @@ class StateSyncEngine implements ISyncEngine {
         // recomputed ones and every binary re-uploads (or never persists).
         blobIdKey: _resolveBlobIdKey(),
         excludedExtensions: _excludedExtensions,
+        forcedBinaryExtensions: () => _forcedBinaryExtensions,
         // Route text files through the Fugue reconciler so startup uses the
         // same blob format as the runtime path. Without this, text was
         // re-uploaded as raw bytes every startup (disk sha never matches the
@@ -779,6 +803,7 @@ class StateSyncEngine implements ISyncEngine {
         uploadSequenceBlob: _reconciler!.uploadSequenceBlob,
         emit: _emit,
         logWarning: _log.warning,
+        forcedBinaryExtensions: _forcedBinaryExtensions,
       )();
       _log.info(
         'Repair: ${result.repaired}/${result.total} files reseeded, '
@@ -921,7 +946,7 @@ class StateSyncEngine implements ISyncEngine {
         // keystroke); it hands ONE settled edit to the scheduler. Amber shows
         // immediately; the reconcile clears it if the edit was a no-op.
         final rel = normalizeVaultPath(relativePath);
-        if (const FileTypeDetector().isText(rel)) {
+        if (_detector.isText(rel)) {
           _markPending(_deterministicFileId(rel));
           _textDebounce.onDiskEvent(rel);
           return;
@@ -1342,6 +1367,61 @@ class StateSyncEngine implements ISyncEngine {
         'on the server — refusing to sync to the managed backend',
       );
     }
+  }
+
+  /// Loads the vault-global force-binary extension policy from the encrypted
+  /// vault-meta slot into [_forcedBinaryExtensions]. Best-effort: a missing
+  /// backend, locked vault, or read error leaves the set empty (built-in
+  /// force-binary rules still apply). Never throws — the policy is advisory,
+  /// not a blocker like the BYO credentials check.
+  Future<void> _loadForcedBinaryPolicy() async {
+    final storage = metaStorage;
+    final c = cipher;
+    if (storage == null || c == null) return;
+    try {
+      _forcedBinaryExtensions = await VaultMetaService(
+        storage: storage,
+        vaultId: config.vaultId,
+        cipher: c,
+      ).loadForcedBinaryExtensions();
+      _log.info(
+        'forced-binary policy: ${_forcedBinaryExtensions.length} extension(s)',
+      );
+    } catch (e) {
+      _log.warning('forced-binary policy load failed: $e');
+    }
+  }
+
+  /// The vault-global force-binary extension policy (lowercase, no dot),
+  /// as last loaded from / saved to the server. Empty before [start] connects.
+  /// The built-in `.excalidraw.md`/`.canvas` rules are NOT included here — they
+  /// always apply regardless of this set.
+  Set<String> get forcedBinaryExtensions =>
+      Set<String>.unmodifiable(_forcedBinaryExtensions);
+
+  /// Replaces the vault-global force-binary policy: persists it to the
+  /// encrypted vault-meta slot (so it travels to every device) and applies it
+  /// live. Existing files of a newly-added extension keep projecting from their
+  /// Fugue blob and convert to raw chunks on their next edit (lazy migration);
+  /// no re-scan is forced. Throws if the meta backend is unavailable, so the
+  /// caller can surface "can't save while signed out / vault locked".
+  Future<void> setForcedBinaryExtensions(Set<String> extensions) async {
+    final storage = metaStorage;
+    final c = cipher;
+    if (storage == null || c == null) {
+      throw StateError(
+        'cannot save the sync policy: '
+        '${storage == null ? 'not signed in' : 'vault locked'}',
+      );
+    }
+    final service = VaultMetaService(
+      storage: storage,
+      vaultId: config.vaultId,
+      cipher: c,
+    );
+    await service.saveForcedBinaryExtensions(extensions);
+    // Re-read so the in-memory copy is exactly the normalised, persisted set.
+    _forcedBinaryExtensions = await service.loadForcedBinaryExtensions();
   }
 
   // ---------------------------------------------------------------------------

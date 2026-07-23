@@ -49,6 +49,7 @@ class DiskReconciler {
     required void Function(SyncEngineEvent event) emit,
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
+    Set<String> Function()? forcedBinaryExtensions,
     Set<String>? sizeBlocked,
     StatSigStore? sigStore,
     LogScope? logger,
@@ -58,6 +59,8 @@ class DiskReconciler {
        _emit = emit,
        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+       _forcedBinaryExtensions =
+           forcedBinaryExtensions ?? (() => const <String>{}),
        _sizeBlocked = sizeBlocked ?? <String>{},
        _sigStore = sigStore,
        _log = logger ?? LogScope.noop;
@@ -82,6 +85,14 @@ class DiskReconciler {
   /// Live per-device denylist of lowercase extensions (no dot) the user chose
   /// not to sync on this device. Callback so a settings change takes effect.
   final Set<String> Function() _excludedExtensions;
+
+  /// Live vault-global set of extensions (no dot) forced onto the binary path.
+  /// Callback so the synced policy takes effect without rebuilding the engine.
+  final Set<String> Function() _forcedBinaryExtensions;
+
+  /// Detector configured with the current force-binary policy.
+  FileTypeDetector get _detector =>
+      FileTypeDetector(extraBinaryExtensions: _forcedBinaryExtensions());
 
   /// Paths currently over the size limit (shared with [StateStartupDiff] via the
   /// engine). Used to emit [SyncFileSizeUnblocked] exactly once when a blocked
@@ -186,7 +197,7 @@ class DiskReconciler {
       return false;
     }
 
-    final changed = await (const FileTypeDetector().isText(relPath)
+    final changed = await (_detector.isText(relPath)
         ? _reconcileText(relPath, context: context)
         : _reconcileBinary(relPath, context: context));
 
@@ -278,42 +289,52 @@ class DiskReconciler {
       return false;
     }
 
-    // (3) Fugue projection — cache the tree and write the projected text.
-    // Pre-Fugue plain-text blobs fall through and are written as-is; the
-    // next local edit upgrades them via [loadOrSeedSequence].
-    if (const FileTypeDetector().isText(state.path)) {
-      final swDecode = Stopwatch()..start();
-      final fugue = _tryDecodeFugueBlob(bytes);
-      swDecode.stop();
-      if (fugue != null) {
+    // (3) Fugue projection. The Fugue-magic test is a cheap 4-byte prefix
+    // check and runs for EVERY file regardless of classification: a
+    // magic-prefixed blob is always text-projectable and writing its raw
+    // serialised bytes to disk is never correct. This keeps a file that was
+    // synced as Fugue but is now classified binary (e.g. .excalidraw.md)
+    // materialising correctly until a local edit migrates it to raw chunks.
+    // Pre-Fugue plain-text blobs fall through and are written as-is; the next
+    // local edit upgrades them via [loadOrSeedSequence].
+    final isTextPath = _detector.isText(state.path);
+    final swDecode = Stopwatch()..start();
+    final fugue = _tryDecodeFugueBlob(bytes);
+    swDecode.stop();
+    if (fugue != null) {
+      // Only text files consult the tree on the push path, so only they need
+      // it cached; a now-binary file just needs the projected bytes.
+      if (isTextPath) {
         fugueStore.set(state.fileId, fugue);
         await fugueStore.persistOne(state.fileId);
-        // Yield to the host event loop before the projection — for big
-        // trees `.values.join()` runs hundreds of ms on the main JS
-        // thread, freezing Obsidian when chaining files.
-        await Future<void>.delayed(Duration.zero);
-        final swProject = Stopwatch()..start();
-        bytes = Uint8List.fromList(utf8.encode(fugue.values.join()));
-        swProject.stop();
-        _log.info(
-          'fugue materialise path=${state.path} '
-          'elements=${fugue.elementCount} '
-          'decode=${swDecode.elapsedMilliseconds}ms '
-          'project=${swProject.elapsedMilliseconds}ms '
-          'projected=${bytes.length}B',
-        );
-      } else if (FugueStore.isLegacySequenceBlob(bytes)) {
-        // A pre-Fugue Sequence blob from a not-yet-upgraded peer. Its bytes
-        // are NOT document text — writing them would corrupt the note. Skip
-        // without advancing the LCA so a reseed (from this device's own
-        // reconcile-from-disk, or an upgraded peer) replaces it.
-        _log.warning(
-          'Skipping legacy Sequence blob for ${state.path} — awaiting reseed',
-        );
-        return false;
       }
-      // Otherwise: a genuine pre-Fugue plain-text blob — write as-is.
+      // Yield to the host event loop before the projection — for big
+      // trees `.values.join()` runs hundreds of ms on the main JS
+      // thread, freezing Obsidian when chaining files.
+      await Future<void>.delayed(Duration.zero);
+      final swProject = Stopwatch()..start();
+      bytes = Uint8List.fromList(utf8.encode(fugue.values.join()));
+      swProject.stop();
+      _log.info(
+        'fugue materialise path=${state.path} '
+        'elements=${fugue.elementCount} '
+        'decode=${swDecode.elapsedMilliseconds}ms '
+        'project=${swProject.elapsedMilliseconds}ms '
+        'projected=${bytes.length}B',
+      );
+    } else if (isTextPath && FugueStore.isLegacySequenceBlob(bytes)) {
+      // A pre-Fugue Sequence blob from a not-yet-upgraded peer. Its bytes
+      // are NOT document text — writing them would corrupt the note. Skip
+      // without advancing the LCA so a reseed (from this device's own
+      // reconcile-from-disk, or an upgraded peer) replaces it. The probe is a
+      // full CBOR/JSON decode, so keep it off the binary path (large blobs).
+      _log.warning(
+        'Skipping legacy Sequence blob for ${state.path} — awaiting reseed',
+      );
+      return false;
     }
+    // Otherwise: a genuine pre-Fugue plain-text blob, or a real binary — write
+    // as-is.
 
     final fullPath = '$vaultPath/${state.path}';
     final swCompare = Stopwatch();

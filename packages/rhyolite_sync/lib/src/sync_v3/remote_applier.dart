@@ -34,12 +34,15 @@ class RemoteApplier {
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
     Set<String> Function()? excludedExtensions,
+    Set<String> Function()? forcedBinaryExtensions,
   }) : _newChunkedIO = newChunkedIO,
        _collectKnownChunks = collectKnownChunks,
        _emit = emit,
        _isFatalRejection = isFatalRejection,
        _log = log,
-       _excludedExtensions = excludedExtensions ?? (() => const <String>{});
+       _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+       _forcedBinaryExtensions =
+           forcedBinaryExtensions ?? (() => const <String>{});
 
   final FileStateStore store;
   final FugueStore fugueStore;
@@ -59,6 +62,16 @@ class RemoteApplier {
   /// Live per-device denylist of extensions (no dot) not synced on this device.
   /// A remote file of an excluded type is not downloaded/written (download-skip).
   final Set<String> Function() _excludedExtensions;
+
+  /// Live vault-global set of extensions (no dot) forced onto the binary path.
+  /// Must match every peer's — the classification here selects the conflict
+  /// resolver (Fugue-join for text vs LWW + conflict-copy for binary), so a
+  /// mismatch would make two devices resolve the same divergence differently.
+  final Set<String> Function() _forcedBinaryExtensions;
+
+  /// Detector configured with the current force-binary policy.
+  FileTypeDetector get _detector =>
+      FileTypeDetector(extraBinaryExtensions: _forcedBinaryExtensions());
 
   /// Apply all TaggedValues received for one fileId. Performs
   /// `localRegister.join(remoteRegister)` via [FileStateStore.applyRemote]
@@ -277,8 +290,7 @@ class RemoteApplier {
     final conflictPath = joined.allValues
         .map((s) => s.path)
         .firstWhere((p) => p.isNotEmpty, orElse: () => '');
-    if (conflictPath.isNotEmpty &&
-        const FileTypeDetector().isText(conflictPath)) {
+    if (conflictPath.isNotEmpty && _detector.isText(conflictPath)) {
       final swResolve = Stopwatch()..start();
       await _resolveTextConflict(fileId, joined, context: context);
       await store.persistOne(fileId);
@@ -797,9 +809,16 @@ class RemoteApplier {
     }
     loserBytes ??= await blobStore.read(loser.blobRef, vaultId: vaultId);
     if (loserBytes != null) {
-      final fullCopyPath = '$vaultPath/$copyPath';
-      changeProvider.suppress(copyPath);
-      await io.writeFile(fullCopyPath, loserBytes);
+      // Project a Fugue-stored loser to readable content — a now-binary file
+      // (e.g. .excalidraw.md) may still have a Fugue-encoded blob from before
+      // reclassification; writing raw \0fg1 bytes would make the conflict copy
+      // unopenable. Null means a legacy Sequence blob (not real content) — skip.
+      final materialised = materializeFileContent(loserBytes, loser.path);
+      if (materialised != null) {
+        final fullCopyPath = '$vaultPath/$copyPath';
+        changeProvider.suppress(copyPath);
+        await io.writeFile(fullCopyPath, materialised);
+      }
     }
   }
 }

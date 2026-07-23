@@ -11,9 +11,12 @@ import 'package:rpc_data/rpc_data.dart';
 /// cache is empty on every cold start, so every text file is re-reconciled.
 ///
 /// Storage: one row per fileId in `<vaultId>_stat_sig`, payload `{m, s}`.
-/// Keyed by the same deterministic fileId as [FileState] (`uuid.v5(vaultId,
-/// relPath)`), so a caller holding either a relPath (via its fileIdFor) or a
-/// fileId resolves the same row.
+/// Keyed by the same deterministic fileId as [FileState] (see
+/// `deterministicFileId` — the keyed HMAC, or the legacy `uuid.v5` fallback
+/// for a keyless vault), so a caller holding either a relPath (via its
+/// fileIdFor) or a fileId resolves the same row. This is why the caller's
+/// fileIdFor MUST match the engine's scheme — a drifted deriver keys a
+/// different row and the skip never fires.
 ///
 /// Persistence is best-effort: a lost write just costs one extra reconcile
 /// next startup, never correctness. The skip is only ever taken on an exact

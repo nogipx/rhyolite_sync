@@ -1,3 +1,14 @@
+## [3.9.1] - 2026-07-24
+
+### Bug Fixes
+
+- derive notes fileId through one keyed deriver (history reads were empty) (core)
+
+### Other
+
+- bump plugin to 3.9.1 (obsidian)
+
+
 ## [3.9.0] - 2026-07-23
 
 ### Features

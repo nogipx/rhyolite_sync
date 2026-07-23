@@ -1,9 +1,6 @@
 import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:uuid/uuid.dart';
-
-import 'path_normalize.dart';
 
 /// Per-file version viewer. Lists every historical write for one file,
 /// fetches and decrypts the bytes of any past version, and can restore
@@ -21,6 +18,7 @@ class FileVersionViewer {
     required this.changeProvider,
     required this.vaultPath,
     required this.vaultId,
+    this.recordIdKey,
   }) : _chunkedIOBuilder = chunkedIOBuilder;
 
   final HistoryBrowser browser;
@@ -35,8 +33,14 @@ class FileVersionViewer {
   final String vaultPath;
   final String vaultId;
 
+  /// The vault's record-id HMAC subkey ([VaultCipher.deriveRecordIdKey]). MUST
+  /// be the same key the engine pushes state/history with, or [versionsOf]
+  /// queries a different fileId than was written and finds no history. Null
+  /// falls back to the legacy unkeyed uuid.v5 (tests / keyless vault).
+  final Uint8List? recordIdKey;
+
   String _fileIdFor(String relPath) =>
-      const Uuid().v5(vaultId, normalizeVaultPath(relPath));
+      deterministicFileId(recordIdKey, vaultId, relPath);
 
   /// All recorded versions for the file at [relPath], newest first.
   Future<List<HistoryEntry>> versionsOf(String relPath) =>

@@ -5,7 +5,6 @@ import 'package:http/http.dart' as http;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
-import 'package:uuid/uuid.dart';
 
 import 'causal_stability_gc.dart';
 import 'disk_reconciler.dart';
@@ -440,6 +439,10 @@ class StateSyncEngine implements ISyncEngine {
         // detection; otherwise stored (HMAC) chunk ids never match the
         // recomputed ones and every binary re-uploads (or never persists).
         blobIdKey: _resolveBlobIdKey(),
+        // Same keyed fileId scheme the reconciler/push path uses. Without it,
+        // startup's store lookups miss and binaries split-brain under a second
+        // (unkeyed) fileId.
+        recordIdKey: _resolveRecordIdKey(),
         excludedExtensions: _excludedExtensions,
         forcedBinaryExtensions: () => _forcedBinaryExtensions,
         // Route text files through the Fugue reconciler so startup uses the
@@ -804,6 +807,9 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         logWarning: _log.warning,
         forcedBinaryExtensions: _forcedBinaryExtensions,
+        // Reseed under the SAME keyed fileId the live record uses, or the
+        // repaired state lands on a different id and never overwrites it.
+        recordIdKey: _resolveRecordIdKey(),
       )();
       _log.info(
         'Repair: ${result.repaired}/${result.total} files reseeded, '
@@ -1443,6 +1449,10 @@ class StateSyncEngine implements ISyncEngine {
       changeProvider: changeProvider,
       vaultPath: vaultPath,
       vaultId: config.vaultId,
+      // Same keyed scheme the push/history path uses, so versionsOf queries the
+      // exact fileId events were written under (else history reads come back
+      // empty though the rows exist — the pre-fix bug).
+      recordIdKey: _resolveRecordIdKey(),
     );
   }
 
@@ -1784,16 +1794,13 @@ class StateSyncEngine implements ISyncEngine {
     endpoint: _conn?.endpoint,
   );
 
-  String _deterministicFileId(String relPath) {
-    final path = normalizeVaultPath(relPath);
-    final key = _resolveRecordIdKey();
-    // Keyed id so the server cannot enumerate paths. The unkeyed uuid.v5
-    // fallback only fires for a non-VaultCipher fake (tests), never in a real
-    // session where a VaultCipher is always present.
-    return key == null
-        ? const Uuid().v5(config.vaultId, path)
-        : VaultCipher.recordId(key, config.vaultId, path);
-  }
+  // Keyed id so the server cannot enumerate paths. The unkeyed uuid.v5
+  // fallback (inside [deterministicFileId]) only fires for a non-VaultCipher
+  // fake (tests), never in a real session where a VaultCipher is always
+  // present. Shared with the reconciler, startup diff, repair and the version
+  // viewer so every producer/consumer derives the SAME id.
+  String _deterministicFileId(String relPath) =>
+      deterministicFileId(_resolveRecordIdKey(), config.vaultId, relPath);
 
   void _emit(SyncEngineEvent event) {
     if (!_eventsController.isClosed) _eventsController.add(event);

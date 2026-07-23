@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:convergent/fugue.dart';
-import 'package:uuid/uuid.dart';
 
 import '../chunking/file_type_detector.dart';
 import '../engine/sync_engine_event.dart';
@@ -11,6 +11,7 @@ import '../sync_v3/file_state.dart';
 import '../sync_v3/file_state_store.dart';
 import '../sync_v3/fugue_store.dart';
 import '../sync_v3/fugue_text_sync.dart';
+import '../sync_v3/record_id.dart';
 
 /// Result of a vault repair pass.
 class RepairResult {
@@ -62,11 +63,17 @@ class RepairVaultUseCase {
     required this.emit,
     required this.logWarning,
     this.forcedBinaryExtensions = const <String>{},
+    this.recordIdKey,
   });
 
   final IPlatformIO io;
   final String vaultPath;
   final String vaultId;
+
+  /// Vault record-id HMAC subkey ([VaultCipher.deriveRecordIdKey]). MUST match
+  /// the engine's scheme or the reseeded state is written under a different
+  /// fileId than the live record and never overwrites it. Null → legacy uuid.v5.
+  final Uint8List? recordIdKey;
   final FileStateStore store;
   final FugueStore fugueStore;
 
@@ -146,7 +153,7 @@ class RepairVaultUseCase {
     final absPath = '$vaultPath/$relPath';
     if (!await io.fileExists(absPath)) return;
 
-    final fileId = const Uuid().v5(vaultId, relPath);
+    final fileId = deterministicFileId(recordIdKey, vaultId, relPath);
     final bytes = await io.readFile(absPath);
     final text = utf8.decode(bytes, allowMalformed: true);
 

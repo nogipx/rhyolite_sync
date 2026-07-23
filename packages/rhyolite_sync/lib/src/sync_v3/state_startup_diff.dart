@@ -1,7 +1,6 @@
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
-import 'package:uuid/uuid.dart';
 
 import 'path_normalize.dart';
 
@@ -88,6 +87,15 @@ class StateStartupDiff {
   final Uint8List? _blobIdKey;
   final String Function(Uint8List) _hasher;
 
+  /// Per-vault record-id HMAC subkey ([VaultCipher.deriveRecordIdKey]). MUST
+  /// match the engine/reconciler scheme: change detection here does
+  /// `store.get(_deterministicFileId(relPath))`, and the store is keyed by the
+  /// engine's keyed id. With the old unkeyed uuid.v5 the lookup always missed,
+  /// so every binary looked new — re-uploaded and pushed under a second, wrong
+  /// fileId (split-brain vs the runtime keyed record). Null → legacy uuid.v5
+  /// (no-engine / test path).
+  final Uint8List? _recordIdKey;
+
   StateStartupDiff({
     required this.store,
     required this.blobStore,
@@ -103,11 +111,13 @@ class StateStartupDiff {
     this.reconcileText,
     this.sigStore,
     Uint8List? blobIdKey,
+    Uint8List? recordIdKey,
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
     Set<String> Function()? forcedBinaryExtensions,
     LogScope? logger,
   })  : _blobIdKey = blobIdKey,
+        _recordIdKey = recordIdKey,
         _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
         _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
         _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
@@ -533,7 +543,7 @@ class StateStartupDiff {
   }
 
   String _deterministicFileId(String relativePath) =>
-      const Uuid().v5(vaultId, normalizeVaultPath(relativePath));
+      deterministicFileId(_recordIdKey, vaultId, relativePath);
 
   static bool _isHidden(String relPath) =>
       relPath.split('/').any((s) => s.startsWith('.'));

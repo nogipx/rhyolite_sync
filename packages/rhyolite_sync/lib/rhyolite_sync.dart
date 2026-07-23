@@ -74,6 +74,7 @@ export 'src/sync_v3/fugue_store.dart';
 export 'src/sync_v3/fugue_text_sync.dart';
 export 'src/sync_v3/history_browser.dart';
 export 'src/sync_v3/local_blob_gc.dart';
+export 'src/sync_v3/record_id.dart';
 export 'src/sync_v3/notify_coordinator.dart';
 export 'src/sync_v3/stat_sig_store.dart';
 export 'src/sync_v3/state_conflict_resolver.dart';

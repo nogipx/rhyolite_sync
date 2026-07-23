@@ -262,6 +262,52 @@ void main() {
     expect(v.last.eventId, 'a');
   });
 
+  test('versionsOf queries the KEYED record id when a recordIdKey is set',
+      () async {
+    // Regression for the reported bug: the engine/server key history events by
+    // the keyed HMAC fileId (since 3.5.3), but the viewer used the legacy
+    // unkeyed uuid.v5 — so a keyed vault always saw "no history for this file"
+    // even though the rows existed.
+    final key = Uint8List.fromList(List.generate(32, (i) => i + 1));
+    final keyedViewer = FileVersionViewer(
+      browser: browser,
+      chunkedIOBuilder: () => cio,
+      io: io,
+      changeProvider: changes,
+      vaultPath: vaultPath,
+      vaultId: _v,
+      recordIdKey: key,
+    );
+    const path = 'notes/keyed.md';
+    final keyedId = VaultCipher.recordId(key, _v, path);
+    // The keyed id must differ from the legacy unkeyed one, or the test proves
+    // nothing.
+    expect(keyedId, isNot(fid(path)));
+
+    // History stored under the keyed id — what the push/server path writes.
+    fakeHistory.events.add(
+      _evt(
+        id: 'k',
+        fileId: keyedId,
+        hlc: '100-0-A',
+        op: HistoryOperation.create,
+        blobRef: 'sha-k',
+        createdAtMs: 1,
+        path: path,
+        size: 5,
+      ),
+    );
+
+    // Keyed viewer finds it...
+    final found = await keyedViewer.versionsOf(path);
+    expect(found.length, 1);
+    expect(found.first.eventId, 'k');
+
+    // ...while the legacy unkeyed viewer (null key → uuid.v5) misses it — the
+    // exact failure the user hit.
+    expect(await viewer.versionsOf(path), isEmpty);
+  });
+
   test('contentAt assembles binary content from the chunk manifest', () async {
     // 3 MiB of varied bytes → forces a multi-chunk manifest, so this proves
     // we assemble through ChunkedBlobIO rather than handing back the manifest.

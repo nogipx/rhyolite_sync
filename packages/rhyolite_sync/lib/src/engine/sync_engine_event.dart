@@ -134,7 +134,11 @@ class SyncPending extends SyncEngineEvent {
 }
 
 class SyncFilePulled extends SyncEngineEvent {
-  SyncFilePulled({required this.fileId, required this.nodeCount, this.path = ''});
+  SyncFilePulled({
+    required this.fileId,
+    required this.nodeCount,
+    this.path = '',
+  });
 
   final String fileId;
   final int nodeCount;
@@ -181,6 +185,10 @@ class SyncVaultReset extends SyncEngineEvent {
 ///
 /// - `auth.session_expired` — refresh token invalid; user must re-sign-in.
 ///   The engine stops after emitting this code.
+/// - `auth.token_missing` — no token was attached to the call (the host's
+///   token provider is unbound, or the server saw no Authorization
+///   header). The session on disk may be perfectly good, so a host must
+///   NOT discard it on this code — rebind the provider and restart.
 /// - `auth.permission_denied` — caller does not own the vault.
 /// - `app_policy.subscription_required` — no active subscription. The
 ///   engine stops after emitting this code.
@@ -272,12 +280,12 @@ class SyncServerRejected extends SyncEngineEvent {
 ///
 /// Wired into [StateSyncEngine] via the `rejectionFactory` constructor
 /// parameter. See [SyncServerRejected] for the full pattern.
-typedef ServerRejectionFactory = SyncServerRejected? Function(
-  String code,
-  String message,
-  Map<String, dynamic> params,
-);
-
+typedef ServerRejectionFactory =
+    SyncServerRejected? Function(
+      String code,
+      String message,
+      Map<String, dynamic> params,
+    );
 
 /// Emitted while the engine is uploading blobs as part of a startup diff
 /// (typically right after a reset / re-upload). Carries (completed, total)
@@ -292,7 +300,10 @@ class SyncStartupBlobUploadProgress extends SyncEngineEvent {
 /// Emitted once startup blob upload finishes (whether it had work to do
 /// or not). UI clears the progress indicator on this event.
 class SyncStartupBlobUploadDone extends SyncEngineEvent {
-  SyncStartupBlobUploadDone({required this.totalUploaded, required this.elapsed});
+  SyncStartupBlobUploadDone({
+    required this.totalUploaded,
+    required this.elapsed,
+  });
 
   final int totalUploaded;
   final Duration elapsed;

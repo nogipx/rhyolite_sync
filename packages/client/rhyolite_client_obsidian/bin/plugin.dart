@@ -8,6 +8,8 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_client_account/rhyolite_client_account.dart'
     hide VaultInfo;
 import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
+import 'package:rhyolite_client_obsidian/src/engine/auth_recovery.dart';
+import 'package:rhyolite_client_obsidian/src/engine/auth_session_state.dart';
 import 'package:rhyolite_client_obsidian/src/engine/backup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
@@ -25,7 +27,6 @@ import 'package:rhyolite_client_obsidian/src/engine/sync_status_indicator.dart';
 import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
 import 'package:rhyolite_client_obsidian/src/i18n/i18n.dart';
 import 'package:rhyolite_client_obsidian/src/platform/obsidian_http_client.dart';
-import 'package:rhyolite_client_obsidian/src/vault/managed_vault_directory.dart';
 import 'package:rpc_blob_sqlite/rpc_blob_sqlite.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_dart_compression/rpc_dart_compression.dart';
@@ -146,6 +147,13 @@ int _selfHealAttempt = 0;
 bool _authRefreshInFlight = false;
 DateTime? _lastAuthRefreshAt;
 
+/// Consecutive "rebind the live session and restart" recoveries. Bounded so a
+/// rebind that does not actually fix the rejection can't restart the engine on
+/// every cooldown; past the cap the handler falls through to refresh/prompt.
+/// Reset on the next successful connect.
+int _authRebindAttempts = 0;
+const int _kMaxAuthRebinds = 3;
+
 /// Stops the offline self-heal loop and resets its backoff. Called on connect,
 /// on pause and on unload.
 void _cancelSelfHeal() {
@@ -211,21 +219,18 @@ void _scheduleSettingsReloadNotice(PluginHandle plugin) {
 /// unavailable (e.g. mobile has no app:reload).
 void _showReloadNotice(PluginHandle plugin, String message) {
   try {
-    final obsidian = jsu.callMethod<Object?>(
-      jsu.globalThis,
-      'require',
-      ['obsidian'],
-    );
+    final obsidian = jsu.callMethod<Object?>(jsu.globalThis, 'require', [
+      'obsidian',
+    ]);
     final noticeCtor = jsu.getProperty<Object?>(obsidian!, 'Notice');
     // timeout 0 = stays until dismissed or the app reloads.
     final notice = jsu.callConstructor<Object?>(noticeCtor!, [message, 0])!;
     final el = jsu.getProperty<Object?>(notice, 'noticeEl');
     if (el == null) return;
-    final btn = jsu.callMethod<Object?>(
-      el,
-      'createEl',
-      ['button', jsu.jsify({'text': ' Reload', 'cls': 'mod-cta'})],
-    )!;
+    final btn = jsu.callMethod<Object?>(el, 'createEl', [
+      'button',
+      jsu.jsify({'text': ' Reload', 'cls': 'mod-cta'}),
+    ])!;
     jsu.setProperty(btn, 'style', 'margin-left: 8px;');
     jsu.callMethod<void>(btn, 'addEventListener', [
       'click',
@@ -307,9 +312,9 @@ void _stopConfigSync() {
 /// onAuthChanged callback) would leave the engine with a stale null
 /// `metaStorage` and `_checkExternalBlobConfig` would silently never
 /// load the server-side external blob config.
-void _setEngineAuth(ISyncEngine engine, RpcAccountClient? client) {
+void _setEngineAuth(ISyncEngine engine, AuthSessionState auth) {
   if (engine is! StateSyncEngine) return;
-  engine.metaStorage = client != null ? AccountVaultMetaStorage(client) : null;
+  engine.metaStorage = auth.metaStorage;
 }
 
 /// Opens [url] in the user's real system browser, not Obsidian's in-app Web
@@ -321,8 +326,9 @@ void _setEngineAuth(ISyncEngine engine, RpcAccountClient? client) {
 /// on mobile (no Electron), where that already opens the system browser.
 void _openExternalUrl(String url) {
   try {
-    final electron =
-        jsu.callMethod<Object?>(jsu.globalThis, 'require', ['electron']);
+    final electron = jsu.callMethod<Object?>(jsu.globalThis, 'require', [
+      'electron',
+    ]);
     if (electron != null) {
       final shell = jsu.getProperty<Object?>(electron, 'shell');
       if (shell != null) {
@@ -433,10 +439,12 @@ void main() {
               ? selfHost.syncUrl
               : kEnv.syncServiceUrl;
 
-          // Shared session bindings, filled by whichever edition is active.
-          IVaultDirectory? directory; // drives the vault picker
-          ITokenProvider? sessionTokenProvider; // engine bearer
-          IVaultMetaStorage? sessionMetaStorage; // external-blob config store
+          // Session bindings (token provider, vault directory, meta store) for
+          // whichever edition is active. ONE instance, read back through
+          // `auth.*` everywhere — never copied into a local, or a later
+          // sign-in updates one copy and the rest of the plugin keeps acting
+          // signed out. See [AuthSessionState].
+          final auth = AuthSessionState(selfHost: selfHostActive);
           WebSocketSyncConnection? registryConn; // self-host: kept alive
 
           // -----------------------------------------------------------------------
@@ -459,14 +467,16 @@ void main() {
           // next cold start is forced to re-login with a revoked token.
           accountClient.onSessionPersist = configStorage.saveAuthSession;
 
-          RpcAccountClient? authClient;
+          // Boot-time session restore. The result is handed to `auth` below —
+          // this local exists only for the length of that restore.
+          RpcAccountClient? restoredClient;
 
           if (!selfHostActive && authConfig.isConfigured) {
             final savedSession = await configStorage.loadAuthSession();
             if (savedSession != null) {
               if (!savedSession.isExpired) {
                 accountClient.useSession(savedSession);
-                authClient = accountClient;
+                restoredClient = accountClient;
               } else {
                 // Token expired — try to refresh.
                 try {
@@ -476,14 +486,14 @@ void main() {
                   if (newSession != null) {
                     await configStorage.saveAuthSession(newSession);
                   }
-                  authClient = accountClient;
+                  restoredClient = accountClient;
                 } catch (e) {
                   final msg = e.toString();
                   if (msg.contains('(400)') || msg.contains('(401)')) {
                     await configStorage.clearAuthSession();
                   } else {
                     accountClient.useSession(savedSession);
-                    authClient = accountClient;
+                    restoredClient = accountClient;
                   }
                 }
               }
@@ -492,10 +502,10 @@ void main() {
 
           // Bind the vault directory + engine auth to the active edition.
           if (selfHostActive) {
-            sessionTokenProvider = StaticTokenProvider(selfHostToken);
+            auth.bindSelfHostToken(selfHostToken);
             registryConn = WebSocketSyncConnection(
               serverUrl: syncServerUrl,
-              tokenProvider: sessionTokenProvider,
+              tokenProvider: auth.tokenProvider,
               logger: _logController.scope('registry'),
             );
             try {
@@ -506,15 +516,15 @@ void main() {
               final regCaller = VaultRegistryContractCaller(
                 registryConn.endpoint,
               );
-              directory = SelfHostVaultDirectory(regCaller);
-              sessionMetaStorage = SelfHostVaultMetaStorage(regCaller);
+              auth.bindSelfHostRegistry(
+                directory: SelfHostVaultDirectory(regCaller),
+                metaStorage: SelfHostVaultMetaStorage(regCaller),
+              );
             } catch (e) {
               _log.warning('Self-host registry connect failed: $e');
             }
-          } else if (authClient != null) {
-            directory = ManagedVaultDirectory(authClient);
-            sessionTokenProvider = RpcAccountClientTokenProvider(authClient);
-            sessionMetaStorage = AccountVaultMetaStorage(authClient);
+          } else {
+            auth.bindAccount(restoredClient);
           }
 
           // -----------------------------------------------------------------------
@@ -532,8 +542,8 @@ void main() {
           }
           VaultCipher? cipher;
 
-          if (directory != null) {
-            final dir = directory;
+          if (auth.directory != null) {
+            final dir = auth.directory!;
             if (config == null) {
               final result = await withModalLock(
                 () => showVaultPickerModal(plugin, dir, configStorage),
@@ -573,22 +583,14 @@ void main() {
 
           // Single config builder for every (re)build — initial boot AND the
           // settings callbacks (onVaultChanged/onConfigChanged/onAuthChanged).
-          // Self-host always uses the static token provider (no account client,
-          // so the managed branch would otherwise drop the token and the engine
-          // would connect unauthenticated). Managed uses the passed client.
-          VaultConfig buildConfig(VaultConfig base, RpcAccountClient? client) {
-            if (selfHostActive) {
-              return sessionTokenProvider != null
-                  ? base.copyWith(tokenProvider: sessionTokenProvider)
-                  : base;
-            }
-            if (client == null) return base;
-            return base.copyWith(
-              tokenProvider: RpcAccountClientTokenProvider(client),
-            );
-          }
+          // Always the SAME provider instance, in every edition and whether or
+          // not a session exists: sign-in mutates it in place, so no config
+          // rebuild can leave the engine without one. Signed out it simply
+          // fails calls locally instead of sending them unauthenticated.
+          VaultConfig buildConfig(VaultConfig base) =>
+              base.copyWith(tokenProvider: auth.tokenProvider);
 
-          final activeConfig = buildConfig(cfg, authClient);
+          final activeConfig = buildConfig(cfg);
 
           final wasmUri = _resolveWasmUri();
 
@@ -682,7 +684,8 @@ void main() {
           try {
             final manifest = jsu.getProperty<JSObject?>(plugin.raw, 'manifest');
             if (manifest != null) {
-              pluginVersion = jsu.getProperty<String?>(manifest, 'version') ?? '';
+              pluginVersion =
+                  jsu.getProperty<String?>(manifest, 'version') ?? '';
             }
           } catch (_) {}
           final clientKind = selfHostActive ? 'obsidian-selfhost' : 'obsidian';
@@ -710,7 +713,7 @@ void main() {
               plugin,
               logger: _logController.scope('engine'),
             ),
-            metaStorage: sessionMetaStorage,
+            metaStorage: auth.metaStorage,
             httpClient: ObsidianHttpClient(),
             logger: _logController.scope('engine'),
             rejectionFactory: pluginRejectionFactory,
@@ -729,6 +732,34 @@ void main() {
           _engine = engine;
           _log.info('boot: engine ctor ${bootSw.elapsedMilliseconds}ms');
 
+          // (Re)binds `.obsidian` settings sync to the engine's CURRENT
+          // endpoint. Every engine restart invalidates the old one, so any
+          // path that restarts must call this or settings sync silently stops.
+          Future<void> relaunchConfigSync() async {
+            if (cipher == null) return;
+            await _launchConfigSync(
+              engine: engine,
+              dataClient: dataClient,
+              cipher: cipher!,
+              vaultId: vaultId,
+              plugin: plugin,
+              prefs: settingsPrefs,
+            );
+          }
+
+          // Restarts the engine so a changed session reaches the wire. The
+          // bearer interceptor is installed once per connection, so a new
+          // token only takes effect on a fresh connect — assigning
+          // `engine.config` alone leaves the live socket authenticating as
+          // whoever (or whatever) opened it.
+          Future<void> restartForAuth() async {
+            await _scheduleBoot(() async {
+              await engine.stop();
+              await _guardedStart(engine);
+            });
+            await relaunchConfigSync();
+          }
+
           // Starts a full sync session: cache plan caps (the size gate needs
           // the tier BEFORE StartupDiff, which runs inside start()), start the
           // engine, then launch settings-sync. Shared by the boot start below
@@ -741,16 +772,7 @@ void main() {
               _capabilities = sub.capabilities;
             } catch (_) {}
             await _scheduleBoot(() => _guardedStart(engine));
-            if (cipher != null) {
-              await _launchConfigSync(
-                engine: engine,
-                dataClient: dataClient,
-                cipher: cipher!,
-                vaultId: vaultId,
-                plugin: plugin,
-                prefs: settingsPrefs,
-              );
-            }
+            await relaunchConfigSync();
           }
 
           // Single source of truth for the pause toggle — shared by the panel
@@ -823,15 +845,16 @@ void main() {
             onSetPaused: setSyncPaused,
             // Shown as a button only while sync looks stuck; runs the same
             // recovery path as the indicator tap and the command.
-            onReconnect: () => recover?.call(requireVisible: false) ??
-                Future<void>.value(),
+            onReconnect: () =>
+                recover?.call(requireVisible: false) ?? Future<void>.value(),
             // Managed-only usage meter; self-host/BYO have no managed quota.
             onFetchUsage: (selfHostActive || byo)
                 ? null
                 : () => _fetchVaultUsage(engine, vaultId),
-            onSettingsSize: () =>
-                SettingsStore(client: dataClient, vaultId: vaultId)
-                    .approxTotalBytes(),
+            onSettingsSize: () => SettingsStore(
+              client: dataClient,
+              vaultId: vaultId,
+            ).approxTotalBytes(),
             onStorageDetails: () => showStorageOverviewModal(plugin, engine),
           )..register();
           _syncPanel = syncPanel;
@@ -869,7 +892,7 @@ void main() {
           _deletedVaultWatchSub = engine.events.listen((e) async {
             if (e is! SyncConnected) return;
             final connectedVaultId = engine.config.vaultId;
-            final d = directory;
+            final d = auth.directory;
             if (connectedVaultId.isEmpty || d == null) return;
             final List<VaultInfo> vaults;
             try {
@@ -907,11 +930,11 @@ void main() {
           // external (BYO) blobs stay in the user's own bucket (the confirmation
           // warns to clear it separately).
           Future<void> deleteVaultClosure(VaultInfo vault) async {
-            final dir = directory;
-            final tp = sessionTokenProvider;
-            if (dir == null || tp == null) {
+            final dir = auth.directory;
+            if (dir == null || !auth.hasToken) {
               throw StateError('Not signed in — cannot delete a vault.');
             }
+            final tp = auth.tokenProvider;
             final vaultId = vault.vaultId;
 
             // 1. Tombstone first (intent). Idempotent.
@@ -961,15 +984,15 @@ void main() {
             configStorage: configStorage,
             config: cfg,
             authConfig: authConfig,
-            authClient: authClient,
+            auth: auth,
             accountClient: accountClient,
             engine: engine,
             buildConfig: buildConfig,
+            restartForAuth: restartForAuth,
             settingsSyncPrefs: () => settingsPrefs,
             onDeleteVault: deleteVaultClosure,
             selfHostEnabled: selfHostActive,
             selfHostUrl: selfHost.syncUrl,
-            selfHostDirectory: selfHostActive ? directory : null,
             onSettingsSyncChanged: (next) async {
               settingsPrefs = next;
               await configStorage.saveSettingsSync(next.toJson());
@@ -1194,7 +1217,9 @@ void main() {
             // [requireVisible] gates the resume path (visibilitychange) on the
             // tab actually being visible; the network path (online) fires
             // regardless.
-            Future<void> recoverConnection({required bool requireVisible}) async {
+            Future<void> recoverConnection({
+              required bool requireVisible,
+            }) async {
               if (recoverInFlight || _syncPaused) return;
               if (requireVisible && documentJs != null) {
                 final visible =
@@ -1258,7 +1283,8 @@ void main() {
             const maxSelfHeal = 10;
             var selfHealOnline = false;
             void scheduleHeal() {
-              if (_syncPaused || selfHealOnline || _selfHealTimer != null) return;
+              if (_syncPaused || selfHealOnline || _selfHealTimer != null)
+                return;
               if (_selfHealAttempt >= maxSelfHeal) {
                 _log.warning(
                   'Self-heal gave up after $maxSelfHeal attempts — '
@@ -1267,7 +1293,13 @@ void main() {
                 return;
               }
               // Backoff 5s,10s,20s,40s,60s(cap). Reset to 5s on any reconnect.
-              final delaySec = [5, 10, 20, 40, 60][_selfHealAttempt.clamp(0, 4)];
+              final delaySec = [
+                5,
+                10,
+                20,
+                40,
+                60,
+              ][_selfHealAttempt.clamp(0, 4)];
               _selfHealTimer = Timer(Duration(seconds: delaySec), () async {
                 _selfHealTimer = null;
                 if (_syncPaused || selfHealOnline || _engine == null) return;
@@ -1304,10 +1336,8 @@ void main() {
                 documentJs,
                 'visibilitychange',
                 jsu.allowInterop((JSAny? _) {
-                  final visible = jsu.getProperty<String?>(
-                        documentJs,
-                        'visibilityState',
-                      ) ==
+                  final visible =
+                      jsu.getProperty<String?>(documentJs, 'visibilityState') ==
                       'visible';
                   if (visible) {
                     recoverConnection(requireVisible: true);
@@ -1371,24 +1401,11 @@ void main() {
           // events while the auto sign-in flow is mid-wait or mid-modal.
           var _autoSignInInFlight = false;
           _engineAuthEventsSub = engine.events.listen((event) async {
-            // Every engine (re)start in this listener (blob-config adopt,
-            // token refresh, re-auth) must also relaunch settings sync —
-            // otherwise .obsidian config stops syncing after any auth recovery.
-            Future<void> relaunchConfigSync() async {
-              if (cipher == null) return;
-              await _launchConfigSync(
-                engine: engine,
-                dataClient: dataClient,
-                cipher: cipher!,
-                vaultId: vaultId,
-                plugin: plugin,
-                prefs: settingsPrefs,
-              );
-            }
-
             switch (event) {
               case ExternalBlobConfigDiscovered(:final kind):
-                _log.info('External blob config ($kind) discovered from server');
+                _log.info(
+                  'External blob config ($kind) discovered from server',
+                );
                 // The engine already fetched, decrypted and applied the config
                 // synchronously (_checkExternalBlobConfig) BEFORE emitting this
                 // event, so read the applied config from the engine — the secret
@@ -1413,7 +1430,12 @@ void main() {
                   // secret, so adopt it and restart to pick up the backend.
                   // (Unreachable at start-time now that the engine self-applies;
                   // kept for the historical runtime-discovery path.)
-                  engine.config = buildConfig(updated, authClient);
+                  engine.config = buildConfig(
+                    engine.config.copyWith(
+                      externalBlobConfig: extConfig,
+                      externalStorageKind: extConfig?.kind ?? kind,
+                    ),
+                  );
                   await _scheduleBoot(() async {
                     await engine.stop();
                     await _guardedStart(engine);
@@ -1427,6 +1449,11 @@ void main() {
                 // instead of the snapshot's "Configure" buttons.
                 refreshSettings();
                 return;
+              case SyncConnected():
+                // Authenticated traffic is flowing again — arm the bounded
+                // rebind budget for the next auth incident.
+                _authRebindAttempts = 0;
+                return;
               case SubscriptionRequired():
                 return;
               case SessionExpired():
@@ -1437,7 +1464,8 @@ void main() {
               // SessionExpired). Funnel it into the same debounced refresh path
               // so an expired session heals without an Obsidian restart. Self-
               // host has no account session, so never refresh/prompt there.
-              case SyncServerRejected(:final code) when code.startsWith('auth.'):
+              case SyncServerRejected(:final code)
+                  when code.startsWith('auth.'):
                 if (selfHostActive) return;
                 break; // fall through to refresh handler below
               // Every other policy rejection (managed storage unavailable, quota
@@ -1463,32 +1491,64 @@ void main() {
                         const Duration(seconds: 8))) {
               return;
             }
+            _lastAuthRefreshAt = nowAuth;
+
+            final live = accountClient.session;
+            final client = auth.client ?? accountClient;
+            final tokenMissing = event is AuthTokenMissing;
+            final plan = planAuthRecovery(
+              tokenMissing: tokenMissing,
+              sessionLive: live != null && !live.isExpired,
+              sessionPresent: client.session != null,
+              providerBound: auth.hasToken && auth.client != null,
+              rebindBudgetLeft: _authRebindAttempts < _kMaxAuthRebinds,
+            );
+
+            // A live session with nothing attached to the wire is OUR failure,
+            // not an expired token: the provider was unbound, or the socket
+            // was opened before the sign-in and still authenticates as nobody.
+            if (plan == AuthRecovery.rebind) {
+              _authRebindAttempts++;
+              _log.warning('Auth rejected but session is live — rebinding');
+              auth.bindAccount(accountClient);
+              _setEngineAuth(engine, auth);
+              engine.config = buildConfig(engine.config);
+              await restartForAuth();
+              _log.info('Auth rebound from live session — restarted');
+              return;
+            }
+
             _log.warning('Auth rejected — attempting token refresh');
 
-            final client = authClient;
-            if (client != null) {
+            var refreshRefused = false;
+            if (plan == AuthRecovery.refresh) {
               _authRefreshInFlight = true;
-              _lastAuthRefreshAt = nowAuth;
               try {
                 final session = await client.refreshSession();
                 await configStorage.saveAuthSession(session);
-                _setEngineAuth(engine, client);
-                engine.config = buildConfig(cfg, client);
-                await _scheduleBoot(() => _guardedStart(engine));
-                await relaunchConfigSync();
+                auth.bindAccount(client);
+                _setEngineAuth(engine, auth);
+                engine.config = buildConfig(engine.config);
+                await restartForAuth();
                 _log.info('Token refreshed — restarted');
                 return;
               } catch (_) {
+                refreshRefused = true;
                 _log.warning('Refresh failed — prompting re-authentication');
               } finally {
                 _authRefreshInFlight = false;
               }
             }
 
-            await configStorage.clearAuthSession();
-            authClient = null;
-            _setEngineAuth(engine, null);
-            engine.config = cfg;
+            if (shouldClearStoredSession(
+              tokenMissing: tokenMissing,
+              refreshRefused: refreshRefused,
+            )) {
+              await configStorage.clearAuthSession();
+              auth.bindAccount(null);
+              _setEngineAuth(engine, auth);
+            }
+            engine.config = buildConfig(engine.config);
 
             if (!authConfig.isConfigured) return;
 
@@ -1512,11 +1572,10 @@ void main() {
                 try {
                   final session = await accountClient.refreshSession();
                   await configStorage.saveAuthSession(session);
-                  authClient = accountClient;
-                  _setEngineAuth(engine, accountClient);
-                  engine.config = buildConfig(cfg, accountClient);
-                  await _guardedStart(engine);
-                  await relaunchConfigSync();
+                  auth.bindAccount(accountClient);
+                  _setEngineAuth(engine, auth);
+                  engine.config = buildConfig(engine.config);
+                  await restartForAuth();
                   _log.info(
                     'Token refreshed after modal closed — no prompt needed',
                   );
@@ -1587,26 +1646,19 @@ void main() {
 // Returns the `refreshSettings` callback so the caller can re-render the
 // settings tab in response to events that update vault config from
 // outside the tab itself (notably ExternalBlobConfigDiscovered).
-/// Resolves the external-blob meta store for the active edition: the self-host
-/// registry when connected, otherwise the account service (managed).
-IVaultMetaStorage? _sessionMetaStorage(
-  IVaultDirectory? selfHostDirectory,
-  RpcAccountClient? authClient,
-) {
-  if (selfHostDirectory != null) return selfHostDirectory.metaStorage;
-  if (authClient != null) return AccountVaultMetaStorage(authClient);
-  return null;
-}
-
 void Function() _registerSettings({
   required PluginHandle plugin,
   required ObsidianConfigStorage configStorage,
   required VaultConfig config,
   required AuthConfig authConfig,
-  required RpcAccountClient? authClient,
+  // Shared, by reference: sign-in here must be visible to every other
+  // consumer (above all the auth-recovery listener in onLoad), which is
+  // exactly what a by-value `RpcAccountClient?` parameter got wrong.
+  required AuthSessionState auth,
   required RpcAccountClient accountClient,
   required ISyncEngine engine,
-  required VaultConfig Function(VaultConfig, RpcAccountClient?) buildConfig,
+  required VaultConfig Function(VaultConfig) buildConfig,
+  required Future<void> Function() restartForAuth,
   required SettingsSyncPrefs Function() settingsSyncPrefs,
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
   required DiagnosticsPrefs Function() diagnosticsPrefs,
@@ -1618,7 +1670,6 @@ void Function() _registerSettings({
   required Future<void> Function(VaultInfo vault) onDeleteVault,
   required bool selfHostEnabled,
   required String selfHostUrl,
-  IVaultDirectory? selfHostDirectory,
 }) {
   late final void Function() refreshSettings;
   refreshSettings = registerSettingsTab(
@@ -1626,7 +1677,7 @@ void Function() _registerSettings({
     configStorage: configStorage,
     config: config,
     authConfig: authConfig,
-    authClient: authClient,
+    authClient: auth.client,
     accountClient: accountClient,
     onFetchUsage: (selfHostEnabled || config.externalBlobConfig != null)
         ? () async =>
@@ -1635,7 +1686,7 @@ void Function() _registerSettings({
     openUrl: _openExternalUrl,
     authWebUrl: kEnv.siteUrl,
     onConfigChanged: (updated) async {
-      engine.config = buildConfig(updated, authClient);
+      engine.config = buildConfig(updated);
       // Route the restart through the lifecycle lane so it can't overlap a
       // queued reconnect / token-refresh boot on the single WebSocket.
       await _scheduleBoot(() async {
@@ -1644,15 +1695,21 @@ void Function() _registerSettings({
       });
     },
     onAuthChanged: (newAuthConfig, client) async {
-      authClient = client;
-      _setEngineAuth(engine, client);
-      engine.config = buildConfig(config, client);
-      _log.info('Signed in');
+      auth.bindAccount(client);
+      _setEngineAuth(engine, auth);
+      // Build on the engine's LIVE config, not the registration-time
+      // snapshot — that one predates the client name/version/kind the
+      // constructor added and any vault edits made since.
+      engine.config = buildConfig(engine.config);
+      // A sign-in that only updates config leaves the running connection
+      // authenticating as nobody: the bearer interceptor is bound once per
+      // connect. Reconnect, or the user stays "signed in" and unsynced.
+      await restartForAuth();
+      _log.info('Signed in — engine restarted');
     },
     onSignOut: () async {
-      authClient = null;
-      _setEngineAuth(engine, null);
-      engine.config = config;
+      auth.bindAccount(null);
+      _setEngineAuth(engine, auth);
       await _scheduleBoot(() => engine.stop());
       _log.info('Signed out');
     },
@@ -1675,7 +1732,7 @@ void Function() _registerSettings({
       _log.info('Vault disconnected (local state wiped)');
     },
     onVaultChanged: (newConfig, newCipher) async {
-      engine.config = buildConfig(newConfig, authClient);
+      engine.config = buildConfig(newConfig);
       engine.cipher = newCipher;
       await _scheduleBoot(() async {
         await engine.stop();
@@ -1708,7 +1765,7 @@ void Function() _registerSettings({
       // server — so other devices never adopt it, and a local-DB wipe
       // on this device loses it forever. The settings tab catches these
       // throws and surfaces them as a Notice.
-      final store = _sessionMetaStorage(selfHostDirectory, authClient);
+      final store = auth.metaStorage;
       if (store == null) {
         throw StateError(
           'Connect a vault before configuring external storage.',
@@ -1731,7 +1788,7 @@ void Function() _registerSettings({
       _log.info('External blob config saved');
     },
     onClearExternalBlobConfig: () async {
-      final store = _sessionMetaStorage(selfHostDirectory, authClient);
+      final store = auth.metaStorage;
       if (store == null) {
         throw StateError('Connect a vault before clearing external storage.');
       }
@@ -1774,7 +1831,7 @@ void Function() _registerSettings({
     },
     selfHostEnabled: selfHostEnabled,
     selfHostUrl: selfHostUrl,
-    selfHostDirectory: selfHostDirectory,
+    selfHostDirectory: selfHostEnabled ? auth.directory : null,
   );
   return refreshSettings;
 }

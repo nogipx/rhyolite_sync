@@ -1,3 +1,4 @@
+import '../auth/i_token_provider.dart';
 import 'sync_engine_event.dart';
 
 /// Maps raw server-side error strings (RpcException messages) into typed
@@ -9,7 +10,7 @@ import 'sync_engine_event.dart';
 /// place a server contract change can silently break rejection handling.
 class ServerRejectionMapper {
   const ServerRejectionMapper({ServerRejectionFactory? factory})
-      : _factory = factory;
+    : _factory = factory;
 
   final ServerRejectionFactory? _factory;
 
@@ -34,8 +35,20 @@ class ServerRejectionMapper {
     final lower = msg.toLowerCase();
     String? code;
     Map<String, dynamic> params = const {};
-    if (lower.contains('unauthenticated')) {
-      code = 'auth.session_expired';
+    if (e is MissingAuthTokenException) {
+      code = 'auth.token_missing';
+    } else if (lower.contains('unauthenticated')) {
+      // Two very different failures both surface as `unauthenticated`:
+      // the token we sent was refused (session really is dead), or we
+      // sent no token at all — either because this client's provider was
+      // unbound, or because the server saw no Authorization header. Only
+      // the first justifies discarding the stored session, so they get
+      // separate codes. See [MissingAuthTokenException].
+      code =
+          lower.contains('authorization header') ||
+              lower.contains('missing auth token')
+          ? 'auth.token_missing'
+          : 'auth.session_expired';
     } else if (lower.contains('payment_required')) {
       code = 'app_policy.subscription_required';
     } else if (lower.contains('permission_denied')) {

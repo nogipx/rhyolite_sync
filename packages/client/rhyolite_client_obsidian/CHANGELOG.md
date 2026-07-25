@@ -1,3 +1,16 @@
+## [3.9.2] - 2026-07-25
+
+### Bug Fixes
+
+- signing in again restores sync instead of looping on "session expired" (obsidian)
+- tell "no token attached" apart from "session expired" (core)
+
+### Other
+
+- bump plugin to 3.9.2 (obsidian)
+- drop unnecessary non-null assertions on S3BlobConfig.fromJson (CI analyze) (core)
+
+
 ## [3.9.1] - 2026-07-24
 
 ### Bug Fixes

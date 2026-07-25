@@ -12,22 +12,28 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 /// Auth refresh token invalid — engine stops after emitting this.
 class SessionExpired extends SyncServerRejected {
   SessionExpired(String message)
-      : super(code: 'auth.session_expired', message: message);
+    : super(code: 'auth.session_expired', message: message);
+}
+
+/// No token reached the server — our provider was unbound, or the call went
+/// out with no Authorization header. Distinct from [SessionExpired] because
+/// the stored session may be fine (and may have been written seconds ago by
+/// a browser sign-in): the handler rebinds and restarts, never clears.
+class AuthTokenMissing extends SyncServerRejected {
+  AuthTokenMissing(String message)
+    : super(code: 'auth.token_missing', message: message);
 }
 
 /// Caller does not own the vault.
 class PermissionDenied extends SyncServerRejected {
   PermissionDenied(String message)
-      : super(code: 'auth.permission_denied', message: message);
+    : super(code: 'auth.permission_denied', message: message);
 }
 
 /// User has no active subscription — engine stops after emitting this.
 class SubscriptionRequired extends SyncServerRejected {
   SubscriptionRequired(String message)
-      : super(
-          code: 'app_policy.subscription_required',
-          message: message,
-        );
+    : super(code: 'app_policy.subscription_required', message: message);
 }
 
 /// User's plan does not include managed-storage capability (typical
@@ -35,10 +41,10 @@ class SubscriptionRequired extends SyncServerRejected {
 /// user whose plan capabilities don't allow our managed backend.
 class ManagedStorageNotAllowed extends SyncServerRejected {
   ManagedStorageNotAllowed(String message)
-      : super(
-          code: 'app_policy.feature.managed_storage_unavailable',
-          message: message,
-        );
+    : super(
+        code: 'app_policy.feature.managed_storage_unavailable',
+        message: message,
+      );
 }
 
 /// User's plan does not allow external (BYO) storage, and a putStates
@@ -47,10 +53,10 @@ class ManagedStorageNotAllowed extends SyncServerRejected {
 /// capability. The whole putStates is rejected server-side.
 class ExternalStorageNotAllowed extends SyncServerRejected {
   ExternalStorageNotAllowed(String message)
-      : super(
-          code: 'app_policy.feature.external_storage_unavailable',
-          message: message,
-        );
+    : super(
+        code: 'app_policy.feature.external_storage_unavailable',
+        message: message,
+      );
 }
 
 /// User would exceed the per-tier vault-count cap. Raised by the
@@ -62,13 +68,10 @@ class VaultCountExceeded extends SyncServerRejected {
     required this.limitCount,
     required String message,
   }) : super(
-          code: 'app_policy.quota.vault_count',
-          message: message,
-          params: {
-            'current': '$currentCount',
-            'limit': '$limitCount',
-          },
-        );
+         code: 'app_policy.quota.vault_count',
+         message: message,
+         params: {'current': '$currentCount', 'limit': '$limitCount'},
+       );
 
   final int currentCount;
   final int limitCount;
@@ -76,12 +79,11 @@ class VaultCountExceeded extends SyncServerRejected {
   static VaultCountExceeded fromParams(
     String message,
     Map<String, dynamic> params,
-  ) =>
-      VaultCountExceeded(
-        currentCount: int.tryParse('${params['current'] ?? ''}') ?? 0,
-        limitCount: int.tryParse('${params['limit'] ?? ''}') ?? 0,
-        message: message,
-      );
+  ) => VaultCountExceeded(
+    currentCount: int.tryParse('${params['current'] ?? ''}') ?? 0,
+    limitCount: int.tryParse('${params['limit'] ?? ''}') ?? 0,
+    message: message,
+  );
 }
 
 /// Single file exceeded the per-tier maximum size on the managed tier.
@@ -91,13 +93,10 @@ class FileSizeLimitExceeded extends SyncServerRejected {
     required this.limitBytes,
     required String message,
   }) : super(
-          code: 'app_policy.quota.file_size',
-          message: message,
-          params: {
-            'current': '$attemptedBytes',
-            'limit': '$limitBytes',
-          },
-        );
+         code: 'app_policy.quota.file_size',
+         message: message,
+         params: {'current': '$attemptedBytes', 'limit': '$limitBytes'},
+       );
 
   final int attemptedBytes;
   final int limitBytes;
@@ -105,12 +104,11 @@ class FileSizeLimitExceeded extends SyncServerRejected {
   static FileSizeLimitExceeded fromParams(
     String message,
     Map<String, dynamic> params,
-  ) =>
-      FileSizeLimitExceeded(
-        attemptedBytes: int.tryParse('${params['current'] ?? ''}') ?? 0,
-        limitBytes: int.tryParse('${params['limit'] ?? ''}') ?? 0,
-        message: message,
-      );
+  ) => FileSizeLimitExceeded(
+    attemptedBytes: int.tryParse('${params['current'] ?? ''}') ?? 0,
+    limitBytes: int.tryParse('${params['limit'] ?? ''}') ?? 0,
+    message: message,
+  );
 }
 
 /// Storage quota for the vault is exhausted.
@@ -120,13 +118,10 @@ class StorageQuotaExceeded extends SyncServerRejected {
     required this.limitBytes,
     required String message,
   }) : super(
-          code: 'app_policy.quota.storage',
-          message: message,
-          params: {
-            'current': '$currentBytes',
-            'limit': '$limitBytes',
-          },
-        );
+         code: 'app_policy.quota.storage',
+         message: message,
+         params: {'current': '$currentBytes', 'limit': '$limitBytes'},
+       );
 
   final int currentBytes;
   final int limitBytes;
@@ -134,12 +129,11 @@ class StorageQuotaExceeded extends SyncServerRejected {
   static StorageQuotaExceeded fromParams(
     String message,
     Map<String, dynamic> params,
-  ) =>
-      StorageQuotaExceeded(
-        currentBytes: int.tryParse('${params['current'] ?? ''}') ?? 0,
-        limitBytes: int.tryParse('${params['limit'] ?? ''}') ?? 0,
-        message: message,
-      );
+  ) => StorageQuotaExceeded(
+    currentBytes: int.tryParse('${params['current'] ?? ''}') ?? 0,
+    limitBytes: int.tryParse('${params['limit'] ?? ''}') ?? 0,
+    message: message,
+  );
 }
 
 /// The server holds an external blob storage config for this vault. Carries
@@ -147,14 +141,12 @@ class StorageQuotaExceeded extends SyncServerRejected {
 /// credentials) is applied by the engine itself and read from `engine.config`,
 /// never sent on the broadcast events stream.
 class ExternalBlobConfigDiscovered extends SyncServerRejected {
-  ExternalBlobConfigDiscovered({
-    required this.kind,
-    required String message,
-  }) : super(
-          code: 'feature.external_blob_config_discovered',
-          message: message,
-          params: {'kind': kind},
-        );
+  ExternalBlobConfigDiscovered({required this.kind, required String message})
+    : super(
+        code: 'feature.external_blob_config_discovered',
+        message: message,
+        params: {'kind': kind},
+      );
 
   final String kind;
 
@@ -179,6 +171,8 @@ SyncServerRejected? pluginRejectionFactory(
   switch (code) {
     case 'auth.session_expired':
       return SessionExpired(message);
+    case 'auth.token_missing':
+      return AuthTokenMissing(message);
     case 'auth.permission_denied':
       return PermissionDenied(message);
     case 'app_policy.subscription_required':

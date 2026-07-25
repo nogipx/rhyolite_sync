@@ -68,7 +68,7 @@ void main() {
     });
 
     test('saving policy preserves an existing external blob config', () async {
-      await service.saveExternalBlobConfig(s3!);
+      await service.saveExternalBlobConfig(s3);
       await service.saveForcedBinaryExtensions({'foo'});
 
       expect(await service.loadForcedBinaryExtensions(), {'foo'});
@@ -79,14 +79,14 @@ void main() {
 
     test('saving external blob config preserves an existing policy', () async {
       await service.saveForcedBinaryExtensions({'foo', 'bar'});
-      await service.saveExternalBlobConfig(s3!);
+      await service.saveExternalBlobConfig(s3);
 
       expect(await service.loadForcedBinaryExtensions(), {'foo', 'bar'});
       expect((await service.loadExternalBlobConfig())!.kind, 's3');
     });
 
     test('clearing external blob config keeps the policy', () async {
-      await service.saveExternalBlobConfig(s3!);
+      await service.saveExternalBlobConfig(s3);
       await service.saveForcedBinaryExtensions({'foo'});
       await service.clearExternalBlobConfig();
 

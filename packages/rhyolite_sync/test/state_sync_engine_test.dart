@@ -68,7 +68,8 @@ void main() {
       expect(
         healthy,
         isFalse,
-        reason: 'a startup that failed after connecting must leave the engine '
+        reason:
+            'a startup that failed after connecting must leave the engine '
             'idle (torn down), not a half-wired zombie (no notify / typing / '
             'reconnect-watch) whose healthCheck reports healthy and blocks the '
             "host's health-gated restart",
@@ -83,9 +84,11 @@ void main() {
     test('changing the cipher across a restart re-derives the blob-id key '
         '(L1-7)', () async {
       final cipherA = VaultCipher.fromRawKey(
-          Uint8List.fromList(List.filled(32, 1)));
+        Uint8List.fromList(List.filled(32, 1)),
+      );
       final cipherB = VaultCipher.fromRawKey(
-          Uint8List.fromList(List.filled(32, 2)));
+        Uint8List.fromList(List.filled(32, 2)),
+      );
       final h = await _Harness.create(cipher: cipherA);
       addTearDown(h.dispose);
       final content = Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -121,7 +124,8 @@ void main() {
       expect(
         refB,
         isNot(refA),
-        reason: 'same content under a different cipher must hash to a '
+        reason:
+            'same content under a different cipher must hash to a '
             "different blob id; a stale memoized key reuses the old vault's id",
       );
     });
@@ -144,7 +148,8 @@ void main() {
       expect(
         h.events.whereType<SyncError>(),
         isNotEmpty,
-        reason: 'a delete that failed during restore must be surfaced, not '
+        reason:
+            'a delete that failed during restore must be surfaced, not '
             'swallowed',
       );
     });
@@ -174,7 +179,8 @@ void main() {
       expect(
         h.events.whereType<SyncError>(),
         isNotEmpty,
-        reason: 'the failed restore must be observed and surfaced, correcting '
+        reason:
+            'the failed restore must be observed and surfaced, correcting '
             'the optimistic SyncVaultReset',
       );
     });
@@ -337,10 +343,16 @@ void main() {
         reason: 'no shared history → line-union view, not a lossy char-join',
       );
       final merged = String.fromCharCodes(b.io.files['$_vaultPath/note.md']!);
-      expect(merged.contains('AAAA'), isTrue,
-          reason: 'A\'s note must survive — merged="$merged"');
-      expect(merged.contains('BBBB'), isTrue,
-          reason: 'B\'s note must survive — merged="$merged"');
+      expect(
+        merged.contains('AAAA'),
+        isTrue,
+        reason: 'A\'s note must survive — merged="$merged"',
+      );
+      expect(
+        merged.contains('BBBB'),
+        isTrue,
+        reason: 'B\'s note must survive — merged="$merged"',
+      );
     });
 
     test('three divergent creates converge to the SAME union on every device '
@@ -350,8 +362,9 @@ void main() {
       Future<List<StateRecord>> createOn(String content) async {
         final h = await _Harness.create(sharedRemote: remote);
         addTearDown(h.dispose);
-        h.io.files['$_vaultPath/note.md'] =
-            Uint8List.fromList(content.codeUnits);
+        h.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+          content.codeUnits,
+        );
         await h.engine.start();
         return _recordsFromPuts(h.state);
       }
@@ -377,11 +390,17 @@ void main() {
       final dDisk = await pullOrder([...ra, ...rb, ...rc]);
       final eDisk = await pullOrder([...rc, ...rb, ...ra]);
 
-      expect(dDisk, eDisk,
-          reason: 'pull order must not change the union (confluence)');
+      expect(
+        dDisk,
+        eDisk,
+        reason: 'pull order must not change the union (confluence)',
+      );
       for (final c in ['AAAA', 'BBBB', 'CCCC']) {
-        expect(dDisk.contains(c), isTrue,
-            reason: '$c must survive — union="$dDisk"');
+        expect(
+          dDisk.contains(c),
+          isTrue,
+          reason: '$c must survive — union="$dDisk"',
+        );
       }
     });
 
@@ -413,8 +432,9 @@ void main() {
       final pushedAfterEdit = b.engine.events
           .firstWhere((e) => e is SyncFilePushed)
           .timeout(const Duration(seconds: 10));
-      b.io.files['$_vaultPath/note.md'] =
-          Uint8List.fromList('reconciled by hand'.codeUnits);
+      b.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+        'reconciled by hand'.codeUnits,
+      );
       b.changes.emit(const FileModifiedEvent(relativePath: 'note.md'));
       await pushedAfterEdit;
 
@@ -424,8 +444,11 @@ void main() {
         reason: 'the collapsed, edited value is pushed as live content',
       );
       final disk = String.fromCharCodes(b.io.files['$_vaultPath/note.md']!);
-      expect(disk, 'reconciled by hand',
-          reason: 'the user edit is what remains on disk');
+      expect(
+        disk,
+        'reconciled by hand',
+        reason: 'the user edit is what remains on disk',
+      );
     });
 
     test('a file edited DURING startup (after the disk scan) is queued and '
@@ -435,29 +458,30 @@ void main() {
 
       // A pre-existing file makes the startup push fire; we gate that push to
       // freeze the engine AFTER StartupDiff has already scanned the disk.
-      h.io.files['$_vaultPath/existing.bin'] =
-          Uint8List.fromList([9, 9, 9, 9]);
+      h.io.files['$_vaultPath/existing.bin'] = Uint8List.fromList([9, 9, 9, 9]);
       final gate = Completer<void>();
       h.state.putStatesGate = gate;
 
       // SyncPushing fires right before the gated putStates → startup has
       // reached the push, so StartupDiff's scan is already done.
-      final reachedStartupPush =
-          h.engine.events.firstWhere((e) => e is SyncPushing).timeout(
-                const Duration(seconds: 10),
-              );
+      final reachedStartupPush = h.engine.events
+          .firstWhere((e) => e is SyncPushing)
+          .timeout(const Duration(seconds: 10));
       final started = h.engine.start();
       await reachedStartupPush;
 
       // Edit a NEW file now — it was NOT on disk when StartupDiff scanned, so
       // only the during-startup change queue can catch it.
       final duringPushed = h.engine.events
-          .firstWhere(
-            (e) => e is SyncFilePushed && e.path == 'during.bin',
-          )
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'during.bin')
           .timeout(const Duration(seconds: 10));
-      h.io.files['$_vaultPath/during.bin'] =
-          Uint8List.fromList([1, 2, 3, 4, 5]);
+      h.io.files['$_vaultPath/during.bin'] = Uint8List.fromList([
+        1,
+        2,
+        3,
+        4,
+        5,
+      ]);
       h.changes.emit(const FileCreatedEvent(relativePath: 'during.bin'));
 
       gate.complete(); // let startup finish → drain the queued edit
@@ -472,7 +496,9 @@ void main() {
       // A publishes a base version of a text note.
       final a = await _Harness.create(sharedRemote: remote);
       addTearDown(a.dispose);
-      a.io.files['$_vaultPath/note.md'] = Uint8List.fromList('base\n'.codeUnits);
+      a.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+        'base\n'.codeUnits,
+      );
       await a.engine.start();
       final base = _recordsFromPuts(a.state);
       expect(base, isNotEmpty, reason: 'A must publish the base note');
@@ -481,8 +507,9 @@ void main() {
       final aPushed = a.engine.events
           .firstWhere((e) => e is SyncFilePushed)
           .timeout(const Duration(seconds: 10));
-      a.io.files['$_vaultPath/note.md'] =
-          Uint8List.fromList('base\nA\n'.codeUnits);
+      a.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+        'base\nA\n'.codeUnits,
+      );
       a.changes.emit(const FileModifiedEvent(relativePath: 'note.md'));
       await aPushed;
       final remoteEdit = _recordsFromPuts(a.state); // base + A's edit
@@ -498,8 +525,9 @@ void main() {
       // B edits the note ON DISK inside the pull window: the bytes are present
       // but no change event fired, so no standalone reconcile+push ran. The
       // imminent pull's pre-join reconcile is what captures this edit.
-      b.io.files['$_vaultPath/note.md'] =
-          Uint8List.fromList('base\nB\n'.codeUnits);
+      b.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+        'base\nB\n'.codeUnits,
+      );
       final putsBefore = b.state.puts.length;
 
       // A's edit arrives; B pulls it. preReconcile captures B's disk edit, the
@@ -512,7 +540,8 @@ void main() {
       expect(
         b.state.puts.length,
         greaterThan(putsBefore),
-        reason: "B's edit made inside the pull window must still be pushed — "
+        reason:
+            "B's edit made inside the pull window must still be pushed — "
             'otherwise the peer never receives it (under-sync)',
       );
       expect(
@@ -529,11 +558,16 @@ void main() {
       // Device A publishes a binary file so B has a real blob to pull.
       final a = await _Harness.create(sharedRemote: remote);
       addTearDown(a.dispose);
-      a.io.files['$_vaultPath/photo.bin'] =
-          Uint8List.fromList(List.generate(2000, (i) => (i * 7) % 256));
+      a.io.files['$_vaultPath/photo.bin'] = Uint8List.fromList(
+        List.generate(2000, (i) => (i * 7) % 256),
+      );
       await a.engine.start();
       final records = _recordsFromPuts(a.state);
-      expect(records, isNotEmpty, reason: 'A must publish a record with a blob');
+      expect(
+        records,
+        isNotEmpty,
+        reason: 'A must publish a record with a blob',
+      );
 
       // Device B starts empty — its startup pull sees no records, so nothing
       // blocks yet.
@@ -614,13 +648,17 @@ void main() {
 
       // Binary so the blobRef is a deterministic manifest hash (no Fugue
       // re-serialization noise) and the file never converges with a peer.
-      h.io.files['$_vaultPath/photo.bin'] =
-          Uint8List.fromList(List.generate(2000, (i) => (i * 7) % 256));
+      h.io.files['$_vaultPath/photo.bin'] = Uint8List.fromList(
+        List.generate(2000, (i) => (i * 7) % 256),
+      );
       await h.engine.start();
 
       final putsAfterStartup = h.state.puts.length;
-      expect(putsAfterStartup, greaterThan(0),
-          reason: 'startup must publish the new file exactly once');
+      expect(
+        putsAfterStartup,
+        greaterThan(0),
+        reason: 'startup must publish the new file exactly once',
+      );
 
       // Model the echo: every pull returns no records (server filtered our own
       // write), and its post-pull push must find nothing new to send.
@@ -629,21 +667,29 @@ void main() {
         await h.engine.triggerPull();
       }
 
-      expect(h.state.puts.length, putsAfterStartup,
-          reason: 'an unchanged, already-pushed file must not be re-pushed on '
-              'every pull — otherwise push/notify/pull/push loops forever');
+      expect(
+        h.state.puts.length,
+        putsAfterStartup,
+        reason:
+            'an unchanged, already-pushed file must not be re-pushed on '
+            'every pull — otherwise push/notify/pull/push loops forever',
+      );
 
       // A genuine content change must STILL push (the guard keys on blobRef, so
       // a new version clears it) — the fix must not wedge real edits.
       final pushed = h.engine.events
           .firstWhere((e) => e is SyncFilePushed && e.path == 'photo.bin')
           .timeout(const Duration(seconds: 10));
-      h.io.files['$_vaultPath/photo.bin'] =
-          Uint8List.fromList(List.generate(2000, (i) => (i * 11) % 256));
+      h.io.files['$_vaultPath/photo.bin'] = Uint8List.fromList(
+        List.generate(2000, (i) => (i * 11) % 256),
+      );
       h.changes.emit(const FileModifiedEvent(relativePath: 'photo.bin'));
       await pushed;
-      expect(h.state.puts.length, greaterThan(putsAfterStartup),
-          reason: 'a real edit (new blobRef) must still be pushed');
+      expect(
+        h.state.puts.length,
+        greaterThan(putsAfterStartup),
+        reason: 'a real edit (new blobRef) must still be pushed',
+      );
     });
 
     test('a file the pusher will not send is dropped from the pending set '
@@ -662,8 +708,9 @@ void main() {
       final pushed = h.engine.events
           .firstWhere((e) => e is SyncFilePushed && e.path == 'photo.bin')
           .timeout(const Duration(seconds: 10));
-      h.io.files['$_vaultPath/photo.bin'] =
-          Uint8List.fromList(List.generate(64, (i) => i));
+      h.io.files['$_vaultPath/photo.bin'] = Uint8List.fromList(
+        List.generate(64, (i) => i),
+      );
       h.changes.emit(const FileCreatedEvent(relativePath: 'photo.bin'));
       await pushed;
 
@@ -730,6 +777,71 @@ void main() {
       var postStopRan = false;
       await scheduler.schedule(run: (_) async => postStopRan = true);
       expect(postStopRan, isTrue, reason: 'scheduler must still be alive');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Auth binding. A connection takes its bearer provider ONCE, at connect
+  // time. These pin what that implies for a host that signs in while the
+  // engine is already running — the shape of a real production loop where a
+  // re-authenticated user kept being told the session had expired.
+  // -------------------------------------------------------------------------
+  group('token provider binding', () {
+    test('each start binds the connection to the config it has AT THAT MOMENT '
+        '— a provider swapped in later is not retroactive', () async {
+      final first = MutableTokenProvider(StaticTokenProvider('first'));
+      final h = await _Harness.create(tokenProvider: first);
+      addTearDown(h.dispose);
+
+      await h.engine.start();
+      expect(h.connection.boundProviders, [same(first)]);
+
+      // Host swaps in a different provider (the pattern that broke: build a
+      // new provider per sign-in and assign it to engine.config).
+      final second = MutableTokenProvider(StaticTokenProvider('second'));
+      h.engine.config = h.engine.config.copyWith(tokenProvider: second);
+      expect(
+        h.connection.boundProviders,
+        [same(first)],
+        reason:
+            'the live connection still authenticates as whoever opened '
+            'it — assigning config cannot re-authenticate a bound socket',
+      );
+
+      await h.engine.stop();
+      await h.engine.start();
+      expect(
+        h.connection.boundProviders.last,
+        same(second),
+        reason:
+            'only a restart rebinds — so a host that swaps providers '
+            'MUST restart the engine',
+      );
+    });
+
+    test('a provider mutated in place reaches a connection that was opened '
+        'before the sign-in', () async {
+      // The other half of the fix: keep one provider for the whole session
+      // and mutate it, and the already-bound connection picks up the new
+      // session on its next call — no restart needed to authenticate.
+      final provider = MutableTokenProvider();
+      final h = await _Harness.create(tokenProvider: provider);
+      addTearDown(h.dispose);
+
+      await h.engine.start();
+      final bound = h.connection.boundProviders.single!;
+      expect(bound, same(provider));
+      await expectLater(
+        bound.getToken(),
+        throwsA(isA<MissingAuthTokenException>()),
+        reason:
+            'signed out: calls must fail locally, never go out with no '
+            'Authorization header',
+      );
+
+      provider.delegate = StaticTokenProvider('after-sign-in');
+
+      expect(await bound.getToken(), 'after-sign-in');
     });
   });
 }
@@ -808,6 +920,7 @@ class _Harness {
     PriorityTaskScheduler? scheduler,
     IVaultCipher? cipher,
     Set<String> Function()? excludedExtensions,
+    ITokenProvider? tokenProvider,
   }) async {
     final env = await DataServiceFactory.inMemory();
     final state = _FakeStateContract();
@@ -825,7 +938,11 @@ class _Harness {
     final engine = StateSyncEngine(
       vaultPath: _vaultPath,
       serverUrl: 'ws://unused',
-      config: const VaultConfig(vaultId: _vaultId, vaultName: 'test'),
+      config: VaultConfig(
+        vaultId: _vaultId,
+        vaultName: 'test',
+        tokenProvider: tokenProvider,
+      ),
       cipher: cipher ?? _IdentityCipher(),
       dataClient: env.client,
       blobStore: LocalBlobStore(InMemoryBlobRepository()),
@@ -833,8 +950,10 @@ class _Harness {
       changeProvider: changes,
       scheduler: sched,
       excludedExtensions: excludedExtensions,
-      connectionFactory: ({required serverUrl, tokenProvider, logger}) =>
-          connection,
+      connectionFactory: ({required serverUrl, tokenProvider, logger}) {
+        connection.boundProviders.add(tokenProvider);
+        return connection;
+      },
       blobStorageBuilder:
           ({
             required config,
@@ -987,6 +1106,11 @@ class _FakeConnection implements SyncConnection {
   RpcCallerEndpoint? _endpoint;
   bool connectCalled = false;
   bool disposed = false;
+
+  /// The token provider handed to the factory on each (re)start. A
+  /// connection binds its bearer interceptor once, at connect time, so this
+  /// is the complete record of what a socket can authenticate as.
+  final List<ITokenProvider?> boundProviders = [];
 
   @override
   Future<void> connect() async {

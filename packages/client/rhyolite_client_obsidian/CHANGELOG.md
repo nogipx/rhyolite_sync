@@ -1,3 +1,14 @@
+## [3.9.3] - 2026-07-26
+
+### Bug Fixes
+
+- keep one device identity per install, not one per reset (core)
+
+### Other
+
+- bump plugin to 3.9.3 (obsidian)
+
+
 ## [3.9.2] - 2026-07-25
 
 ### Bug Fixes

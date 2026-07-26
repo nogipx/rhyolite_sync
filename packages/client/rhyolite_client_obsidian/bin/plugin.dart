@@ -196,6 +196,30 @@ Future<void> _scheduleBoot(Future<void> Function() body) {
   );
 }
 
+/// Copies the engine's device identity into data.json the first time.
+///
+/// Only ever writes when nothing is stored yet, and writes what the sync
+/// database already carries — so an existing install keeps the head it has
+/// been using instead of registering a second one. After this, the id comes
+/// from data.json and outlives the database.
+Future<void> _adoptDeviceId(
+  ISyncEngine engine,
+  ObsidianConfigStorage configStorage,
+) async {
+  try {
+    final vaultId = engine.config.vaultId;
+    if (vaultId.isEmpty) return;
+    if (await configStorage.loadDeviceId(vaultId) != null) return;
+    final deviceId = engine is StateSyncEngine ? engine.deviceId : null;
+    if (deviceId == null || deviceId.isEmpty) return;
+    await configStorage.saveDeviceId(vaultId, deviceId);
+    _log.info('Adopted device id for vault $vaultId');
+  } catch (e) {
+    // Losing this only means the id is re-adopted on the next start.
+    _log.warning('Device id adoption failed: $e');
+  }
+}
+
 /// (Re)starts `.obsidian` settings sync. Idempotent — disposes any running
 /// instance first. No-op when disabled, before the engine has an endpoint, or
 /// before a vault key is available. The config caller reuses the engine's live
@@ -581,14 +605,23 @@ void main() {
 
           final cfg = config ?? const VaultConfig(vaultId: '', vaultName: '');
 
+          // Identity for THIS vault, kept in data.json so it survives every
+          // event that recreates the sync database. Null on the very first run
+          // (or for an install predating this): the engine then keeps whatever
+          // the database already holds, and it is adopted right after start —
+          // so an existing install keeps its head instead of gaining a second.
+          final storedDeviceId = await configStorage.loadDeviceId(cfg.vaultId);
+
           // Single config builder for every (re)build — initial boot AND the
           // settings callbacks (onVaultChanged/onConfigChanged/onAuthChanged).
           // Always the SAME provider instance, in every edition and whether or
           // not a session exists: sign-in mutates it in place, so no config
           // rebuild can leave the engine without one. Signed out it simply
           // fails calls locally instead of sending them unauthenticated.
-          VaultConfig buildConfig(VaultConfig base) =>
-              base.copyWith(tokenProvider: auth.tokenProvider);
+          VaultConfig buildConfig(VaultConfig base) => base.copyWith(
+            tokenProvider: auth.tokenProvider,
+            deviceId: storedDeviceId,
+          );
 
           final activeConfig = buildConfig(cfg);
 
@@ -773,6 +806,7 @@ void main() {
             } catch (_) {}
             await _scheduleBoot(() => _guardedStart(engine));
             await relaunchConfigSync();
+            await _adoptDeviceId(engine, configStorage);
           }
 
           // Single source of truth for the pause toggle — shared by the panel

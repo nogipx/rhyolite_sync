@@ -24,11 +24,26 @@ import 'file_state_codec.dart';
 /// - collection `<vaultId>_state_meta` — single row with cursor, epoch,
 ///   deviceId, ownContext, lastSyncedBlobRef.
 class FileStateStore {
-  FileStateStore({required IDataClient client, required this.vaultId})
-      : _client = client;
+  FileStateStore({
+    required IDataClient client,
+    required this.vaultId,
+    String? deviceId,
+  }) : _client = client,
+       _configuredDeviceId = deviceId;
 
   final IDataClient _client;
   final String vaultId;
+
+  /// Identity supplied by the host, which stores it somewhere this database
+  /// cannot take with it when it goes.
+  ///
+  /// The id used to live only in the meta row here, and every event that
+  /// recreates the database — a reset, a restore, a recovery from corruption —
+  /// therefore minted a new one. The server saw a new device each time, and
+  /// each phantom head pinned `min(headSeq)` down, freezing tombstone GC for
+  /// the full stale window. When the host supplies an id, none of that can
+  /// happen: the database is disposable, the identity is not.
+  final String? _configuredDeviceId;
 
   String get _storeCol => '${vaultId}_state_store';
   String get _metaCol => '${vaultId}_state_meta';
@@ -77,9 +92,14 @@ class FileStateStore {
   /// Fugue tree even if the persisted counter lags behind.
   LamportClock? _fugueClock;
 
-  String get deviceId => _deviceId ?? (throw StateError(
-        'FileStateStore.deviceId accessed before load()',
-      ));
+  /// The identity, or null before [load] has run. Hosts read this once after
+  /// start to adopt the id a pre-existing database already carries, instead of
+  /// minting a second one for the same install.
+  String? get deviceIdOrNull => _deviceId;
+
+  String get deviceId =>
+      _deviceId ??
+      (throw StateError('FileStateStore.deviceId accessed before load()'));
 
   CausalContext get ownContext => _ownContext;
   int get serverCursor => _serverCursor;
@@ -121,8 +141,7 @@ class FileStateStore {
     return reg.singleValue;
   }
 
-  bool hasConflict(String fileId) =>
-      _registers[fileId]?.hasConflict ?? false;
+  bool hasConflict(String fileId) => _registers[fileId]?.hasConflict ?? false;
 
   /// All concurrent values for a fileId. Empty when the file is missing.
   List<FileState> currentValues(String fileId) =>
@@ -363,7 +382,14 @@ class FileStateStore {
       _serverEpoch = null;
       _ownContext = const CausalContext.empty();
     }
-    if (_deviceId == null) {
+    // Host-supplied identity wins over whatever this database remembers, and
+    // is written back so the two agree. A mismatch is normal exactly once:
+    // on the first run after the host adopts the id this store already had.
+    final configured = _configuredDeviceId;
+    if (configured != null && configured != _deviceId) {
+      _deviceId = configured;
+      await persistMeta();
+    } else if (_deviceId == null) {
       _deviceId = const Uuid().v4();
       await persistMeta();
     }
@@ -423,8 +449,7 @@ class FileStateStore {
     );
   }
 
-  Future<void> persistMeta() =>
-      _serialise('meta', () => _persistMetaInner());
+  Future<void> persistMeta() => _serialise('meta', () => _persistMetaInner());
 
   Future<void> _persistMetaInner() async {
     final payload = {
@@ -436,11 +461,7 @@ class FileStateStore {
       'lastSyncedBlobRef': _lastSyncedBlobRef,
       'serverSeq': _serverSeq,
     };
-    await _writeWithRetry(
-      collection: _metaCol,
-      id: _metaId,
-      payload: payload,
-    );
+    await _writeWithRetry(collection: _metaCol, id: _metaId, payload: payload);
   }
 
   Future<void> _writeWithRetry({
@@ -468,7 +489,8 @@ class FileStateStore {
         return;
       } catch (e) {
         final msg = e.toString().toLowerCase();
-        final transient = msg.contains('not newer') ||
+        final transient =
+            msg.contains('not newer') ||
             msg.contains('conflict') ||
             msg.contains('expected version') ||
             msg.contains('already exists');
@@ -480,7 +502,29 @@ class FileStateStore {
 
   /// Wipe everything: in-memory + persisted. deviceId survives (server
   /// continues to recognise this install across resets).
+  ///
+  /// That promise is the whole point of this method's shape. Dropping the meta
+  /// collection wholesale would take `deviceId` with it, and the loss is
+  /// invisible until the NEXT load: this instance keeps the id in memory, so
+  /// the running session looks fine, and only after a restart does [load]
+  /// find no meta row and mint a fresh uuid. The server then sees a brand-new
+  /// device — one more head per reset, per install, accumulating until the
+  /// stale-head sweep 90 days later.
   Future<void> wipeAll() async {
+    // The engine wipes through a freshly constructed store (see
+    // StateSyncEngine.triggerReset), which has never loaded and therefore has
+    // no id in memory. Recover it from storage before the row is rewritten.
+    _deviceId ??= _configuredDeviceId;
+    if (_deviceId == null) {
+      try {
+        final meta = await _client.get(collection: _metaCol, id: _metaId);
+        _deviceId = meta?.payload['deviceId'] as String?;
+      } catch (_) {
+        // Unreadable meta means there is no id to preserve; load() will mint
+        // one, which is the same outcome as before this guard existed.
+      }
+    }
+
     _registers.clear();
     _lastSyncedBlobRef.clear();
     _serverSeq.clear();
@@ -491,9 +535,9 @@ class FileStateStore {
     try {
       await _client.deleteCollection(collection: _storeCol);
     } catch (_) {}
-    try {
-      await _client.deleteCollection(collection: _metaCol);
-    } catch (_) {}
+    // Rewrite meta rather than dropping it — same reset semantics (cursor 0,
+    // no epoch, empty context), but the identity of this install stays.
+    await persistMeta();
   }
 
   // ---------------------------------------------------------------------------
@@ -503,8 +547,7 @@ class FileStateStore {
   /// Codec for the per-fileId register row. Schema versioning is owned
   /// by `convergent` (envelope `"v"`); payload-level `FileState`
   /// versioning lives in [FileState.toJson] / [FileState.fromJson].
-  static const _registerCodec =
-      MvRegisterCodec<FileState>(FileStateCodec());
+  static const _registerCodec = MvRegisterCodec<FileState>(FileStateCodec());
 
   Map<String, dynamic> _encodeRegister(MvRegister<FileState> reg) =>
       _registerCodec.encode(reg)! as Map<String, dynamic>;

@@ -52,6 +52,7 @@ class VaultConfig {
     this.verificationToken,
     this.pullIntervalSeconds = 5,
     this.tokenProvider,
+    this.deviceId,
     this.clientName,
     this.clientVersion,
     this.clientKind,
@@ -109,6 +110,20 @@ class VaultConfig {
   /// Not serialized to/from JSON — must be set in code.
   final ITokenProvider? tokenProvider;
 
+  /// This install's identity for THIS vault, supplied by the host.
+  ///
+  /// The sync database used to own it, which meant every reset, restore or
+  /// recovery minted a new one and left a phantom device head on the server —
+  /// and a phantom head holds `min(headSeq)` down, freezing tombstone GC for
+  /// the whole stale window. Hosts that persist this outside the database
+  /// (the plugin keeps a per-vault map in `data.json`) keep one head per
+  /// install no matter what happens to local storage.
+  ///
+  /// Per vault on purpose: two vaults on the same machine get unrelated ids,
+  /// so a server operator cannot tell they belong to one person. Null keeps
+  /// the old behaviour — the store mints and remembers its own.
+  final String? deviceId;
+
   /// Optional client identifier sent as x-client-name header on every request.
   /// Not serialized to/from JSON — must be set in code.
   final String? clientName;
@@ -143,6 +158,7 @@ class VaultConfig {
     String? verificationToken,
     int? pullIntervalSeconds,
     ITokenProvider? tokenProvider,
+    String? deviceId,
     String? clientName,
     String? clientVersion,
     String? clientKind,
@@ -154,6 +170,7 @@ class VaultConfig {
     verificationToken: verificationToken ?? this.verificationToken,
     pullIntervalSeconds: pullIntervalSeconds ?? this.pullIntervalSeconds,
     tokenProvider: tokenProvider ?? this.tokenProvider,
+    deviceId: deviceId ?? this.deviceId,
     clientName: clientName ?? this.clientName,
     clientVersion: clientVersion ?? this.clientVersion,
     clientKind: clientKind ?? this.clientKind,

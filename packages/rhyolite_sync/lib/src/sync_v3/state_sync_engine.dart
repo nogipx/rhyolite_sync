@@ -256,7 +256,11 @@ class StateSyncEngine implements ISyncEngine {
     _emit(SyncStarted());
 
     try {
-      _store = FileStateStore(client: dataClient, vaultId: config.vaultId);
+      _store = FileStateStore(
+        client: dataClient,
+        vaultId: config.vaultId,
+        deviceId: config.deviceId,
+      );
       await _store!.load();
       // deviceId doubles as the HLC nodeId — every TaggedValue this device
       // emits is unambiguously attributable.
@@ -478,11 +482,13 @@ class StateSyncEngine implements ISyncEngine {
       // rebuilt from truth rather than lost across restarts.
       for (final b in diff.blocked) {
         _sizeBlockedPaths.add(b.path);
-        _emit(SyncFileSizeBlocked(
-          path: b.path,
-          sizeBytes: b.sizeBytes,
-          limitBytes: b.limitBytes,
-        ));
+        _emit(
+          SyncFileSizeBlocked(
+            path: b.path,
+            sizeBytes: b.sizeBytes,
+            limitBytes: b.limitBytes,
+          ),
+        );
       }
       // Surface files skipped by the per-device type-exclusion filter so the UI
       // can show the count. Re-emitted every startup → rebuilt from truth.
@@ -665,6 +671,13 @@ class StateSyncEngine implements ISyncEngine {
     );
   }
 
+  /// This install's identity for the connected vault, or null before start.
+  ///
+  /// Hosts persist it outside the sync database (see [VaultConfig.deviceId]):
+  /// read it once after the first start and hand it back on every later one,
+  /// and the server keeps seeing one device instead of one per reset.
+  String? get deviceId => _store?.deviceIdOrNull;
+
   @override
   Future<void> triggerReset() async {
     if (!_running) return;
@@ -692,7 +705,11 @@ class StateSyncEngine implements ISyncEngine {
     await _fugueStore?.wipeAll();
     await _sigStore?.wipeAll();
     // Re-open stores with fresh state so wipeAll persists.
-    await FileStateStore(client: dataClient, vaultId: config.vaultId).wipeAll();
+    await FileStateStore(
+      client: dataClient,
+      vaultId: config.vaultId,
+      deviceId: config.deviceId,
+    ).wipeAll();
     await FugueStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     await StatSigStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     // Drop the local blob cache too. Server's blob collection was wiped
@@ -716,7 +733,11 @@ class StateSyncEngine implements ISyncEngine {
   Future<void> wipeLocalState() async {
     final vaultId = config.vaultId;
     _log.info('wipeLocalState: wiping local data for vaultId=$vaultId');
-    await FileStateStore(client: dataClient, vaultId: vaultId).wipeAll();
+    await FileStateStore(
+      client: dataClient,
+      vaultId: vaultId,
+      deviceId: config.deviceId,
+    ).wipeAll();
     await FugueStore(client: dataClient, vaultId: vaultId).wipeAll();
     await StatSigStore(client: dataClient, vaultId: vaultId).wipeAll();
     try {
@@ -733,7 +754,11 @@ class StateSyncEngine implements ISyncEngine {
     if (!_running) return;
     _log.info('Restore: downloading from server');
     await stop();
-    await FileStateStore(client: dataClient, vaultId: config.vaultId).wipeAll();
+    await FileStateStore(
+      client: dataClient,
+      vaultId: config.vaultId,
+      deviceId: config.deviceId,
+    ).wipeAll();
     await FugueStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     await StatSigStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     // Drop the local blob cache too. Restore is semantically "fresh
@@ -1077,10 +1102,7 @@ class StateSyncEngine implements ISyncEngine {
   ///
   /// Exposed so settings sync need not open a second connection or race the
   /// note engine for the shared one — see [[engine_sync_scheduler_plan]].
-  Future<void> scheduleBackground(
-    Future<void> Function() task, {
-    Object? key,
-  }) {
+  Future<void> scheduleBackground(Future<void> Function() task, {Object? key}) {
     // Before a session is up the engine connection isn't available; run the
     // sibling task directly so callers (e.g. settings sync) still proceed.
     if (!_running) return task();
@@ -1362,11 +1384,13 @@ class StateSyncEngine implements ISyncEngine {
       // credentials) is already applied above; the host reads it from
       // `engine.config` if needed. The secret must never travel on the
       // broadcast events stream, which any listener can observe.
-      _emit(_rejections.build(
-        'feature.external_blob_config_discovered',
-        'external blob config available on the server',
-        {'kind': remote.kind},
-      ));
+      _emit(
+        _rejections.build(
+          'feature.external_blob_config_discovered',
+          'external blob config available on the server',
+          {'kind': remote.kind},
+        ),
+      );
     } else if (isByo) {
       throw StateError(
         'external storage is configured locally but no credentials were found '
@@ -1484,8 +1508,9 @@ class StateSyncEngine implements ISyncEngine {
       blobStorage: remote,
       store: s,
       vaultId: config.vaultId,
-      maintenanceCaller:
-          endpoint != null ? VaultMaintenanceContractCaller(endpoint) : null,
+      maintenanceCaller: endpoint != null
+          ? VaultMaintenanceContractCaller(endpoint)
+          : null,
     );
   }
 
@@ -1507,8 +1532,9 @@ class StateSyncEngine implements ISyncEngine {
   Future<List<BackupSnapshotInfo>> listBackups() async {
     final ep = endpoint;
     if (ep == null) return const [];
-    final resp = await BackupContractCaller(ep)
-        .listBackups(ListBackupsRequest(vaultId: config.vaultId));
+    final resp = await BackupContractCaller(
+      ep,
+    ).listBackups(ListBackupsRequest(vaultId: config.vaultId));
     return resp.snapshots;
   }
 
@@ -1559,8 +1585,9 @@ class StateSyncEngine implements ISyncEngine {
   Future<BackupSnapshotInfo?> captureBackup() async {
     final ep = endpoint;
     if (ep == null) return null;
-    final resp = await BackupContractCaller(ep)
-        .captureBackup(CaptureBackupRequest(vaultId: config.vaultId));
+    final resp = await BackupContractCaller(
+      ep,
+    ).captureBackup(CaptureBackupRequest(vaultId: config.vaultId));
     return resp.snapshot;
   }
 
@@ -1630,8 +1657,9 @@ class StateSyncEngine implements ISyncEngine {
   Future<int?> clearBackups() async {
     final ep = endpoint;
     if (ep == null) return null;
-    final resp = await BackupContractCaller(ep)
-        .clearBackups(ClearBackupsRequest(vaultId: config.vaultId));
+    final resp = await BackupContractCaller(
+      ep,
+    ).clearBackups(ClearBackupsRequest(vaultId: config.vaultId));
     return resp.clearedSnapshots;
   }
 
@@ -1714,7 +1742,10 @@ class StateSyncEngine implements ISyncEngine {
   /// so the puller can fetch many files in parallel (see StatePuller's prefetch
   /// worker pool) before the serial apply assembles them from cache. The
   /// assembled bytes here are discarded — apply re-reads from the cache.
-  Future<void> _prefetchContentFile(String blobRef, {RpcContext? context}) async {
+  Future<void> _prefetchContentFile(
+    String blobRef, {
+    RpcContext? context,
+  }) async {
     final io = _newChunkedIO();
     if (io == null) return;
     await io.download(blobRef, context: context);

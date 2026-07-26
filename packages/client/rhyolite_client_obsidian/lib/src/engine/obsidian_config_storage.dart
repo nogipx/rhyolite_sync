@@ -53,7 +53,7 @@ class AuthConfig {
 
 class ObsidianConfigStorage {
   ObsidianConfigStorage(this._plugin)
-      : _data = DataJsonWriter(_PluginRawDataStore(_plugin));
+    : _data = DataJsonWriter(_PluginRawDataStore(_plugin));
 
   final PluginHandle _plugin;
 
@@ -131,9 +131,7 @@ class ObsidianConfigStorage {
   }) async {
     final cipher = await VaultCipher.derive(passphrase, existing.vaultId);
     final verificationToken = await cipher.createVerificationToken();
-    final config = existing.copyWith(
-      verificationToken: verificationToken,
-    );
+    final config = existing.copyWith(verificationToken: verificationToken);
     await save(config);
     return (config, cipher);
   }
@@ -143,9 +141,7 @@ class ObsidianConfigStorage {
     required String vaultName,
     required String passphrase,
   }) async {
-    final config = VaultConfig.newVault(
-      vaultName: vaultName,
-    );
+    final config = VaultConfig.newVault(vaultName: vaultName);
     final cipher = await VaultCipher.derive(passphrase, config.vaultId);
     final verificationToken = await cipher.createVerificationToken();
     final configWithToken = config.copyWith(
@@ -161,6 +157,45 @@ class ObsidianConfigStorage {
 
   Future<void> save(VaultConfig config) =>
       _data.update((m) => m[_configKey] = config.toJson());
+
+  // ---------------------------------------------------------------------------
+  // Device identity, per vault.
+  //
+  // Kept here rather than in the sync database because that database is
+  // disposable: a reset, a restore or a recovery from corruption recreates it,
+  // and an identity stored inside would be recreated with it. The server would
+  // then see a new device, and every phantom device head holds tombstone GC
+  // back for the whole stale window.
+  //
+  // A map keyed by vaultId, not a single value: switching vaults must not make
+  // the previous one forget who this install is. Ids stay unrelated across
+  // vaults on purpose — two vaults on one machine should not be linkable by a
+  // server operator.
+  // ---------------------------------------------------------------------------
+
+  static const _deviceIdsKey = 'deviceIds';
+
+  Future<String?> loadDeviceId(String vaultId) async {
+    if (vaultId.isEmpty) return null;
+    final ids = (await _data.read())[_deviceIdsKey];
+    if (ids is Map) {
+      final id = ids[vaultId];
+      if (id is String && id.isNotEmpty) return id;
+    }
+    return null;
+  }
+
+  Future<void> saveDeviceId(String vaultId, String deviceId) async {
+    if (vaultId.isEmpty || deviceId.isEmpty) return;
+    await _data.update((m) {
+      final ids = m[_deviceIdsKey];
+      final map = ids is Map
+          ? Map<String, dynamic>.from(ids)
+          : <String, dynamic>{};
+      map[vaultId] = deviceId;
+      m[_deviceIdsKey] = map;
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // Self-host mode: point the plugin at a self-hosted sync server with a
@@ -179,10 +214,7 @@ class ObsidianConfigStorage {
     return (enabled: false, syncUrl: '');
   }
 
-  Future<void> saveSelfHost({
-    required bool enabled,
-    required String syncUrl,
-  }) =>
+  Future<void> saveSelfHost({required bool enabled, required String syncUrl}) =>
       _data.update(
         (m) => m[_selfHostKey] = {'enabled': enabled, 'syncUrl': syncUrl},
       );
@@ -215,8 +247,7 @@ class ObsidianConfigStorage {
   /// the initial `engine.start()`; sync stays off until the user resumes.
   /// Survives restarts. Explicit user actions (sign-in, config change) still
   /// start the engine and are expected to clear this flag.
-  Future<bool> loadPaused() async =>
-      (await _data.read())['syncPaused'] == true;
+  Future<bool> loadPaused() async => (await _data.read())['syncPaused'] == true;
 
   Future<void> savePaused(bool paused) =>
       _data.update((m) => m['syncPaused'] = paused);

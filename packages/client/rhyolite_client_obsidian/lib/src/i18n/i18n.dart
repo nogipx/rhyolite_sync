@@ -20,9 +20,9 @@ void initLocale() {
 
 /// Maps a language code to its strings; unshipped languages fall back to English.
 AppStrings stringsFor(String lang) => switch (lang) {
-      'ru' => const RuStrings(),
-      _ => const EnStrings(),
-    };
+  'ru' => const RuStrings(),
+  _ => const EnStrings(),
+};
 
 /// Obsidian stores the UI language code in `localStorage['language']`
 /// (empty/absent = English) — the standard community-plugin detection.

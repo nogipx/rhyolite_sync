@@ -22,6 +22,15 @@ abstract class AppStrings {
   String get derivingKey;
   String get passphraseEmpty;
   String get passphraseTooWeak;
+
+  // Why a passphrase was rejected. The engine reports a reason code; the
+  // wording lives here so it arrives in the user's language.
+  String get passphraseTooShort;
+  String get passphraseTooFewClasses;
+  String passphraseCommonWord(String word);
+  String get passphraseHasSequence;
+  String get passphraseHasRepetition;
+  String get passphraseTooPredictable;
   String get passphrasesDoNotMatch;
   String get setUpEncryption;
   String get vaultPassphrase;

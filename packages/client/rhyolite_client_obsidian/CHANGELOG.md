@@ -1,3 +1,14 @@
+## [3.9.4] - 2026-07-26
+
+### Bug Fixes
+
+- say why a passphrase was rejected, in the user's language (core)
+
+### Other
+
+- bump plugin to 3.9.4 (obsidian)
+
+
 ## [3.9.3] - 2026-07-26
 
 ### Bug Fixes

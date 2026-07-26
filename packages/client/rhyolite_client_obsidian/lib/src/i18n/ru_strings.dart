@@ -34,6 +34,32 @@ class RuStrings extends AppStrings {
   String get passphraseEmpty => 'Пароль не может быть пустым.';
   @override
   String get passphraseTooWeak => 'Слишком слабый пароль.';
+
+  @override
+  String get passphraseTooShort =>
+      'Нужно минимум 12 символов — длина важнее спецсимволов.';
+
+  @override
+  String get passphraseTooFewClasses =>
+      'Смешайте хотя бы три из: строчные, заглавные, цифры, символы.';
+
+  @override
+  String passphraseCommonWord(String word) =>
+      'Содержит распространённое слово («$word»). Возьмите несвязанные слова.';
+
+  @override
+  String get passphraseHasSequence =>
+      'Уберите последовательности вроде «abcd» или «1234» — они почти не '
+      'добавляют стойкости.';
+
+  @override
+  String get passphraseHasRepetition =>
+      'Уберите повторы вроде «aaaa» или «1111».';
+
+  @override
+  String get passphraseTooPredictable =>
+      'Слишком предсказуемо. Сделайте длиннее или возьмите несколько '
+      'несвязанных слов.';
   @override
   String get passphrasesDoNotMatch => 'Пароли не совпадают.';
   @override
@@ -88,8 +114,7 @@ class RuStrings extends AppStrings {
 
   // ── Backups / restore points ──
   @override
-  String get backupsUnavailable =>
-      'Бэкапы недоступны — движок не подключён';
+  String get backupsUnavailable => 'Бэкапы недоступны — движок не подключён';
   @override
   String backupsLoadFailed(Object error) =>
       'Не удалось загрузить бэкапы: $error';
@@ -113,8 +138,7 @@ class RuStrings extends AppStrings {
   @override
   String get creatingRestorePoint => 'Создаю точку восстановления …';
   @override
-  String get notConnectedNoCapture =>
-      'Нет подключения — точка не создана.';
+  String get notConnectedNoCapture => 'Нет подключения — точка не создана.';
   @override
   String restorePointCreated(int files) =>
       'Точка восстановления создана (файлов: $files).';
@@ -278,7 +302,8 @@ class RuStrings extends AppStrings {
   @override
   String get clearVerb => 'Очистить';
   @override
-  String get notConnectedNothingCleared => 'Нет подключения — ничего не очищено.';
+  String get notConnectedNothingCleared =>
+      'Нет подключения — ничего не очищено.';
   @override
   String clearedRestorePoints(int n) =>
       'Очищено точек: $n. Запустите «Освободить сироты», чтобы вернуть место.';
@@ -294,8 +319,7 @@ class RuStrings extends AppStrings {
   String cleanupScanFailed(Object error) =>
       'Сканирование очистки не удалось: $error';
   @override
-  String nothingToCleanOlderThan(int days) =>
-      'Нечего очищать старше $days дн.';
+  String nothingToCleanOlderThan(int days) => 'Нечего очищать старше $days дн.';
   @override
   String cleanupIncomplete(int deleted, int failed) =>
       'Очистка не завершена: удалено блобов $deleted, ошибок $failed — история '
@@ -327,11 +351,14 @@ class RuStrings extends AppStrings {
   @override
   String orphanBlobsToDelete(int n) => 'Сиротских блобов к удалению: $n';
   @override
-  String oldestEntryToDelete(String when) => 'Самая старая запись к удалению: $when';
+  String oldestEntryToDelete(String when) =>
+      'Самая старая запись к удалению: $when';
   @override
-  String newestEntryToDelete(String when) => 'Самая новая запись к удалению: $when';
+  String newestEntryToDelete(String when) =>
+      'Самая новая запись к удалению: $when';
   @override
-  String oldestEntryRemaining(String when) => 'Самая старая из оставшихся: $when';
+  String oldestEntryRemaining(String when) =>
+      'Самая старая из оставшихся: $when';
   @override
   String get deviceSafety => 'Защита по устройствам:';
   @override
@@ -450,7 +477,8 @@ class RuStrings extends AppStrings {
   String forgotDevice(String name) =>
       'Устройство $name забыто. Запустите очистку, чтобы вернуть удержанную историю.';
   @override
-  String deviceAlreadyGone(String name) => 'Устройство $name уже отсутствовало.';
+  String deviceAlreadyGone(String name) =>
+      'Устройство $name уже отсутствовало.';
   @override
   String couldNotForget(String name, Object error) =>
       'Не удалось забыть $name: $error';
@@ -713,8 +741,7 @@ class RuStrings extends AppStrings {
       'Другие устройства не затронуты. Оставьте пустым, чтобы синхронизировать '
       'всё. Возврат типа скачает его файлы при следующей синхронизации.';
   @override
-  String get forceBinaryExtensions =>
-      'Синхронизировать эти расширения целиком';
+  String get forceBinaryExtensions => 'Синхронизировать эти расширения целиком';
   @override
   String get forceBinaryDescription =>
       'Список через запятую (напр. excalidraw, drawio). Такие файлы '
@@ -730,8 +757,7 @@ class RuStrings extends AppStrings {
   String get forceBinarySaved =>
       'Список сохранён. Он применится на всех устройствах.';
   @override
-  String forceBinarySaveFailed(Object error) =>
-      'Не удалось сохранить: $error';
+  String forceBinarySaveFailed(Object error) => 'Не удалось сохранить: $error';
 
   // ── Settings: external storage ──
   @override
@@ -790,7 +816,8 @@ class RuStrings extends AppStrings {
 
   // ── Settings: settings-sync + storage usage ──
   @override
-  String get reuploadSettingsTitle => 'Перезалить настройки с этого устройства?';
+  String get reuploadSettingsTitle =>
+      'Перезалить настройки с этого устройства?';
   @override
   String get reuploadSettingsBody =>
       'Настройки на сервере будут заменены настройками .obsidian с этого '
@@ -876,8 +903,7 @@ class RuStrings extends AppStrings {
   @override
   String get settingsCatThemesSnippets => 'Темы и сниппеты';
   @override
-  String get settingsCatThemesSnippetsDesc =>
-      'Скачанные темы и CSS-сниппеты';
+  String get settingsCatThemesSnippetsDesc => 'Скачанные темы и CSS-сниппеты';
   @override
   String get storageSection => 'Хранилище';
 
@@ -1031,7 +1057,8 @@ class RuStrings extends AppStrings {
   String get tipRepairingVault =>
       'Rhyolite Sync: починка хранилища — пересборка состояния';
   @override
-  String get tipError => 'Rhyolite Sync: ошибка — нажмите, чтобы открыть настройки';
+  String get tipError =>
+      'Rhyolite Sync: ошибка — нажмите, чтобы открыть настройки';
   @override
   String get tipAuthExpired =>
       'Rhyolite Sync: сессия истекла — нажмите, чтобы открыть настройки';

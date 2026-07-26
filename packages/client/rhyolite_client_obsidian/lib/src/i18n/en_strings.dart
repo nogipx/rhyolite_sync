@@ -33,6 +33,29 @@ class EnStrings extends AppStrings {
   String get passphraseEmpty => 'Passphrase cannot be empty.';
   @override
   String get passphraseTooWeak => 'Passphrase too weak.';
+
+  @override
+  String get passphraseTooShort =>
+      'Use at least 12 characters — length matters more than symbols.';
+
+  @override
+  String get passphraseTooFewClasses =>
+      'Mix at least three of: lowercase, uppercase, digits, symbols.';
+
+  @override
+  String passphraseCommonWord(String word) =>
+      'Contains a common word ("$word"). Try unrelated words instead.';
+
+  @override
+  String get passphraseHasSequence =>
+      'Avoid runs like "abcd" or "1234" — they add almost nothing.';
+
+  @override
+  String get passphraseHasRepetition => 'Avoid repeats like "aaaa" or "1111".';
+
+  @override
+  String get passphraseTooPredictable =>
+      'Too predictable. Make it longer, or use several unrelated words.';
   @override
   String get passphrasesDoNotMatch => 'Passphrases do not match.';
   @override
@@ -102,8 +125,7 @@ class EnStrings extends AppStrings {
   String get noRestorePointsYet =>
       'No restore points yet. Pro vaults keep daily ones (7 newest).';
   @override
-  String restorePointLine(String when, int files) =>
-      '$when  ·  $files file(s)';
+  String restorePointLine(String when, int files) => '$when  ·  $files file(s)';
   @override
   String get details => 'Details';
   @override
@@ -414,13 +436,16 @@ class EnStrings extends AppStrings {
   String get restoringWouldApply =>
       'Restoring would apply these changes (- current, + backup):';
   @override
-  String get tooManyChangesToDiff => 'Too many changes to diff — restore to inspect.';
+  String get tooManyChangesToDiff =>
+      'Too many changes to diff — restore to inspect.';
   @override
-  String get noDifferencesOnDisk => 'No differences — identical to the file on disk.';
+  String get noDifferencesOnDisk =>
+      'No differences — identical to the file on disk.';
   @override
   String restoringPath(String path) => 'Restoring $path …';
   @override
-  String fileRestored(String path) => '$path restored (reversible via history).';
+  String fileRestored(String path) =>
+      '$path restored (reversible via history).';
   @override
   String couldNotRestorePath(String path) =>
       'Could not restore $path — not connected or blob gone.';
@@ -829,8 +854,7 @@ class EnStrings extends AppStrings {
   @override
   String get settingsCatAppearance => 'Appearance';
   @override
-  String get settingsCatAppearanceDesc =>
-      'Theme, dark mode, enabled snippets';
+  String get settingsCatAppearanceDesc => 'Theme, dark mode, enabled snippets';
   @override
   String get settingsCatHotkeys => 'Hotkeys';
   @override
@@ -854,7 +878,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsCatCommunityPluginSettings => 'Community plugin settings';
   @override
-  String get settingsCatCommunityPluginSettingsDesc => "Each plugin's data.json";
+  String get settingsCatCommunityPluginSettingsDesc =>
+      "Each plugin's data.json";
   @override
   String get settingsCatThemesSnippets => 'Themes & snippets';
   @override
@@ -997,7 +1022,8 @@ class EnStrings extends AppStrings {
   @override
   String get tipStopped => 'Rhyolite Sync: stopped';
   @override
-  String get tipOffline => 'Rhyolite Sync: offline — can’t reach server, retrying';
+  String get tipOffline =>
+      'Rhyolite Sync: offline — can’t reach server, retrying';
   @override
   String get tipConnecting => 'Rhyolite Sync: connecting…';
   @override

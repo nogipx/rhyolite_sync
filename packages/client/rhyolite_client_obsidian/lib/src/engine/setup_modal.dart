@@ -20,8 +20,7 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
     plugin,
     build: (ctx) {
       ctx.h3('Rhyolite Sync');
-      ctx.createEl('p',
-          cls: 'rhyolite-setting-desc', text: S.setupDescription);
+      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.setupDescription);
       ctx.spaceVertical(px: 12);
 
       final passphraseInput = ctx.input(
@@ -80,7 +79,7 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
         }
         final validation = PassphraseValidator.validate(passphrase);
         if (!validation.isValid) {
-          ctx.showError(validation.error ?? S.passphraseTooWeak);
+          ctx.showError(_weaknessMessage(validation));
           return;
         }
         if (passphrase != confirm) {
@@ -117,3 +116,21 @@ Future<(VaultConfig, VaultCipher)?> showSetupModal(
     },
   );
 }
+
+/// Turns the engine's reason code into something the user can act on.
+///
+/// Every branch names the fix, not just the fault: "too weak" tells someone
+/// their passphrase is wrong without telling them what to do about it, and the
+/// vault key is derived from this passphrase alone.
+String _weaknessMessage(PassphraseValidationResult result) =>
+    switch (result.weakness) {
+      PassphraseWeakness.tooShort => S.passphraseTooShort,
+      PassphraseWeakness.tooFewCharacterClasses => S.passphraseTooFewClasses,
+      PassphraseWeakness.commonWord => S.passphraseCommonWord(
+        result.word ?? '',
+      ),
+      PassphraseWeakness.sequence => S.passphraseHasSequence,
+      PassphraseWeakness.repetition => S.passphraseHasRepetition,
+      PassphraseWeakness.tooPredictable => S.passphraseTooPredictable,
+      null => S.passphraseTooWeak,
+    };

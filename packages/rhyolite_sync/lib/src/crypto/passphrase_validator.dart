@@ -1,10 +1,54 @@
 import 'dart:math';
 
+/// Why a passphrase was rejected.
+///
+/// A code, not a sentence: the engine decides WHAT is wrong, the host says it
+/// in the user's language. The plugin ships in English and Russian, and a
+/// message hardcoded here would arrive in English regardless.
+enum PassphraseWeakness {
+  /// Shorter than the minimum length.
+  tooShort,
+
+  /// Fewer than three of: lowercase, uppercase, digits, symbols.
+  tooFewCharacterClasses,
+
+  /// Contains a common word or brand — see [PassphraseValidationResult.word].
+  commonWord,
+
+  /// Contains a run like `abcd` or `4321`.
+  sequence,
+
+  /// Contains a run of identical characters like `aaaa`.
+  repetition,
+
+  /// Passes the shape checks but is still too predictable for the amount of
+  /// material it carries.
+  tooPredictable,
+}
+
 class PassphraseValidationResult {
-  const PassphraseValidationResult({required this.isValid, this.error});
+  const PassphraseValidationResult({
+    required this.isValid,
+    this.weakness,
+    this.word,
+    this.entropyBits,
+  });
 
   final bool isValid;
-  final String? error;
+
+  /// Null when [isValid].
+  final PassphraseWeakness? weakness;
+
+  /// The offending word for [PassphraseWeakness.commonWord] — worth showing,
+  /// because "contains a common word" is unhelpful until the user knows which.
+  final String? word;
+
+  /// Upper-bound estimate, for diagnostics only.
+  ///
+  /// Deliberately NOT for display: it is charset-cardinality arithmetic, which
+  /// waves through `Password1234!` at ~85 bits. Telling a user "48 bits, aim
+  /// for 60" quotes a number this code itself does not trust.
+  final double? entropyBits;
 }
 
 class PassphraseValidator {
@@ -15,7 +59,7 @@ class PassphraseValidator {
     if (passphrase.length < _minLength) {
       return const PassphraseValidationResult(
         isValid: false,
-        error: 'Passphrase must be at least 12 characters.',
+        weakness: PassphraseWeakness.tooShort,
       );
     }
 
@@ -23,12 +67,17 @@ class PassphraseValidator {
     final hasUpper = passphrase.contains(RegExp(r'[A-Z]'));
     final hasDigit = passphrase.contains(RegExp(r'[0-9]'));
     final hasSpecial = passphrase.contains(RegExp(r'[^a-zA-Z0-9]'));
-    final classCount = [hasLower, hasUpper, hasDigit, hasSpecial].where((b) => b).length;
+    final classCount = [
+      hasLower,
+      hasUpper,
+      hasDigit,
+      hasSpecial,
+    ].where((b) => b).length;
 
     if (classCount < 3) {
       return const PassphraseValidationResult(
         isValid: false,
-        error: 'Use at least 3 of: lowercase, uppercase, digits, special characters.',
+        weakness: PassphraseWeakness.tooFewCharacterClasses,
       );
     }
 
@@ -39,49 +88,90 @@ class PassphraseValidator {
     // passphrase is the realistic offline break. Reject the obvious weak shapes
     // (common words/brands, keyboard/numeric sequences, long single-char runs)
     // before trusting the entropy estimate.
-    final weakness = _weaknessReason(passphrase);
-    if (weakness != null) {
-      return PassphraseValidationResult(isValid: false, error: weakness);
-    }
+    final shape = _weakShape(passphrase);
+    if (shape != null) return shape;
 
-    final entropy = _estimateEntropy(passphrase, hasLower, hasUpper, hasDigit, hasSpecial);
+    final entropy = _estimateEntropy(
+      passphrase,
+      hasLower,
+      hasUpper,
+      hasDigit,
+      hasSpecial,
+    );
     if (entropy < _minEntropy) {
       return PassphraseValidationResult(
         isValid: false,
-        error: 'Passphrase too weak (${entropy.toStringAsFixed(0)} bits). Aim for 60+ bits.',
+        weakness: PassphraseWeakness.tooPredictable,
+        entropyBits: entropy,
       );
     }
 
-    return const PassphraseValidationResult(isValid: true);
+    return PassphraseValidationResult(isValid: true, entropyBits: entropy);
   }
 
   /// Common weak base words / brands. Kept small (compiled into the shipped
   /// dart2js bundle) — a full dictionary belongs in a zxcvbn-style library.
   static const _denylist = <String>[
-    'password', 'passwort', 'passw0rd', 'motdepasse', 'parool', 'пароль',
-    'qwerty', 'qwertz', 'azerty', 'йцукен', 'asdf', 'zxcv',
-    'admin', 'root', 'welcome', 'letmein', 'iloveyou', 'monkey', 'dragon',
-    'master', 'login', 'secret', 'changeme', 'default', 'sunshine', 'princess',
-    'football', 'baseball', 'superman', 'trustno1', 'whatever', 'starwars',
-    'rhyolite', 'obsidian', 'vault',
+    'password',
+    'passwort',
+    'passw0rd',
+    'motdepasse',
+    'parool',
+    'пароль',
+    'qwerty',
+    'qwertz',
+    'azerty',
+    'йцукен',
+    'asdf',
+    'zxcv',
+    'admin',
+    'root',
+    'welcome',
+    'letmein',
+    'iloveyou',
+    'monkey',
+    'dragon',
+    'master',
+    'login',
+    'secret',
+    'changeme',
+    'default',
+    'sunshine',
+    'princess',
+    'football',
+    'baseball',
+    'superman',
+    'trustno1',
+    'whatever',
+    'starwars',
+    'rhyolite',
+    'obsidian',
+    'vault',
   ];
 
-  /// Returns a human-readable reason when [passphrase] matches an obvious weak
-  /// pattern, else null.
-  static String? _weaknessReason(String passphrase) {
+  /// Rejects the obvious weak shapes, or null when none matches.
+  static PassphraseValidationResult? _weakShape(String passphrase) {
     final lower = passphrase.toLowerCase();
     for (final word in _denylist) {
       if (lower.contains(word)) {
-        return 'Passphrase contains a common word or pattern ("$word"). '
-            'Use unrelated random words or a longer, unpredictable phrase.';
+        return PassphraseValidationResult(
+          isValid: false,
+          weakness: PassphraseWeakness.commonWord,
+          word: word,
+        );
       }
     }
     if (_hasRun(lower, sequential: true)) {
-      return 'Avoid sequences like "abcd" or "1234" — they add almost no '
-          'strength.';
+      return const PassphraseValidationResult(
+        isValid: false,
+        weakness: PassphraseWeakness.sequence,
+      );
     }
     if (_hasRun(lower, sequential: false)) {
-      return 'Avoid repeated characters like "aaaa" or "1111".';
+      return const PassphraseValidationResult(
+        isValid: false,
+        weakness: PassphraseWeakness.repetition,
+      );
     }
     return null;
   }

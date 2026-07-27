@@ -5,6 +5,7 @@ import 'package:obsidian_dart/obsidian_dart.dart' show PluginSettingsTab;
 
 import '../i18n/i18n.dart';
 import 'obsidian_settings_registry.dart';
+import 'plugin_code_gate.dart';
 import 'settings_sync_prefs.dart';
 
 String _label(SettingsCategory c) {
@@ -23,6 +24,8 @@ String _label(SettingsCategory c) {
       return S.settingsCatCommunityPluginsEnabled;
     case SettingsCategory.communityPluginSettings:
       return S.settingsCatCommunityPluginSettings;
+    case SettingsCategory.communityPluginCode:
+      return S.settingsCatCommunityPluginCode;
     case SettingsCategory.themesSnippets:
       return S.settingsCatThemesSnippets;
   }
@@ -44,6 +47,8 @@ String _description(SettingsCategory c) {
       return S.settingsCatCommunityPluginsEnabledDesc;
     case SettingsCategory.communityPluginSettings:
       return S.settingsCatCommunityPluginSettingsDesc;
+    case SettingsCategory.communityPluginCode:
+      return S.settingsCatCommunityPluginCodeDesc;
     case SettingsCategory.themesSnippets:
       return S.settingsCatThemesSnippetsDesc;
   }
@@ -60,6 +65,8 @@ void addSettingsSyncSection(
   PluginSettingsTab tab, {
   required SettingsSyncPrefs prefs,
   required void Function(SettingsSyncPrefs next) onChanged,
+  PluginCodeAvailability pluginCode = PluginCodeAvailability.allowed,
+  String? pluginCodeSize,
   void Function()? onReset,
   void Function()? onRestore,
 }) {
@@ -75,6 +82,16 @@ void addSettingsSyncSection(
   if (!prefs.enabled) return;
 
   for (final category in SettingsCategory.values) {
+    if (category == SettingsCategory.communityPluginCode) {
+      _addPluginCodeRow(
+        tab,
+        prefs: prefs,
+        onChanged: onChanged,
+        availability: pluginCode,
+        size: pluginCodeSize,
+      );
+      continue;
+    }
     tab.addToggle(
       name: _label(category),
       description: _description(category),
@@ -103,6 +120,62 @@ void addSettingsSyncSection(
       onClick: onRestore,
     );
   }
+}
+
+/// The plugin-code row.
+///
+/// Unlike every other category this one is gated on storage as well as on the
+/// user's choice: a plugin set is hundreds of times larger than the rest of
+/// `.obsidian` put together. When the backing storage can't hold it the row is
+/// shown WITHOUT a toggle and says why — turning it on only to have the
+/// server's quota interceptor reject the upload halfway through would read as
+/// a broken sync rather than as a storage limit.
+void _addPluginCodeRow(
+  PluginSettingsTab tab, {
+  required SettingsSyncPrefs prefs,
+  required void Function(SettingsSyncPrefs next) onChanged,
+  required PluginCodeAvailability availability,
+  String? size,
+}) {
+  const category = SettingsCategory.communityPluginCode;
+  final sizeNote =
+      size == null ? '' : ' ${S.settingsCatCommunityPluginCodeSize(size)}';
+
+  switch (availability) {
+    case PluginCodeAvailability.allowed:
+      tab.addToggle(
+        name: _label(category),
+        description: '${_description(category)}$sizeNote',
+        initialValue: prefs.categories.contains(category),
+        onChange: (v) => onChanged(prefs.withCategory(category, v)),
+      );
+    case PluginCodeAvailability.quotaTooSmall:
+      _addInfoRow(
+        tab,
+        name: _label(category),
+        description: '${S.pluginCodeUnavailableQuota}$sizeNote',
+      );
+    case PluginCodeAvailability.unknownQuota:
+      _addInfoRow(
+        tab,
+        name: _label(category),
+        description: S.pluginCodeUnavailableUnknown,
+      );
+  }
+}
+
+/// A settings row that only states something — name and description, no
+/// control.
+void _addInfoRow(
+  PluginSettingsTab tab, {
+  required String name,
+  required String description,
+}) {
+  tab.addCustom((setting) {
+    setting
+      ..setName(name)
+      ..setDesc(description);
+  });
 }
 
 /// One setting row with a warning-styled button, built into the tab's own

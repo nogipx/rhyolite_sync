@@ -1,3 +1,24 @@
+## [3.10.0] - 2026-07-28
+
+### Features
+
+- lay the storage overview out, and open it from settings (obsidian)
+- sync community plugins and themes, not just their settings (obsidian)
+- blob-backed directory resources for settings sync (core)
+
+### Bug Fixes
+
+- tie the settings pull cursor to the scope it was advanced under (core)
+- stop a re-enabled category re-uploading everything, and a phone disabling desktop plugins (obsidian)
+- do not report a refused capture as captured (obsidian)
+- shorten the size label on the overview tile (obsidian)
+- never build a filesystem path from record content (obsidian)
+
+### Other
+
+- bump plugin to 3.10.0 (obsidian)
+
+
 ## [3.9.4] - 2026-07-26
 
 ### Bug Fixes

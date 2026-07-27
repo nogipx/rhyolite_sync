@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import 'gzip_codec.dart';
 import 'i_blob_storage.dart';
 
 /// Wraps any [IBlobStorage] with always-on gzip on upload + auto-detect
@@ -41,7 +41,7 @@ class GzipBlobStorage implements IBlobStorage {
     final result = <String, Uint8List>{};
     for (final entry in raw.entries) {
       context?.cancellationToken?.throwIfCancelled();
-      result[entry.key] = _maybeDecompress(entry.value);
+      result[entry.key] = await _maybeDecompress(entry.value);
     }
     return result;
   }
@@ -54,7 +54,7 @@ class GzipBlobStorage implements IBlobStorage {
     final compressed = <(Uint8List, String)>[];
     for (final (bytes, blobId) in blobs) {
       context?.cancellationToken?.throwIfCancelled();
-      compressed.add((_compress(bytes), blobId));
+      compressed.add((await gzipEncode(bytes), blobId));
     }
     await inner.upload(compressed, context: context);
   }
@@ -75,18 +75,8 @@ class GzipBlobStorage implements IBlobStorage {
   }) =>
       inner.exists(blobIds, context: context);
 
-  Uint8List _compress(Uint8List bytes) {
-    final encoded = GZipEncoder().encode(bytes);
-    return Uint8List.fromList(encoded);
-  }
-
-  Uint8List _maybeDecompress(Uint8List bytes) {
-    try {
-      final decoded = GZipDecoder().decodeBytes(bytes);
-      return Uint8List.fromList(decoded);
-    } catch (_) {
-      // Not a gzip stream — bytes predate this decorator. Pass through.
-      return bytes;
-    }
-  }
+  /// Null from the decoder means "not a gzip stream": bytes that predate this
+  /// decorator, which pass through untouched.
+  Future<Uint8List> _maybeDecompress(Uint8List bytes) async =>
+      await gzipDecode(bytes) ?? bytes;
 }

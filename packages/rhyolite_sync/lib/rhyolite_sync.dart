@@ -50,6 +50,7 @@ export 'src/remote/i_vault_meta_storage.dart';
 export 'src/remote/remote_blob_storage_builder.dart';
 export 'src/remote/encrypted_blob_storage.dart';
 export 'src/remote/gzip_blob_storage.dart';
+export 'src/remote/gzip_codec.dart' show gzipBackendName;
 export 'src/remote/remote_blob_storage.dart';
 export 'src/remote/external_blob_config.dart';
 export 'src/remote/http_blob_auth.dart';
@@ -87,6 +88,7 @@ export 'src/scheduler/priority_task_scheduler.dart';
 
 // --- Settings sync (.obsidian config keyspace) -------------------------
 export 'src/settings_sync/canonical_json.dart';
+export 'src/settings_sync/plugin_dir_manifest.dart';
 export 'src/settings_sync/resource_crdt_codec.dart';
 export 'src/settings_sync/settings_store.dart';
 export 'src/settings_sync/settings_sync.dart';

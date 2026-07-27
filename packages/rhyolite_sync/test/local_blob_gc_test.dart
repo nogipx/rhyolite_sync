@@ -102,4 +102,65 @@ void main() {
     expect(second.scanned, 1);
     expect(second.deleted, 0);
   });
+
+  group('sibling live set (settings sync shares this cache)', () {
+    LocalBlobGc gcWith(Set<String>? Function() external) => LocalBlobGc(
+          store: store,
+          blobStore: blobs,
+          vaultId: _v,
+          externalLiveIds: external,
+        );
+
+    test('keeps blobs claimed by the sibling', () async {
+      // Plugin-code blobs live in this same cache under the same vaultId, but
+      // no file_state references them. Without the sibling live set they look
+      // exactly like orphans and get evicted right after being written.
+      await _seedBlob(blobs, 'plugin-manifest', [1]);
+      await _seedBlob(blobs, 'plugin-chunk', [2]);
+
+      final r = await gcWith(() => {'plugin-manifest', 'plugin-chunk'})();
+      expect(r.deleted, 0);
+      expect(await blobs.read('plugin-chunk', vaultId: _v), isNotNull);
+    });
+
+    test('still deletes what neither side claims', () async {
+      await _seedBlob(blobs, 'plugin-chunk', [1]);
+      await _seedBlob(blobs, 'stale-plugin-chunk', [2]);
+
+      // A plugin update drops the old version from the sibling's live set —
+      // this is how the previous version leaves the local cache.
+      final r = await gcWith(() => {'plugin-chunk'})();
+      expect(r.deleted, 1);
+      expect(await blobs.read('plugin-chunk', vaultId: _v), isNotNull);
+      expect(await blobs.read('stale-plugin-chunk', vaultId: _v), isNull);
+    });
+
+    test('null means not ready and skips the sweep entirely', () async {
+      await _seedBlob(blobs, 'plugin-chunk', [1]);
+      await _seedBlob(blobs, 'real-orphan', [2]);
+
+      final r = await gcWith(() => null)();
+      expect(r.skipped, isTrue);
+      expect(r.deleted, 0);
+      // Even a genuine orphan survives: an incomplete live set must never
+      // delete anything. The next sweep, once the sibling has loaded, gets it.
+      expect(await blobs.read('real-orphan', vaultId: _v), isNotNull);
+    });
+
+    test('an empty sibling set is an answer, not a refusal', () async {
+      // Settings sync off: leftovers from when it was on are collectable.
+      await _seedBlob(blobs, 'leftover-plugin-chunk', [1]);
+
+      final r = await gcWith(() => const <String>{})();
+      expect(r.skipped, isFalse);
+      expect(r.deleted, 1);
+    });
+
+    test('no provider at all behaves exactly as before', () async {
+      await _seedBlob(blobs, 'orphan', [1]);
+      final r = await gc();
+      expect(r.skipped, isFalse);
+      expect(r.deleted, 1);
+    });
+  });
 }

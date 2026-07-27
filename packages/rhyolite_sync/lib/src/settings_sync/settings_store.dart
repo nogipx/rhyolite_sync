@@ -42,9 +42,16 @@ class SettingsStore {
   int _cursor = 0;
   Hlc? _ownLatestHlc;
 
+  /// Which resources this device was willing to accept last time it ran. See
+  /// [SettingsSync.start] — a change here invalidates the pull cursor.
+  String? _scope;
+
   String get deviceId => _deviceId!;
   int get cursor => _cursor;
   set cursor(int value) => _cursor = value;
+
+  String? get scope => _scope;
+  set scope(String? value) => _scope = value;
 
   Iterable<String> get resourceIds => _rows.keys;
   Object? encodedState(String resourceId) => _rows[resourceId]?.encodedState;
@@ -102,6 +109,7 @@ class SettingsStore {
     if (meta != null) {
       _cursor = (meta.payload['cursor'] as int?) ?? 0;
       _deviceId = meta.payload['deviceId'] as String?;
+      _scope = meta.payload['scope'] as String?;
       final ownHlc = meta.payload['ownHlc'] as String?;
       _ownLatestHlc = ownHlc == null ? null : Hlc.unpack(ownHlc);
     }
@@ -183,6 +191,7 @@ class SettingsStore {
       payload: {
         'cursor': _cursor,
         if (_deviceId != null) 'deviceId': _deviceId,
+        if (_scope != null) 'scope': _scope,
         if (_ownLatestHlc != null) 'ownHlc': _ownLatestHlc!.pack(),
       },
     );

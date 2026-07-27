@@ -57,6 +57,7 @@ class VerifyBlobsUseCase {
     required this.vaultId,
     this.existsBatch = 128,
     this.uploadBatch = 64,
+    this.confirmedPresent,
     LogScope? logger,
   }) : _log = logger ?? LogScope.noop;
 
@@ -71,6 +72,17 @@ class VerifyBlobsUseCase {
 
   /// Max blobs re-uploaded per [IBlobStorage.upload] call.
   final int uploadBatch;
+
+  /// Ids the server has already confirmed it holds, carried ACROSS runs by the
+  /// caller. This pass is preemptible and restarts from the top when it yields,
+  /// so without somewhere to keep its findings a device that gets interrupted
+  /// every few seconds re-probes the same blobs forever and never reaches a
+  /// verdict. Ids found MISSING are deliberately not recorded — they may have
+  /// been healed since, and must be probed again.
+  ///
+  /// Owned per session: a blob confirmed present can later be swept away
+  /// server-side, and this pass exists to catch lost uploads, not deletions.
+  final Set<String>? confirmedPresent;
 
   final LogScope _log;
 
@@ -92,14 +104,20 @@ class VerifyBlobsUseCase {
     }
 
     final refList = referenced.toList();
+    final confirmed = confirmedPresent ?? <String>{};
     final present = <String>{};
     for (var i = 0; i < refList.length; i += existsBatch) {
+      // Yielding here discards this run — everything learned so far survives
+      // only because [confirmed] belongs to the caller.
       context?.cancellationToken?.throwIfCancelled();
       final end =
           (i + existsBatch) > refList.length ? refList.length : i + existsBatch;
-      present.addAll(
-        await blobStorage.exists(refList.sublist(i, end), context: context),
-      );
+      final slice = refList.sublist(i, end);
+      final toProbe = slice.where((id) => !confirmed.contains(id)).toList();
+      if (toProbe.isNotEmpty) {
+        confirmed.addAll(await blobStorage.exists(toProbe, context: context));
+      }
+      present.addAll(slice.where(confirmed.contains));
     }
     final missing = referenced.difference(present);
     if (missing.isEmpty) {

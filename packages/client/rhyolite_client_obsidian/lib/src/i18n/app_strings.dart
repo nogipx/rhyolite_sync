@@ -378,8 +378,37 @@ abstract class AppStrings {
   String get settingsCatCommunityPluginsEnabledDesc;
   String get settingsCatCommunityPluginSettings;
   String get settingsCatCommunityPluginSettingsDesc;
+  String get settingsCatCommunityPluginCode;
+  String get settingsCatCommunityPluginCodeDesc;
+  String settingsCatCommunityPluginCodeSize(String size);
+  String get pluginCodeUnavailableQuota;
+  String get pluginCodeUnavailableUnknown;
   String get settingsCatThemesSnippets;
   String get settingsCatThemesSnippetsDesc;
+  String get pluginsSection;
+  String get themesSection;
+  String get manageAction;
+  String get storageUsedLabel;
+  String pluginsOutOfSyncHere(int n);
+  String get storageOverviewAction;
+  String get storageOverviewRowDesc;
+  String get pluginMgmtTitle;
+  String pluginMgmtDescription(int count, String size);
+  String get pluginMgmtNoPlugins;
+  String get pluginMgmtAction;
+  String get pluginRemoveAction;
+  String pluginRemoveTitle(String id);
+  String pluginRemoveBody(String size);
+  String get pluginRemoveConfirm;
+  String pluginRemovedFromVault(String id);
+  String get pluginRemoveUnavailable;
+  String pluginRemoveFailed(String id, Object error);
+  String pluginFromDevice(String device);
+  String pluginLine(String id, String version, String size, String note);
+  String get pluginNotInstalledHere;
+  String get pluginDesktopOnlySkipped;
+  String pluginVersionHere(String version);
+  String get pluginsSizeLabel;
   String get storageSection;
 
   // ── Sync panel ───────────────────────────────────────────────────────────

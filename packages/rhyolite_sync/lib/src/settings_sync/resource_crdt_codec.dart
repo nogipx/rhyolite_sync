@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:convergent/convergent.dart';
 
 import 'canonical_json.dart';
+import 'plugin_dir_manifest.dart';
 
 /// How a settings resource (one `.obsidian` file or logical unit) is merged.
 ///
@@ -23,7 +24,13 @@ import 'canonical_json.dart';
 ///   normalized). Unlike [wholeFile] this ignores formatting + key order, so
 ///   Obsidian re-serializing a data.json (insertion order, platform-dependent
 ///   indentation) is a no-op instead of a phantom change.
-enum SettingsCrdtKind { fieldMap, orSet, wholeFile, jsonWholeFile }
+/// - [blobDir] — a whole directory of binary files (a community plugin's
+///   install) merged last-write-wins. Unlike every kind above, the CONTENT is
+///   not in the record: the state holds a [PluginDirManifest] of chunked-blob
+///   references and the bytes ride the shared vault blob bucket. The platform
+///   layer materializes it; [ResourceCrdtCodec.renderState] yields the manifest
+///   JSON, not file bytes.
+enum SettingsCrdtKind { fieldMap, orSet, wholeFile, jsonWholeFile, blobDir }
 
 /// Bytes <-> convergent CRDT state for one resource kind, plus the
 /// snapshot-diffing that turns a freshly-read file into CRDT mutations.
@@ -43,6 +50,8 @@ abstract class ResourceCrdtCodec {
         return const WholeFileCodec();
       case SettingsCrdtKind.jsonWholeFile:
         return const JsonWholeFileCodec();
+      case SettingsCrdtKind.blobDir:
+        return const BlobDirCodec();
     }
   }
 
@@ -64,6 +73,11 @@ abstract class ResourceCrdtCodec {
 
   /// Render the CRDT state back to canonical file bytes.
   Uint8List renderState(Object state);
+
+  /// Blob ids this state keeps alive, declared on push so the server-side
+  /// orphan sweep does not reclaim them. Empty for every kind that inlines its
+  /// content into the record (all of them but [BlobDirCodec]).
+  List<String> liveBlobIds(Object state) => const [];
 }
 
 // ---------------------------------------------------------------------------
@@ -351,5 +365,89 @@ class JsonWholeFileCodec extends ResourceCrdtCodec {
     // save; diskMatchesRendered (canonical compare) keeps us from overwriting an
     // equivalent on-disk copy in the meantime.
     return Uint8List.fromList(utf8.encode(value));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// blobDir: LwwRegister<canonical PluginDirManifest JSON>
+// ---------------------------------------------------------------------------
+
+/// Last-write-wins over a whole directory of blob-backed files (see
+/// [PluginDirManifest]).
+///
+/// The register holds the manifest as canonical JSON text — references only, a
+/// few hundred bytes, so the record stays far below the server's record-size
+/// cap no matter how large the plugin is. Bytes live in the vault's blob
+/// bucket and are moved by the platform layer through `ChunkedBlobIO`.
+///
+/// The directory merges as ONE unit. Per-file registers would let a vault
+/// converge on `main.js` from one release and `manifest.json` from another —
+/// a torn install that breaks Obsidian's plugin updater.
+class BlobDirCodec extends ResourceCrdtCodec {
+  const BlobDirCodec();
+
+  static final _codec = LwwRegisterCodec<Object?>(const JsonCodec<Object?>());
+
+  LwwRegister<Object?> _cast(Object s) => s as LwwRegister<Object?>;
+
+  @override
+  Object emptyState() => LwwRegister<Object?>.empty();
+
+  @override
+  Object decodeState(Object? json) => _codec.decode(json);
+
+  @override
+  Object? encodeState(Object state) => _codec.encode(_cast(state));
+
+  @override
+  Object joinStates(Object a, Object b) => _cast(a).join(_cast(b));
+
+  @override
+  Object diffApply(Object state, Uint8List newFileBytes, Hlc Function() tick) {
+    final reg = _cast(state);
+    final incoming = PluginDirManifest.tryParse(newFileBytes);
+    // Not a manifest (a caller bug, or a half-built capture) — leave the CRDT
+    // alone rather than replacing a good install with garbage.
+    if (incoming == null) return reg;
+
+    // Content-addressed suppression. Devices auto-update plugins independently,
+    // so several of them reach the same release and capture byte-identical
+    // files; blob ids are content-addressed under the shared vault key, so
+    // those captures share a contentHash. Suppressing here stops the
+    // push -> self-notify -> pull -> push loop that would otherwise run across
+    // every device on every plugin update.
+    final current = manifestOf(reg);
+    if (current != null && current.contentHash == incoming.contentHash) {
+      return reg;
+    }
+
+    var ctx = const CausalContext.empty();
+    for (final tv in reg.inner.values) {
+      ctx = ctx.advance(tv.hlc);
+    }
+    return reg.set(canonicalJson(incoming.toJson()), tick(), ctx);
+  }
+
+  @override
+  Uint8List renderState(Object state) {
+    final reg = _cast(state);
+    final value = reg.value;
+    if (reg.isEmpty || value is! String || value.isEmpty) return Uint8List(0);
+    return Uint8List.fromList(utf8.encode(value));
+  }
+
+  @override
+  List<String> liveBlobIds(Object state) =>
+      manifestOf(_cast(state))?.liveBlobIds ?? const [];
+
+  /// The decoded manifest currently held by [reg], or null when empty/corrupt.
+  PluginDirManifest? manifestOf(LwwRegister<Object?> reg) {
+    final value = reg.value;
+    if (reg.isEmpty || value is! String || value.isEmpty) return null;
+    try {
+      return PluginDirManifest.tryFromJson(jsonDecode(value));
+    } catch (_) {
+      return null;
+    }
   }
 }

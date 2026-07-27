@@ -9,6 +9,7 @@ enum SettingsCategory {
   corePluginSettings, // daily-notes.json, templates.json, ... (other *.json)
   communityPluginsEnabled, // community-plugins.json
   communityPluginSettings, // plugins/<id>/data.json
+  communityPluginCode, // plugins/<id>/{manifest.json,main.js,styles.css}
   themesSnippets, // themes/**, snippets/*.css
 }
 
@@ -30,11 +31,25 @@ class ObsidianSettingsRegistry {
 
   static const selfPluginId = 'rhyolite-sync';
 
-  /// Categories enabled by default. Plugin *code* (`main.js`/`manifest.json`/
-  /// `styles.css`) is intentionally NOT a sync category at all: those files are
-  /// multi-MB and overwrite a running plugin (Obsidian has no hot-reload). The
-  /// enabled list + plugin settings are enough to provision a new device —
-  /// Obsidian reinstalls the plugins themselves.
+  /// Every directory name this plugin has ever installed under.
+  ///
+  /// `rhyolite_sync` is the pre-rename id (Obsidian rejects underscores at
+  /// submission, so the plugin moved to kebab-case) and its directory is still
+  /// sitting in vaults that predate the change. Matching only the current id
+  /// would leave that one classified as an ordinary community plugin: we would
+  /// sync OUR OWN old build into the vault, and on a device still running it
+  /// the apply path would overwrite the live engine's `main.js` and cycle it —
+  /// exactly what self-exclusion exists to prevent. Harmless today only
+  /// because the leftover directory happens to be empty.
+  static const selfPluginIds = <String>{'rhyolite-sync', 'rhyolite_sync'};
+
+  /// Categories enabled by default.
+  ///
+  /// [SettingsCategory.communityPluginCode] is deliberately absent. Every other
+  /// category is kilobytes of JSON; plugin code is tens to hundreds of
+  /// megabytes, two to three orders of magnitude more. Turning settings sync on
+  /// must not silently start moving that much data (and, on the managed free
+  /// tier, blow the storage quota mid-transfer). It is its own opt-in.
   static const defaultEnabledCategories = <SettingsCategory>{
     SettingsCategory.appSettings,
     SettingsCategory.appearance,
@@ -68,7 +83,7 @@ class ObsidianSettingsRegistry {
     }
     if (segs.first == 'plugins' &&
         segs.length >= 2 &&
-        segs[1] == selfPluginId) {
+        selfPluginIds.contains(segs[1])) {
       return null;
     }
     if (rel.endsWith('.db') ||
@@ -111,6 +126,18 @@ class ObsidianSettingsRegistry {
         );
     }
 
+    // --- plugins/<id> (the install itself) ---
+    // The whole directory is ONE resource: its three code files move together
+    // as a blob-backed unit. Per-file records could converge on `main.js` from
+    // one release and `manifest.json` from another — a torn install that
+    // breaks Obsidian's plugin updater.
+    if (segs.first == 'plugins' && segs.length == 2) {
+      return const SettingsResourceClass(
+        SettingsCrdtKind.blobDir,
+        SettingsCategory.communityPluginCode,
+      );
+    }
+
     // --- plugins/<id>/... ---
     if (segs.first == 'plugins' && segs.length >= 3) {
       final file = segs.last;
@@ -118,24 +145,35 @@ class ObsidianSettingsRegistry {
         // JSON we don't field-merge (unknown schema), but stored canonically so
         // Obsidian re-serializing it (insertion-order keys, platform-dependent
         // indentation) doesn't churn the sync. Opaque CSS below stays wholeFile.
+        //
+        // Deliberately NOT part of the directory resource above: plugin state
+        // merges per-field across devices, and a whole-directory LWW would keep
+        // overwriting that merge.
         return const SettingsResourceClass(
           SettingsCrdtKind.jsonWholeFile,
           SettingsCategory.communityPluginSettings,
         );
       }
-      // Plugin code (main.js/manifest.json/styles.css) and everything else
-      // under a plugin dir is never synced — too large, and overwrites a
-      // running plugin. Obsidian reinstalls plugins from the enabled list.
+      // Individual code files are covered by the directory resource; anything
+      // else under a plugin dir (caches, databases, downloaded assets) is
+      // device-local junk of unbounded size and is never synced.
       return null;
     }
 
-    // --- themes / snippets (downloaded CSS) ---
-    if (segs.first == 'themes' && segs.length >= 2) {
+    // --- themes/<name> (the theme itself) ---
+    // Blob-backed like a plugin directory, and for the same reason: a theme's
+    // stylesheet routinely runs past a megabyte, which is where inlining
+    // content into a settings record stops working. As one unit, so a theme
+    // can never converge on a stylesheet from one release with the manifest
+    // from another.
+    if (segs.first == 'themes' && segs.length == 2) {
       return const SettingsResourceClass(
-        SettingsCrdtKind.wholeFile,
+        SettingsCrdtKind.blobDir,
         SettingsCategory.themesSnippets,
       );
     }
+    // Files inside a theme ride the directory resource above.
+    if (segs.first == 'themes' && segs.length >= 3) return null;
     if (segs.first == 'snippets' && rel.endsWith('.css')) {
       return const SettingsResourceClass(
         SettingsCrdtKind.wholeFile,

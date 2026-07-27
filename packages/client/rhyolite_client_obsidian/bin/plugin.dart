@@ -18,6 +18,7 @@ import 'package:rhyolite_client_obsidian/src/engine/device_management_modal.dart
 import 'package:rhyolite_client_obsidian/src/engine/file_version_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/modal_lock.dart';
 import 'package:rhyolite_client_obsidian/src/engine/orphan_sweep_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/plugin_management_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/self_host_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/server_rejections.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_cleanup_modal.dart';
@@ -167,6 +168,68 @@ void _cancelSelfHeal() {
 /// per-file size gate. Null in self-host / before the first fetch → no limit.
 PlanCapabilities? _capabilities;
 
+/// Whether this session talks to a self-hosted server. Held here because the
+/// settings-sync launcher runs from several call sites that no longer have the
+/// boot block's locals in scope, and the plugin-code storage gate needs it.
+bool _selfHostActive = false;
+
+/// Bytes the community plugins installed on THIS device occupy, measured on
+/// each settings-sync launch. Shown in the settings row so enabling plugin-code
+/// sync is a decision made with the number in hand. Null until first measured.
+int? _pluginCodeLocalBytes;
+
+/// The vault's plugin set joined with this device's disk, or empty when
+/// plugin-code sync is off / settings sync isn't running.
+Future<PluginCodeOverview> _pluginOverview() async {
+  try {
+    return await _configSync?.pluginOverview() ?? PluginCodeOverview.empty;
+  } catch (e) {
+    _log.warning('plugin overview failed: $e');
+    return PluginCodeOverview.empty;
+  }
+}
+
+/// Opens the storage overview. Single definition so the sync panel, the
+/// command palette and the settings tab all show the same thing.
+Future<void> _showStorageOverview(
+  PluginHandle plugin,
+  ISyncEngine engine, {
+  Future<({int usedBytes, int quotaBytes})?> Function()? fetchUsage,
+}) async {
+  ({int usedBytes, int quotaBytes})? usage;
+  try {
+    usage = await fetchUsage?.call();
+  } catch (_) {
+    // No managed quota (self-host / BYO) or the lookup failed: the rest of the
+    // overview is still worth showing.
+  }
+  await showStorageOverviewModal(
+    plugin,
+    engine,
+    plugins: await _pluginOverview(),
+    usage: usage,
+    onManagePlugins: () => _showPluginManagement(plugin),
+  );
+}
+
+/// Opens plugin management, where a plugin can be dropped from the vault for
+/// every device at once.
+Future<void> _showPluginManagement(PluginHandle plugin) => showPluginManagementModal(
+      plugin,
+      load: _pluginOverview,
+      onRemove: (resourceId) async =>
+          await _configSync?.removeFromVault(resourceId) ?? false,
+    );
+
+/// Obsidian's own mobile flag. Desktop-only plugins are not materialized here.
+bool _isMobileApp(PluginHandle plugin) {
+  try {
+    return jsu.getProperty<bool?>(plugin.app.raw, 'isMobile') ?? false;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Plugin-owned task lane. Created in onLoad, injected into the engine so the
 /// engine's steady-state sync work (reconcile/pull/GC/settings) and the
 /// plugin's lifecycle work (boot/restart) share one serialized,
@@ -288,18 +351,93 @@ Future<void> _launchConfigSync({
     endpoint,
     serviceNameOverride: StateSyncContractNames.instance('config'),
   );
+  // Plugin *code* is the one category whose bytes are measured in hundreds of
+  // megabytes, so it is gated on the storage backing this vault as well as on
+  // the user's own toggle. Dropping the category here (rather than only hiding
+  // the toggle) means a vault whose plan changed stops capturing immediately.
+  final gate = pluginCodeAvailability(
+    selfHost: _selfHostActive,
+    externalStorage: engine.config.externalBlobConfig != null,
+    managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
+  );
+  final pluginCodeOn = prefs.categories.contains(
+        SettingsCategory.communityPluginCode,
+      ) &&
+      gate == PluginCodeAvailability.allowed;
+  final categories = pluginCodeOn
+      ? prefs.categories
+      : (Set<SettingsCategory>.of(prefs.categories)
+        ..remove(SettingsCategory.communityPluginCode));
+  if (prefs.categories.contains(SettingsCategory.communityPluginCode) &&
+      !pluginCodeOn) {
+    _log.info('Plugin code sync unavailable: ${gate.name}');
+  }
+
+  final pluginCode = BlobDirSync(
+    adapter: plugin.app.vault.adapter,
+    // Rebuilt per call: the engine swaps remote storage on reconnect and on a
+    // BYO-credentials change.
+    blobIO: () => engine.newSiblingBlobIO(
+      maxDownloadBytes: BlobDirSync.maxFileBytes,
+    ),
+    isMobile: _isMobileApp(plugin),
+    deviceLabel: engine.config.clientName,
+    pluginsManagerRaw: jsu.getProperty<Object?>(plugin.appRaw, 'plugins'),
+    // Surfaces plugin/theme transfers in the panel's active-transfers view,
+    // the same place note content appears. A first sync moves tens of
+    // megabytes; without this it is minutes of silence.
+    onTransfer: ({
+      required String path,
+      required bool upload,
+      required int sentBytes,
+      required int totalBytes,
+      required bool done,
+    }) =>
+        engine.reportSiblingTransfer(
+      path: path,
+      upload: upload,
+      sentBytes: sentBytes,
+      totalBytes: totalBytes,
+      done: done,
+    ),
+    log: _log.info,
+  );
+  // Measure what plugins weigh here even when the category is off — that number
+  // is exactly what the settings row shows to make the opt-in an informed one.
+  // Stat-only, so it costs nothing to keep current.
+  unawaited(
+    pluginCode.localTotalBytes(SyncedDirKind.plugin).then((bytes) {
+      _pluginCodeLocalBytes = bytes;
+    }).catchError((Object _) {}),
+  );
+
   final sync = SettingsSync(
     remote: caller,
     store: SettingsStore(client: dataClient, vaultId: vaultId),
     cipher: cipher,
     vaultId: vaultId,
-    kindOf: ObsidianSettingsRegistry.kindOf(prefs.categories),
+    kindOf: ObsidianSettingsRegistry.kindOf(categories),
+    // Which categories are on IS the scope: a pull drops records for a category
+    // that is off, so the cursor it leaves behind is only valid while the set
+    // stays the same. Sorted so the token depends on membership, not order.
+    scope: (categories.map((c) => c.name).toList()..sort()).join(','),
     log: _log.info,
   );
   final cs = ObsidianConfigSync(
     adapter: plugin.app.vault.adapter,
     sync: sync,
-    enabledCategories: prefs.categories,
+    enabledCategories: categories,
+    // Needed by BOTH blob-backed categories. Themes are on by default while
+    // plugin code is opt-in, so gating this on plugin code alone would have
+    // silently stopped themes from syncing at all.
+    pluginCode: (pluginCodeOn ||
+            categories.contains(SettingsCategory.themesSnippets))
+        ? pluginCode
+        : null,
+    // Reclaim the replaced plugin version's storage right after the push,
+    // instead of leaving it for whenever the user happens to run a sweep.
+    // The server decides what is actually dead; we only nominate.
+    releaseBlobs: engine.releaseBlobs,
     // Event-driven remote->local: react to another device's settings push on
     // the config keyspace topic (same vault qualification the server uses).
     notifyEndpoint: endpoint,
@@ -319,6 +457,9 @@ Future<void> _launchConfigSync({
   try {
     await cs.start();
     _log.info('Settings sync started (${prefs.categories.length} categories)');
+    // The blob GC ran (and refused) before this existed — its live set was
+    // incomplete without us. Now that we can answer, let it try again.
+    engine.rescheduleLocalBlobGc();
   } catch (e, st) {
     _log.error('Settings sync start failed', error: e, stackTrace: st);
   }
@@ -457,6 +598,7 @@ void main() {
               selfHost.enabled &&
               selfHost.syncUrl.isNotEmpty &&
               selfHostToken.isNotEmpty;
+          _selfHostActive = selfHostActive;
 
           // Server URL: self-host overrides the compile-time managed sync URL.
           final syncServerUrl = selfHostActive
@@ -763,6 +905,18 @@ void main() {
             excludedExtensions: () => fileFilterPrefs.excludedExtensions,
           );
           _engine = engine;
+          // Settings sync stores plugin-code blobs in the SAME local cache
+          // under the same vaultId, but the engine's blob GC builds its live
+          // set from notes alone — without this hook it evicts every plugin
+          // blob on the next housekeeping pass. Null while settings sync is
+          // enabled but not yet loaded: the GC then skips rather than guesses.
+          if (engine is StateSyncEngine) {
+            engine.siblingLiveBlobIds = () {
+              if (!settingsPrefs.enabled) return const <String>{};
+              final cs = _configSync;
+              return cs == null ? null : cs.liveBlobIds();
+            };
+          }
           _log.info('boot: engine ctor ${bootSw.elapsedMilliseconds}ms');
 
           // (Re)binds `.obsidian` settings sync to the engine's CURRENT
@@ -889,7 +1043,19 @@ void main() {
               client: dataClient,
               vaultId: vaultId,
             ).approxTotalBytes(),
-            onStorageDetails: () => showStorageOverviewModal(plugin, engine),
+            onPluginStats: () async {
+              final o = await _configSync?.pluginOverview();
+              return o == null || o.isEmpty
+                  ? null
+                  : (count: o.count, bytes: o.totalBytes);
+            },
+            onStorageDetails: () => _showStorageOverview(
+              plugin,
+              engine,
+              fetchUsage: (selfHostActive || byo)
+                  ? null
+                  : () => _fetchVaultUsage(engine, vaultId),
+            ),
           )..register();
           _syncPanel = syncPanel;
 
@@ -1162,9 +1328,7 @@ void main() {
           plugin.addCommand(
             id: 'rhyolite-storage-overview',
             name: S.storageOverviewTitle,
-            callback: () {
-              showStorageOverviewModal(plugin, engine);
-            },
+            callback: () => unawaited(_showStorageOverview(plugin, engine)),
           );
           plugin.addCommand(
             id: 'rhyolite-reclaim-orphans',
@@ -1841,6 +2005,24 @@ void Function() _registerSettings({
     },
     settingsSyncPrefs: settingsSyncPrefs,
     onSettingsSyncChanged: onSettingsSyncChanged,
+    // Read live: the plan (and so the answer) can change under a running
+    // session, and the measurement lands asynchronously after boot.
+    pluginCodeAvailability: () => pluginCodeAvailability(
+      selfHost: selfHostEnabled,
+      externalStorage: engine.config.externalBlobConfig != null,
+      managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
+    ),
+    pluginCodeSize: () {
+      final bytes = _pluginCodeLocalBytes;
+      return bytes == null || bytes == 0 ? null : formatBytes(bytes);
+    },
+    onShowStorageOverview: () => _showStorageOverview(
+      plugin,
+      engine,
+      fetchUsage: (selfHostEnabled || config.externalBlobConfig != null)
+          ? null
+          : () => _fetchVaultUsage(engine, config.vaultId),
+    ),
     diagnosticsPrefs: diagnosticsPrefs,
     onDiagnosticsChanged: onDiagnosticsChanged,
     fileFilterPrefs: fileFilterPrefs,

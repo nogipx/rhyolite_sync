@@ -231,7 +231,7 @@ class RuStrings extends AppStrings {
   @override
   String get files => 'Файлов';
   @override
-  String get contentSize => 'Размер содержимого';
+  String get contentSize => 'Размер';
   @override
   String get uniqueBlobs => 'Уникальных блобов';
   @override
@@ -901,9 +901,80 @@ class RuStrings extends AppStrings {
   String get settingsCatCommunityPluginSettingsDesc =>
       'data.json каждого плагина';
   @override
+  String get settingsCatCommunityPluginCode => 'Сами сторонние плагины';
+  @override
+  String get settingsCatCommunityPluginCodeDesc =>
+      'Плагины будут установлены на всех устройствах, одна версия на хранилище. '
+      'Занимает намного больше места, чем остальные категории.';
+  @override
+  String settingsCatCommunityPluginCodeSize(String size) =>
+      'Плагины на этом устройстве занимают $size.';
+  @override
+  String get pluginCodeUnavailableQuota =>
+      'Нужно больше места, чем даёт текущий тариф. Доступно на Pro, со своим '
+      'S3/WebDAV или на своём сервере.';
+  @override
+  String get pluginCodeUnavailableUnknown =>
+      'Ждём данные о тарифе — откройте настройки чуть позже.';
+  @override
   String get settingsCatThemesSnippets => 'Темы и сниппеты';
   @override
   String get settingsCatThemesSnippetsDesc => 'Скачанные темы и CSS-сниппеты';
+  @override
+  String get pluginsSection => 'Плагины (хранилище)';
+  @override
+  String get themesSection => 'Темы (хранилище)';
+  @override
+  String get manageAction => 'Управление';
+  @override
+  String get storageUsedLabel => 'Занято';
+  @override
+  String pluginsOutOfSyncHere(int n) => 'Не синхронизировано здесь: $n';
+  @override
+  String get storageOverviewAction => 'Обзор';
+  @override
+  String get storageOverviewRowDesc =>
+      'Что лежит в хранилище — на сервере и на этом устройстве.';
+  @override
+  String get pluginMgmtTitle => 'Плагины в хранилище';
+  @override
+  String pluginMgmtDescription(int count, String size) =>
+      'Плагинов: $count, $size. Удаление убирает плагин со всех устройств и '
+      'освобождает место.';
+  @override
+  String get pluginMgmtNoPlugins => 'В хранилище пока нет плагинов.';
+  @override
+  String get pluginMgmtAction => 'Плагины';
+  @override
+  String get pluginRemoveAction => 'Удалить';
+  @override
+  String pluginRemoveTitle(String id) => 'Удалить $id из хранилища?';
+  @override
+  String pluginRemoveBody(String size) =>
+      'Плагин будет удалён на всех устройствах, освободится $size. '
+      'Если установить его снова, он снова засинкается.';
+  @override
+  String get pluginRemoveConfirm => 'Удалить везде';
+  @override
+  String pluginRemovedFromVault(String id) => '$id удалён из хранилища';
+  @override
+  String get pluginRemoveUnavailable => 'Синхронизация плагинов не запущена';
+  @override
+  String pluginRemoveFailed(String id, Object error) =>
+      'Не удалось удалить $id: $error';
+  @override
+  String pluginFromDevice(String device) => 'с $device';
+  @override
+  String pluginLine(String id, String version, String size, String note) =>
+      '$id $version — $size${note.isEmpty ? '' : ' · $note'}';
+  @override
+  String get pluginNotInstalledHere => 'ещё не на этом устройстве';
+  @override
+  String get pluginDesktopOnlySkipped => 'только для десктопа, пропущен здесь';
+  @override
+  String pluginVersionHere(String version) => 'здесь версия $version';
+  @override
+  String get pluginsSizeLabel => 'Плагины';
   @override
   String get storageSection => 'Хранилище';
 

@@ -13,11 +13,16 @@ class VaultMaintenanceContractNames {
   static const service = 'RhyoliteVaultMaintenance';
   static String instance(String suffix) => '$service\_$suffix';
   static const sweepOrphanBlobs = 'sweepOrphanBlobs';
+  static const releaseBlobs = 'releaseBlobs';
   static const sweepStableTombstones = 'sweepStableTombstones';
 }
 
 class VaultMaintenanceContractCodecs {
   const VaultMaintenanceContractCodecs._();
+  static const codecReleaseBlobsRequest =
+      RpcCodec<ReleaseBlobsRequest>.withDecoder(ReleaseBlobsRequest.fromJson);
+  static const codecReleaseBlobsResponse =
+      RpcCodec<ReleaseBlobsResponse>.withDecoder(ReleaseBlobsResponse.fromJson);
   static const codecSweepOrphanBlobsRequest =
       RpcCodec<SweepOrphanBlobsRequest>.withDecoder(
         SweepOrphanBlobsRequest.fromJson,
@@ -64,6 +69,20 @@ class VaultMaintenanceContractCaller extends RpcCallerContract
   }
 
   @override
+  Future<ReleaseBlobsResponse> releaseBlobs(
+    ReleaseBlobsRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<ReleaseBlobsRequest, ReleaseBlobsResponse>(
+      methodName: VaultMaintenanceContractNames.releaseBlobs,
+      requestCodec: VaultMaintenanceContractCodecs.codecReleaseBlobsRequest,
+      responseCodec: VaultMaintenanceContractCodecs.codecReleaseBlobsResponse,
+      request: request,
+      context: context,
+    );
+  }
+
+  @override
   Future<SweepStableTombstonesResponse> sweepStableTombstones(
     SweepStableTombstonesRequest request, {
     RpcContext? context,
@@ -101,6 +120,12 @@ abstract class VaultMaintenanceContractResponder extends RpcResponderContract
       requestCodec: VaultMaintenanceContractCodecs.codecSweepOrphanBlobsRequest,
       responseCodec:
           VaultMaintenanceContractCodecs.codecSweepOrphanBlobsResponse,
+    );
+    addUnaryMethod<ReleaseBlobsRequest, ReleaseBlobsResponse>(
+      methodName: VaultMaintenanceContractNames.releaseBlobs,
+      handler: releaseBlobs,
+      requestCodec: VaultMaintenanceContractCodecs.codecReleaseBlobsRequest,
+      responseCodec: VaultMaintenanceContractCodecs.codecReleaseBlobsResponse,
     );
     addUnaryMethod<SweepStableTombstonesRequest, SweepStableTombstonesResponse>(
       methodName: VaultMaintenanceContractNames.sweepStableTombstones,

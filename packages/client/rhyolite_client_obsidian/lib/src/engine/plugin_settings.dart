@@ -1,4 +1,5 @@
 // ignore_for_file: deprecated_member_use
+import 'dart:async';
 import 'dart:js_util' as jsu;
 
 import 'package:obsidian_dart/obsidian_dart.dart';
@@ -13,6 +14,7 @@ import 'package:uuid/uuid.dart';
 import '../i18n/i18n.dart';
 import '../settings/diagnostics_prefs.dart';
 import '../settings/file_filter_prefs.dart';
+import '../settings/plugin_code_gate.dart';
 import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
 import 'build_env.dart';
@@ -57,6 +59,15 @@ void Function() registerSettingsTab({
   required Future<void> Function() onClearExternalBlobConfig,
   required SettingsSyncPrefs Function() settingsSyncPrefs,
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
+  // Whether the storage backing this vault can hold a plugin set, and how much
+  // the plugins installed on this device weigh (pre-formatted, null when not
+  // measured yet). Together they turn the plugin-code row from a toggle the
+  // user can trip into an informed choice.
+  required PluginCodeAvailability Function() pluginCodeAvailability,
+  required String? Function() pluginCodeSize,
+  // Opens the storage overview from the settings tab, so it is reachable
+  // without going through the sync panel.
+  required Future<void> Function() onShowStorageOverview,
   required Future<void> Function() onResetSettings,
   required Future<void> Function() onRestoreSettings,
   // Remote diagnostics logging (advanced, off by default). Lets a user stream
@@ -444,9 +455,7 @@ void Function() registerSettingsTab({
       // Self-host: no account service. Vault comes from the sync registry.
       t.addSection(S.vaultSection);
       if (currentConfig.vaultId.isNotEmpty) {
-        if (vaultUsage != null) {
-          _addStorageUsage(t, vaultUsage!);
-        }
+        _addStorageUsage(t, vaultUsage, onShowOverview: onShowStorageOverview);
         addDisconnectVaultButton(t);
         addTroubleshootingSection(t);
       } else {
@@ -457,9 +466,7 @@ void Function() registerSettingsTab({
       if (isSignedIn) {
         addSignOutButton(t, userEmail);
         if (currentConfig.vaultId.isNotEmpty) {
-          if (vaultUsage != null) {
-            _addStorageUsage(t, vaultUsage!);
-          }
+          _addStorageUsage(t, vaultUsage, onShowOverview: onShowStorageOverview);
           addDisconnectVaultButton(t);
           addTroubleshootingSection(t);
         } else {
@@ -529,6 +536,8 @@ void Function() registerSettingsTab({
         t,
         prefs: settingsSyncPrefs(),
         onChanged: onSettingsSyncChanged,
+        pluginCode: pluginCodeAvailability(),
+        pluginCodeSize: pluginCodeSize(),
         onReset: () async {
           final confirmed = await _showActionConfirmation(
             plugin,
@@ -922,23 +931,34 @@ Future<bool> _showDisconnectConfirmation(
   return confirmed ?? false;
 }
 
+/// The storage row: managed usage when there is a quota to report, and the way
+/// into the overview.
+///
+/// Rendered even with no [usage] — self-host and bring-your-own have no managed
+/// quota, but the overview is just as useful there, and burying the only
+/// entrance to it behind a figure those users never see meant they had none.
 void _addStorageUsage(
   PluginSettingsTab t,
-  ({int usedBytes, int quotaBytes}) usage,
-) {
-  final usedMiB = usage.usedBytes / (1024 * 1024);
-  final quotaMiB = usage.quotaBytes / (1024 * 1024);
-  final percent = usage.quotaBytes > 0
-      ? (usage.usedBytes / usage.quotaBytes * 100).clamp(0, 100)
-      : 0.0;
-  final label =
-      '${usedMiB.toStringAsFixed(1)} / ${quotaMiB.toStringAsFixed(0)} MiB '
-      '(${percent.toStringAsFixed(0)}%)';
+  ({int usedBytes, int quotaBytes})? usage, {
+  required Future<void> Function() onShowOverview,
+}) {
+  final String label;
+  if (usage != null && usage.quotaBytes > 0) {
+    final usedMiB = usage.usedBytes / (1024 * 1024);
+    final quotaMiB = usage.quotaBytes / (1024 * 1024);
+    final percent = (usage.usedBytes / usage.quotaBytes * 100).clamp(0, 100);
+    label = '${usedMiB.toStringAsFixed(1)} / ${quotaMiB.toStringAsFixed(0)} MiB '
+        '(${percent.toStringAsFixed(0)}%)';
+  } else {
+    label = S.storageOverviewRowDesc;
+  }
 
-  t.addCustom((s) {
-    s.setName(S.storageSection);
-    s.setDesc(label);
-  });
+  t.addButton(
+    name: S.storageSection,
+    description: label,
+    buttonText: S.storageOverviewAction,
+    onClick: () => unawaited(onShowOverview()),
+  );
 }
 
 /// Shows a modal that immediately starts checking for a restored subscription.

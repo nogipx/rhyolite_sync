@@ -225,7 +225,7 @@ class EnStrings extends AppStrings {
   @override
   String get files => 'Files';
   @override
-  String get contentSize => 'Content size';
+  String get contentSize => 'Size';
   @override
   String get uniqueBlobs => 'Unique blobs';
   @override
@@ -881,10 +881,81 @@ class EnStrings extends AppStrings {
   String get settingsCatCommunityPluginSettingsDesc =>
       "Each plugin's data.json";
   @override
+  String get settingsCatCommunityPluginCode => 'Community plugins themselves';
+  @override
+  String get settingsCatCommunityPluginCodeDesc =>
+      'Install plugins on every device, one version per vault. '
+      'Uses far more storage than the other categories.';
+  @override
+  String settingsCatCommunityPluginCodeSize(String size) =>
+      'Plugins installed here take up $size.';
+  @override
+  String get pluginCodeUnavailableQuota =>
+      'Needs more storage than this plan provides. Available on Pro, or with '
+      'your own S3/WebDAV storage, or when self-hosting.';
+  @override
+  String get pluginCodeUnavailableUnknown =>
+      'Waiting for your plan details — reopen settings in a moment.';
+  @override
   String get settingsCatThemesSnippets => 'Themes & snippets';
   @override
   String get settingsCatThemesSnippetsDesc =>
       'Downloaded themes and CSS snippets';
+  @override
+  String get pluginsSection => 'Plugins (vault)';
+  @override
+  String get themesSection => 'Themes (vault)';
+  @override
+  String get manageAction => 'Manage';
+  @override
+  String get storageUsedLabel => 'Used';
+  @override
+  String pluginsOutOfSyncHere(int n) => '$n not in sync on this device';
+  @override
+  String get storageOverviewAction => 'Overview';
+  @override
+  String get storageOverviewRowDesc =>
+      'What this vault holds, on the server and on this device.';
+  @override
+  String get pluginMgmtTitle => 'Plugins in this vault';
+  @override
+  String pluginMgmtDescription(int count, String size) =>
+      '$count plugins, $size. Removing one takes it off every device and frees '
+      'its storage.';
+  @override
+  String get pluginMgmtNoPlugins => 'No plugins are synced to this vault yet.';
+  @override
+  String get pluginMgmtAction => 'Manage plugins';
+  @override
+  String get pluginRemoveAction => 'Remove';
+  @override
+  String pluginRemoveTitle(String id) => 'Remove $id from the vault?';
+  @override
+  String pluginRemoveBody(String size) =>
+      'It will be uninstalled on every device, and $size of storage is freed. '
+      'Installing it again re-syncs it.';
+  @override
+  String get pluginRemoveConfirm => 'Remove everywhere';
+  @override
+  String pluginRemovedFromVault(String id) => '$id removed from the vault';
+  @override
+  String get pluginRemoveUnavailable => 'Plugin sync is not running';
+  @override
+  String pluginRemoveFailed(String id, Object error) =>
+      'Could not remove $id: $error';
+  @override
+  String pluginFromDevice(String device) => 'from $device';
+  @override
+  String pluginLine(String id, String version, String size, String note) =>
+      '$id $version — $size${note.isEmpty ? '' : ' · $note'}';
+  @override
+  String get pluginNotInstalledHere => 'not on this device yet';
+  @override
+  String get pluginDesktopOnlySkipped => 'desktop-only, skipped here';
+  @override
+  String pluginVersionHere(String version) => 'this device has $version';
+  @override
+  String get pluginsSizeLabel => 'Plugins';
   @override
   String get storageSection => 'Storage';
 

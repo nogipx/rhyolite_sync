@@ -34,6 +34,7 @@ class SyncPanel {
     Future<void> Function()? onReconnect,
     Future<({int usedBytes, int quotaBytes})?> Function()? onFetchUsage,
     Future<int> Function()? onSettingsSize,
+    Future<({int count, int bytes})?> Function()? onPluginStats,
     void Function()? onStorageDetails,
     LogScope? logger,
   }) : _plugin = plugin,
@@ -49,6 +50,7 @@ class SyncPanel {
        _onReconnect = onReconnect,
        _onFetchUsage = onFetchUsage,
        _onSettingsSize = onSettingsSize,
+       _onPluginStats = onPluginStats,
        _onStorageDetails = onStorageDetails,
        _log = logger;
 
@@ -67,12 +69,18 @@ class SyncPanel {
   final Future<void> Function()? _onReconnect;
   final Future<({int usedBytes, int quotaBytes})?> Function()? _onFetchUsage;
   final Future<int> Function()? _onSettingsSize;
+  final Future<({int count, int bytes})?> Function()? _onPluginStats;
   final void Function()? _onStorageDetails;
   final LogScope? _log;
 
   /// Approx synced-settings footprint, fetched once per open (null until then
   /// or when settings sync has never run).
   int? _settingsBytes;
+
+  /// Synced plugin count + bytes, fetched once per open. Null when plugin-code
+  /// sync is off, which is also why the row disappears entirely rather than
+  /// showing a zero.
+  ({int count, int bytes})? _pluginStats;
 
   StreamSubscription<SyncEngineEvent>? _sub;
   Timer? _renderTimer;
@@ -208,6 +216,7 @@ class SyncPanel {
     _render();
     _maybeFetchUsage();
     _fetchSettingsSize();
+    _fetchPluginStats();
   }
 
   void _fetchSettingsSize() {
@@ -218,6 +227,17 @@ class SyncPanel {
       _scheduleRender();
     }).catchError((Object e) {
       _log?.warning('sync panel: settings size fetch failed: $e');
+    });
+  }
+
+  void _fetchPluginStats() {
+    final fetch = _onPluginStats;
+    if (fetch == null) return;
+    fetch().then((stats) {
+      _pluginStats = stats;
+      _scheduleRender();
+    }).catchError((Object e) {
+      _log?.warning('sync panel: plugin stats fetch failed: $e');
     });
   }
 
@@ -467,6 +487,14 @@ class SyncPanel {
     }
     if (_settingsBytes != null && _settingsBytes! > 0) {
       _kv(table, S.settingsSizeLabel, _bytes(_settingsBytes!));
+    }
+    final pluginStats = _pluginStats;
+    if (pluginStats != null && pluginStats.count > 0) {
+      _kv(
+        table,
+        S.pluginsSizeLabel,
+        '${pluginStats.count} · ${_bytes(pluginStats.bytes)}',
+      );
     }
 
     // ── Storage meter (managed) ──

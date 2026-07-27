@@ -125,6 +125,67 @@ class SweepStableTombstonesResponse implements IRpcSerializable {
       };
 }
 
+/// Targeted release of blobs a client believes it just superseded — the
+/// immediate counterpart to the full sweep.
+///
+/// The client proposes candidates (e.g. the blobs of the plugin version it just
+/// replaced); the SERVER decides, deleting only those its own live set does not
+/// cover. That split is the whole point. Chunks are content-addressed and
+/// shared: the same chunk can sit in another plugin, in a note, or in a
+/// concurrent value of the very record being replaced (each MV value is its own
+/// row, so a peer's un-merged version still counts as live). A client cannot
+/// see any of that, and a client-side delete is how blobs go silently missing.
+///
+/// Unlike [SweepOrphanBlobsRequest] this never enumerates the bucket, so it is
+/// cheap enough to run on every update.
+class ReleaseBlobsRequest implements IRpcSerializable {
+  const ReleaseBlobsRequest({required this.vaultId, required this.blobIds});
+
+  final String vaultId;
+
+  /// Candidates for deletion. Anything still referenced is silently kept.
+  final List<String> blobIds;
+
+  factory ReleaseBlobsRequest.fromJson(Map<String, dynamic> json) =>
+      ReleaseBlobsRequest(
+        vaultId: json['vaultId'] as String,
+        blobIds:
+            ((json['blobIds'] as List?) ?? const []).whereType<String>().toList(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {'vaultId': vaultId, 'blobIds': blobIds};
+}
+
+class ReleaseBlobsResponse implements IRpcSerializable {
+  const ReleaseBlobsResponse({
+    required this.requested,
+    required this.stillReferenced,
+    required this.deletedBlobs,
+  });
+
+  final int requested;
+
+  /// Candidates rejected because something live still points at them.
+  final int stillReferenced;
+
+  final int deletedBlobs;
+
+  factory ReleaseBlobsResponse.fromJson(Map<String, dynamic> json) =>
+      ReleaseBlobsResponse(
+        requested: (json['requested'] as num?)?.toInt() ?? 0,
+        stillReferenced: (json['stillReferenced'] as num?)?.toInt() ?? 0,
+        deletedBlobs: (json['deletedBlobs'] as num?)?.toInt() ?? 0,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'requested': requested,
+        'stillReferenced': stillReferenced,
+        'deletedBlobs': deletedBlobs,
+      };
+}
+
 @RpcService(
   name: 'RhyoliteVaultMaintenance',
   transferMode: RpcDataTransferMode.codec,
@@ -133,6 +194,12 @@ abstract class IVaultMaintenanceContract {
   @RpcMethod.unary(name: 'sweepOrphanBlobs')
   Future<SweepOrphanBlobsResponse> sweepOrphanBlobs(
     SweepOrphanBlobsRequest request, {
+    RpcContext? context,
+  });
+
+  @RpcMethod.unary(name: 'releaseBlobs')
+  Future<ReleaseBlobsResponse> releaseBlobs(
+    ReleaseBlobsRequest request, {
     RpcContext? context,
   });
 

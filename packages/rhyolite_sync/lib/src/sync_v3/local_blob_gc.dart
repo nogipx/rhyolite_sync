@@ -5,7 +5,8 @@ import 'file_state_store.dart';
 ///
 /// A blob is "live" when it is either:
 /// - the current content of some file (file_state.blobRef), or
-/// - the lastSyncedBlobRef of some file (kept for future 3-way merge base).
+/// - the lastSyncedBlobRef of some file (kept for future 3-way merge base), or
+/// - claimed by a sibling sync sharing this cache (see [externalLiveIds]).
 ///
 /// Everything else is dead weight from past edits and gets deleted.
 ///
@@ -17,14 +18,31 @@ class LocalBlobGc {
     required this.store,
     required this.blobStore,
     required this.vaultId,
+    this.externalLiveIds,
   });
 
   final FileStateStore store;
   final LocalBlobStore blobStore;
   final String vaultId;
 
+  /// Blob ids owned by a sibling sync that shares this vault's local cache —
+  /// today the settings sync, whose plugin-code resources store their bytes
+  /// here under the same vaultId. Without this the notes-only live set treats
+  /// every plugin blob as an orphan and evicts it right after it is written.
+  ///
+  /// Returning null means "cannot answer right now" (the sibling has not
+  /// started yet) and SKIPS the whole sweep. Deleting on an incomplete live set
+  /// is the one failure this must never have; a postponed sweep costs nothing.
+  final Set<String>? Function()? externalLiveIds;
+
   Future<LocalBlobGcResult> call() async {
     final live = <String>{};
+
+    final external = externalLiveIds?.call();
+    if (externalLiveIds != null && external == null) {
+      return const LocalBlobGcResult(scanned: 0, deleted: 0, skipped: true);
+    }
+    if (external != null) live.addAll(external);
     // Walk every TaggedValue across all registers — multi-value registers
     // pin each concurrent version's blobs until the resolver collapses
     // them (doc §9).
@@ -66,5 +84,13 @@ class LocalBlobGcResult {
   /// Blobs deleted because nothing referenced them.
   final int deleted;
 
-  const LocalBlobGcResult({required this.scanned, required this.deleted});
+  /// The sweep did not run: a sibling sync could not report its live blobs, so
+  /// the live set would have been incomplete.
+  final bool skipped;
+
+  const LocalBlobGcResult({
+    required this.scanned,
+    required this.deleted,
+    this.skipped = false,
+  });
 }

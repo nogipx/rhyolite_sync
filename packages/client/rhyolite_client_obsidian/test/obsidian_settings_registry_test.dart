@@ -109,22 +109,49 @@ void main() {
       },
     );
 
-    test('plugin code files are never synced (too large, overwrites running '
-        'plugin)', () {
+    test('the plugin DIRECTORY is the code resource, not its files', () {
+      final r = c('plugins/dataview')!;
+      expect(r.kind, SettingsCrdtKind.blobDir);
+      expect(r.category, SettingsCategory.communityPluginCode);
+
+      // Individual code files stay unclassified: they ride the directory
+      // resource as one atomic unit, so a vault can never converge on main.js
+      // from one release and manifest.json from another.
       for (final f in ['main.js', 'manifest.json', 'styles.css']) {
         expect(c('plugins/dataview/$f'), isNull);
       }
     });
 
-    test('themes and snippets are wholeFile', () {
-      expect(
-        c('themes/Minimal/theme.css')!.category,
-        SettingsCategory.themesSnippets,
-      );
-      expect(
-        c('snippets/custom.css')!.category,
-        SettingsCategory.themesSnippets,
-      );
+    test('our own plugin directory is still excluded, under any past id', () {
+      expect(c('plugins/rhyolite-sync'), isNull);
+      expect(c('.obsidian/plugins/rhyolite-sync'), isNull);
+      // The pre-rename id. Its leftover directory is still in vaults that
+      // predate the move to kebab-case, and syncing our own old build would
+      // overwrite the running engine on any device still on it.
+      expect(c('plugins/rhyolite_sync'), isNull);
+      expect(c('plugins/rhyolite_sync/main.js'), isNull);
+    });
+
+    test('plugin junk under a dir is not a resource', () {
+      expect(c('plugins/dataview/cache.db'), isNull);
+      expect(c('plugins/dataview/assets/icon.png'), isNull);
+    });
+
+    test('a theme is a blob-backed directory, its files are not resources', () {
+      final r = c('themes/Minimal')!;
+      expect(r.kind, SettingsCrdtKind.blobDir);
+      expect(r.category, SettingsCategory.themesSnippets);
+
+      // Covered by the directory: a stylesheet routinely runs past the size at
+      // which inlining content into a settings record stops working.
+      expect(c('themes/Minimal/theme.css'), isNull);
+      expect(c('themes/Minimal/manifest.json'), isNull);
+    });
+
+    test('snippets stay whole-file — single small CSS files', () {
+      final r = c('snippets/custom.css')!;
+      expect(r.kind, SettingsCrdtKind.wholeFile);
+      expect(r.category, SettingsCategory.themesSnippets);
     });
 
     test('non-css snippet files are ignored', () {
@@ -133,14 +160,26 @@ void main() {
   });
 
   group('v1 defaults', () {
-    test('plugin code is never synced, everything else ON by default', () {
+    test('plugin code is off by default, everything else ON', () {
       final d = ObsidianSettingsRegistry.defaultEnabledCategories;
       expect(d.contains(SettingsCategory.appearance), isTrue);
       expect(d.contains(SettingsCategory.communityPluginSettings), isTrue);
-      // A plugin's data.json syncs by default; its code does not.
+      // Plugin code is two to three orders of magnitude larger than every
+      // other category, so enabling settings sync must not start moving it.
+      expect(d.contains(SettingsCategory.communityPluginCode), isFalse);
+
       final kindOf = ObsidianSettingsRegistry.kindOf(d);
       expect(kindOf('plugins/dataview/data.json'), isNotNull);
-      expect(kindOf('plugins/dataview/main.js'), isNull);
+      expect(kindOf('plugins/dataview'), isNull);
+    });
+
+    test('opting in resolves the directory resource', () {
+      final kindOf = ObsidianSettingsRegistry.kindOf({
+        ...ObsidianSettingsRegistry.defaultEnabledCategories,
+        SettingsCategory.communityPluginCode,
+      });
+      expect(kindOf('plugins/dataview'), SettingsCrdtKind.blobDir);
+      expect(kindOf('plugins/rhyolite-sync'), isNull);
     });
   });
 

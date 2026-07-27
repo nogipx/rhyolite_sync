@@ -32,8 +32,10 @@ class SettingsSync {
     required IVaultCipher cipher,
     required this.vaultId,
     required SettingsCrdtKind? Function(String resourceId) kindOf,
+    String scope = '',
     void Function(String message)? log,
   }) : _remote = remote,
+       _scope = scope,
        _store = store,
        _cipher = cipher,
        _kindOf = kindOf,
@@ -55,6 +57,12 @@ class SettingsSync {
   /// are dynamic (any plugin's `data.json`), so this is a classifier rather
   /// than a fixed map.
   final SettingsCrdtKind? Function(String resourceId) _kindOf;
+
+  /// Opaque token describing WHICH resources this device currently accepts —
+  /// in practice the enabled category set. The pull cursor is only meaningful
+  /// relative to it: records for a category that was off are read and dropped,
+  /// and the server never offers them again. See [start].
+  final String _scope;
 
   /// resourceId -> decoded convergent state.
   final Map<String, Object> _state = {};
@@ -120,6 +128,26 @@ class SettingsSync {
       }
     }
 
+    // The cursor only means "up to date" for the scope it was advanced under.
+    // A pull DROPS records whose category is off (see [pull]) while still
+    // advancing past them, so turning a category back on leaves a device that
+    // believes it has everything and holds none of it — the next scan then
+    // treats every resource as new and re-uploads the lot. Measured on a phone
+    // re-enabling plugin code: 16 plugins, 32 seconds, and a notify per plugin
+    // on every other device, for content the vault already had.
+    //
+    // Any change of scope therefore invalidates the cursor. Widening is the
+    // case that matters; narrowing costs one re-read and keeps this a single
+    // comparison rather than a set difference.
+    if (_store.scope != _scope) {
+      if (_store.scope != null) {
+        _log?.call('settings: scope changed, re-reading keyspace');
+      }
+      _store.scope = _scope;
+      _store.cursor = 0;
+      await _store.persistMeta();
+    }
+
     // Convergent states are decoded LAZILY (see [_stateOf]). Eagerly decoding
     // every persisted state here blocked the UI thread for tens of seconds on
     // large vaults; a normal open with no remote/local change now decodes
@@ -162,6 +190,10 @@ class SettingsSync {
   /// when the content matches — otherwise every synced file was rewritten to
   /// canonical form on each pull, fought Obsidian's format, and churned.
   bool diskMatchesRendered(String resourceId, Uint8List diskBytes) {
+    // Blob-backed resources render to a manifest of blob references, not to
+    // file bytes — there is no single on-disk file to compare against. The
+    // platform layer materializes them itself and must never route here.
+    if (_kindOf(resourceId) == SettingsCrdtKind.blobDir) return false;
     final rendered = renderResource(resourceId);
     if (rendered == null) return false;
     if (_bytesEqual(diskBytes, rendered)) return true;
@@ -172,6 +204,11 @@ class SettingsSync {
     if (_kindOf(resourceId) == SettingsCrdtKind.wholeFile) return false;
     return jsonCanonicalEqual(diskBytes, rendered);
   }
+
+  /// Resource ids currently held locally whose kind is [kind]. Cheap: reads
+  /// the store's key set and the classifier, decoding nothing.
+  Iterable<String> resourceIdsOfKind(SettingsCrdtKind kind) =>
+      _store.resourceIds.where((id) => _kindOf(id) == kind).toList();
 
   /// Canonical rendered bytes for a resource, or null if unknown/empty.
   Uint8List? renderResource(String resourceId) {
@@ -328,6 +365,12 @@ class SettingsSync {
           hlcPacked: outHlc.pack(),
           tombstone: false,
           contextPacked: seen.pack(),
+          // Blob-backed resources (plugin directories) keep their bytes in the
+          // vault's blob bucket, which notes and settings share. Declaring the
+          // ids here is what stops the server's orphan sweep from reclaiming
+          // them: it builds its live set from the blobRef/chunks fields of
+          // every state record, `<vault>_config_file_state` included.
+          chunks: codec.liveBlobIds(state),
         ),
       );
       // Our own write now belongs to what we've seen.

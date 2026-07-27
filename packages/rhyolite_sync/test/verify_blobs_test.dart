@@ -236,4 +236,121 @@ void main() {
       expect(result.isClean, isTrue);
     });
   });
+
+  group('resuming across preemption', () {
+    test('carried confirmations are not re-probed', () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      for (var i = 0; i < 10; i++) {
+        remote.store['c$i'] = Uint8List.fromList([i]);
+      }
+      store.applyLocal(FileState(
+        fileId: 'f1',
+        path: 'a.md',
+        blobRef: 'c0',
+        sizeBytes: 4,
+        hlc: store.nextHlc(),
+        chunks: [for (var i = 1; i < 10; i++) 'c$i'],
+      ));
+
+      // First pass confirms everything.
+      final carried = <String>{};
+      final first = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        existsBatch: 4,
+        confirmedPresent: carried,
+      )();
+      expect(first.isClean, isTrue);
+      final callsAfterFirst = remote.existsCalls;
+      expect(callsAfterFirst, greaterThan(0));
+      expect(carried, hasLength(10));
+
+      // A second pass — what a re-scheduled run after preemption does — asks
+      // the server nothing, because every id is already confirmed.
+      final second = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        existsBatch: 4,
+        confirmedPresent: carried,
+      )();
+      expect(second.isClean, isTrue);
+      expect(second.referenced, 10);
+      expect(remote.existsCalls, callsAfterFirst,
+          reason: 'no id should be probed twice');
+    });
+
+    test('missing ids are re-probed, so a heal elsewhere is picked up',
+        () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      remote.store['present'] = Uint8List.fromList([1]);
+      remote.store['gone'] = Uint8List.fromList([2]);
+      remote.hideFromExists.add('gone');
+      store.applyLocal(FileState(
+        fileId: 'f1',
+        path: 'a.md',
+        blobRef: 'present',
+        sizeBytes: 4,
+        hlc: store.nextHlc(),
+        chunks: const ['gone'],
+      ));
+
+      final carried = <String>{};
+      final first = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        confirmedPresent: carried,
+      )();
+      expect(first.missing, 1);
+      expect(carried, {'present'},
+          reason: 'a missing id must never be recorded as confirmed');
+
+      // Another device healed it; the next pass sees that.
+      remote.hideFromExists.remove('gone');
+      final second = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        confirmedPresent: carried,
+      )();
+      expect(second.isClean, isTrue);
+    });
+
+    test('without a carried set each run probes from scratch', () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+      remote.store['c0'] = Uint8List.fromList([0]);
+      store.applyLocal(FileState(
+        fileId: 'f1',
+        path: 'a.md',
+        blobRef: 'c0',
+        sizeBytes: 4,
+        hlc: store.nextHlc(),
+      ));
+
+      Future<void> run() => VerifyBlobsUseCase(
+            store: store,
+            blobStorage: remote,
+            localBlobStore: local,
+            vaultId: _vaultId,
+          )().then((_) {});
+
+      await run();
+      await run();
+      expect(remote.existsCalls, 2);
+    });
+  });
 }

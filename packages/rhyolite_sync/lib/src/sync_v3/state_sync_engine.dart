@@ -190,7 +190,17 @@ class StateSyncEngine implements ISyncEngine {
   /// Priority lanes for [_scheduler]. Higher runs first.
   static const int _pInteractive = 100; // user edits → reconcile + push
   static const int _pForeground = 50; //  pulls
-  static const int _pBackground = 10; //  GC / verify / settings
+  static const int _pBackground = 10; //  sibling syncs (settings, plugin code)
+
+  /// Maintenance sweeps (blob GC, server blob verify, orphan CRDT pruning).
+  ///
+  /// Strictly below [_pBackground] because they are slow — the verify alone is
+  /// a ~20 s round trip over every referenced blob — and nothing waits on their
+  /// result, while settings/plugin sync at [_pBackground] is what the user is
+  /// actually watching for. Sharing one tier put a sibling's startup behind the
+  /// sweep and added that 20 s to every launch; from here a sibling task
+  /// preempts a running sweep, which yields and finishes afterwards.
+  static const int _pMaintenance = 5;
 
   late final TextDebounceCoordinator _textDebounce = TextDebounceCoordinator(
     debounce: _textReconcileDebounce,
@@ -522,7 +532,11 @@ class StateSyncEngine implements ISyncEngine {
       _typingSub = changeProvider.typing.listen(_onTypingEvent);
       _setupNotify();
       _watchConnection(conn);
-      _log.info('StateSyncEngine started');
+      // Which gzip path this device resolved to. Compression sits in front of
+      // every blob upload, and the portable Dart Deflate is ~2 orders of
+      // magnitude slower than the native one — a device quietly stuck on it is
+      // the difference between seconds and minutes, so it must be visible.
+      _log.info('StateSyncEngine started (gzip: $gzipBackendName)');
     } catch (e) {
       _log.error('StateSyncEngine start error: $e');
       final rejected = _rejections.fromException(e);
@@ -547,6 +561,9 @@ class StateSyncEngine implements ISyncEngine {
     // Rebuilt from the startup diff on the next start(); clearing here stops a
     // previous vault's blocked paths from lingering across a vault switch.
     _sizeBlockedPaths.clear();
+    // A new session must re-establish what the server holds: between sessions
+    // a storage sweep may have reclaimed blobs this one saw as present.
+    _verifiedPresent.clear();
     _lastEmittedHasPending = false;
     _wasOnline = false;
     await _connSub?.cancel();
@@ -1065,12 +1082,24 @@ class StateSyncEngine implements ISyncEngine {
   /// token; [run]'s RpcContext reflects that, and if it bails
   /// ([RpcCancelledException]) the task re-schedules itself to finish once
   /// interactive work clears.
-  void _scheduleBackground(Object key, Future<void> Function(RpcContext) run) {
+  /// [retryDelay] backs off a re-schedule after preemption, just far enough to
+  /// let the burst that preempted the task pass instead of re-contending with
+  /// it immediately. It is only a courtesy: forward progress across
+  /// interruptions is the task's own responsibility (see the blob verify's
+  /// `confirmedPresent`), because a task that restarts from zero cannot be
+  /// rescued by any delay.
+  void _scheduleBackground(
+    Object key,
+    Future<void> Function(RpcContext) run, {
+    Duration retryDelay = const Duration(seconds: 5),
+    Duration delay = Duration.zero,
+  }) {
     if (!_running) return;
     _scheduler.schedule(
       key: key,
       group: _schedulerGroup,
-      priority: _pBackground,
+      priority: _pMaintenance,
+      delay: delay,
       preemptible: true,
       run: (token) async {
         if (!_running) return;
@@ -1085,7 +1114,15 @@ class StateSyncEngine implements ISyncEngine {
         try {
           await run(RpcContext.withCancellation(rpcToken));
         } on RpcCancelledException catch (_) {
-          if (_running) _scheduleBackground(key, run); // finish later
+          // Finish later, after the burst that preempted us has passed.
+          if (_running) {
+            _scheduleBackground(
+              key,
+              run,
+              retryDelay: retryDelay,
+              delay: retryDelay,
+            );
+          }
         } catch (e) {
           _log.warning('background task "$key" failed: $e');
         }
@@ -1114,10 +1151,21 @@ class StateSyncEngine implements ISyncEngine {
     );
   }
 
-  /// Local-blob GC + server blob-integrity verify, as background tasks (see
-  /// [_scheduleBackground]). Verify heals orphans left by silently-lost chunk
-  /// uploads; it is cooperative (checks the context token between batches).
-  void _scheduleHousekeeping() {
+  /// Re-runs the local blob GC now that a sibling sync can report its live
+  /// blobs.
+  ///
+  /// The GC is scheduled once, at engine start — but settings sync comes up
+  /// seconds later, and until it does [siblingLiveBlobIds] answers "not ready"
+  /// and the GC correctly refuses to run on a partial live set. Without this
+  /// second pass it would simply never run in any session where settings sync
+  /// is enabled.
+  ///
+  /// Deliberately ONLY the GC: the blob verify and the CRDT prune do not depend
+  /// on the sibling at all, and re-running the verify costs another full
+  /// server round trip over every referenced blob for nothing.
+  void rescheduleLocalBlobGc() => _scheduleLocalBlobGc();
+
+  void _scheduleLocalBlobGc() {
     _scheduleBackground('local-blob-gc', (_) async {
       final store = _store;
       if (store == null) return;
@@ -1125,11 +1173,21 @@ class StateSyncEngine implements ISyncEngine {
         store: store,
         blobStore: blobStore,
         vaultId: config.vaultId,
+        externalLiveIds: siblingLiveBlobIds,
       )();
-      if (gc.deleted > 0) {
+      if (gc.skipped) {
+        _log.info('Local blob GC skipped: sibling live set unavailable');
+      } else if (gc.deleted > 0) {
         _log.info('Local blob GC: scanned=${gc.scanned} deleted=${gc.deleted}');
       }
     });
+  }
+
+  /// Local-blob GC + server blob-integrity verify, as background tasks (see
+  /// [_scheduleBackground]). Verify heals orphans left by silently-lost chunk
+  /// uploads; it is cooperative (checks the context token between batches).
+  void _scheduleHousekeeping() {
+    _scheduleLocalBlobGc();
     _scheduleBackground('verify-blobs', (ctx) async {
       final store = _store;
       final remote = _getRemoteBlobStorage();
@@ -1139,6 +1197,10 @@ class StateSyncEngine implements ISyncEngine {
         blobStorage: remote,
         localBlobStore: blobStore,
         vaultId: config.vaultId,
+        // Survives preemption: the pass restarts from the top each time it
+        // yields, and without this it would re-probe everything and never
+        // finish on a device that keeps interrupting it.
+        confirmedPresent: _verifiedPresent,
         logger: _log,
       )(context: ctx);
       if (!verify.isClean) _log.info('Startup blob verify: $verify');
@@ -1514,6 +1576,30 @@ class StateSyncEngine implements ISyncEngine {
     );
   }
 
+  /// Asks the server to drop [blobIds] — blobs the caller believes it just
+  /// superseded — keeping any the server still finds referenced.
+  ///
+  /// The decision is deliberately the server's: chunks are content-addressed
+  /// and shared, so a blob that looks dead from here may be held by another
+  /// record, a history event, a restore point, or a peer's concurrent value.
+  /// Returns the number actually deleted, or null when not connected or the
+  /// server predates this method — reclaiming is then left to the full sweep,
+  /// which is what happens today anyway.
+  Future<int?> releaseBlobs(List<String> blobIds) async {
+    if (blobIds.isEmpty) return 0;
+    final endpoint = _conn?.endpoint;
+    if (endpoint == null) return null;
+    try {
+      final resp = await VaultMaintenanceContractCaller(endpoint).releaseBlobs(
+        ReleaseBlobsRequest(vaultId: config.vaultId, blobIds: blobIds),
+      );
+      return resp.deletedBlobs;
+    } catch (e) {
+      _log.info('releaseBlobs unavailable: $e');
+      return null;
+    }
+  }
+
   /// Builds a [DeviceRegistryUseCase] wired to the current connection. UI
   /// calls this to list/forget devices. Null when not connected.
   DeviceRegistryUseCase? createDeviceRegistry() {
@@ -1724,7 +1810,7 @@ class StateSyncEngine implements ISyncEngine {
 
   /// Builds a ChunkedBlobIO bound to the current remote storage. Returns
   /// null only when no remote storage is configured (offline-only run).
-  ChunkedBlobIO? _newChunkedIO() {
+  ChunkedBlobIO? _newChunkedIO({int? maxDownloadBytes}) {
     final remote = _getRemoteBlobStorage();
     if (remote == null) return null;
     return ChunkedBlobIO(
@@ -1734,9 +1820,62 @@ class StateSyncEngine implements ISyncEngine {
       blobIdKey: _resolveBlobIdKey(),
       // Cap downloads at the same per-file ceiling the upload path enforces, so
       // a peer can't push a many-chunk multi-GiB blob that OOMs this client.
-      maxDownloadBytes: _maxFileSizeBytes(),
+      maxDownloadBytes: maxDownloadBytes ?? _maxFileSizeBytes(),
     );
   }
+
+  /// Blob ids the server has confirmed holding during this session, shared
+  /// across every attempt of the preemptible blob verify so an interrupted
+  /// pass resumes instead of re-probing from scratch. Session-scoped: cleared
+  /// with the rest of the connection state on stop.
+  final Set<String> _verifiedPresent = {};
+
+  /// Live blob ids of a sibling sync sharing this vault's local blob cache.
+  ///
+  /// The local GC deletes every cached blob its live set does not cover, and
+  /// its live set is built from notes alone — so without this the settings
+  /// sync's plugin-code blobs are evicted as soon as housekeeping runs. Set by
+  /// the host once the sibling exists; returning null from the callback means
+  /// "not ready", which skips the sweep rather than running it half-blind.
+  Set<String>? Function()? siblingLiveBlobIds;
+
+  /// Publishes a sibling sync's blob transfer on the engine's event stream, so
+  /// settings-side content (plugin code, themes) shows up in the same
+  /// active-transfers view as note content.
+  ///
+  /// Deliberately this one shape rather than a general "emit any engine event"
+  /// hook: a sibling has no business announcing sync state, errors or pushes on
+  /// the engine's behalf.
+  void reportSiblingTransfer({
+    required String path,
+    required bool upload,
+    required int sentBytes,
+    required int totalBytes,
+    required bool done,
+  }) {
+    _emit(SyncBlobTransfer(
+      path: path,
+      upload: upload,
+      sentBytes: sentBytes,
+      totalBytes: totalBytes,
+      done: done,
+    ));
+  }
+
+  /// Blob IO for a SIBLING sync on the same vault — today the settings sync,
+  /// whose blob-backed resources (plugin directories) store their bytes in the
+  /// vault's blob bucket, the very bucket notes use. Sharing the bucket is what
+  /// makes those blobs safe: the server's orphan sweep builds its live set from
+  /// both keyspaces' state records, so a config record's declared chunks are
+  /// protected exactly like a note's.
+  ///
+  /// [maxDownloadBytes] overrides the per-file download ceiling, which for
+  /// notes tracks the subscription tier — plugin code has its own, unrelated
+  /// bound. Null when the engine has no remote storage yet (offline run,
+  /// pre-connect); callers treat that as "not ready" and retry on the next
+  /// cycle rather than failing.
+  ChunkedBlobIO? newSiblingBlobIO({int? maxDownloadBytes}) =>
+      _newChunkedIO(maxDownloadBytes: maxDownloadBytes);
 
   /// Populates the local blob cache with one file's content (manifest + chunks)
   /// so the puller can fetch many files in parallel (see StatePuller's prefetch

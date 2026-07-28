@@ -1,3 +1,5 @@
+import 'package:rhyolite_client_account/rhyolite_client_account.dart';
+
 /// How the plugin should answer an `auth.*` rejection from the engine.
 ///
 /// Pure decision logic, kept out of the event handler so the table can be
@@ -43,15 +45,45 @@ AuthRecovery planAuthRecovery({
   return AuthRecovery.prompt;
 }
 
+/// What the recovery handler's refresh attempt (if any) established.
+enum RefreshOutcome {
+  /// No refresh was attempted — there was nothing to refresh with.
+  notAttempted,
+
+  /// The server refused the refresh token itself. Evidence the session is
+  /// dead.
+  refused,
+
+  /// The attempt failed without a verdict: a network error, a timeout, or a
+  /// refusal explained by our own retry having already spent the single-use
+  /// token. NOT evidence.
+  inconclusive,
+}
+
+/// Classifies what a failed refresh proved. Anything we cannot read as a
+/// clean server refusal is [RefreshOutcome.inconclusive] — the conservative
+/// side, because the only action gated on this is destructive.
+RefreshOutcome classifyRefreshFailure(Object error) =>
+    error is RefreshFailedException && error.sessionIsDead
+    ? RefreshOutcome.refused
+    : RefreshOutcome.inconclusive;
+
 /// Whether the persisted session should be discarded once recovery has
 /// failed.
 ///
-/// Only evidence that the session is dead counts: a refresh we attempted and
-/// lost, or a token the server actually refused. `auth.token_missing` on its
-/// own is not evidence — it says we never attached a token, which tells us
-/// nothing about the stored session, and may well be racing a sign-in that
-/// just stored a good one.
+/// Only evidence that the session is dead counts: a refresh the server
+/// actually refused, or a token the server actually refused.
+/// `auth.token_missing` on its own is not evidence — it says we never
+/// attached a token, which tells us nothing about the stored session, and may
+/// well be racing a sign-in that just stored a good one. Neither is a refresh
+/// that failed without an answer: refresh tokens are single-use, so a lost
+/// response burns the token and the *next* attempt reports `unauthenticated`
+/// for a session that was never dead. Deleting on that turned one dropped
+/// connection into a forced re-login.
 bool shouldClearStoredSession({
   required bool tokenMissing,
-  required bool refreshRefused,
-}) => refreshRefused || !tokenMissing;
+  required RefreshOutcome refresh,
+}) {
+  if (refresh == RefreshOutcome.inconclusive) return false;
+  return refresh == RefreshOutcome.refused || !tokenMissing;
+}

@@ -15,10 +15,13 @@ import 'package:rpc_dart/rpc_dart.dart';
 /// final client = RpcAccountClient(endpoint);
 /// ```
 class RpcAccountClient {
-  RpcAccountClient(RpcCallerEndpoint endpoint)
-    : _auth = AuthContractCaller(endpoint),
-      _vault = VaultContractCaller(endpoint),
-      _subscription = SubscriptionContractCaller(endpoint);
+  RpcAccountClient(
+    RpcCallerEndpoint endpoint, {
+    Duration unauthRetryDelay = const Duration(seconds: 30),
+  }) : _auth = AuthContractCaller(endpoint),
+       _vault = VaultContractCaller(endpoint),
+       _subscription = SubscriptionContractCaller(endpoint),
+       _unauthRetryDelay = unauthRetryDelay;
 
   final AuthContractCaller _auth;
   final VaultContractCaller _vault;
@@ -30,9 +33,12 @@ class RpcAccountClient {
 
   AuthSession? _session;
 
-  /// In-flight refresh, shared by concurrent [ensureValidToken] callers.
-  /// Lifecycle: created at the start of one refresh, cleared in `finally`.
-  /// Acts as a per-instance mutex — never a long-lived timer.
+  /// In-flight refresh, shared by every concurrent caller — [ensureValidToken]
+  /// and [refreshSession] alike. Lifecycle: created at the start of one
+  /// refresh, cleared in `finally`. Acts as a per-instance mutex — never a
+  /// long-lived timer. Mandatory, not an optimisation: the refresh token is
+  /// single-use, so a second concurrent refresh presents a token the server
+  /// has already revoked.
   Completer<AuthSession>? _refreshInFlight;
 
   /// Refresh a few seconds before the server-recorded expiry to absorb
@@ -56,7 +62,7 @@ class RpcAccountClient {
   /// Pause between successive `unauthenticated` refresh attempts. Long
   /// enough to outwait token rotation races; short enough not to
   /// noticeably delay the genuine "session expired" UI.
-  static const Duration _unauthRetryDelay = Duration(seconds: 30);
+  final Duration _unauthRetryDelay;
 
   /// Invoked whenever the session is replaced by a FRESH one from the server
   /// (sign-up, sign-in, refresh) — not on [useSession] restore. The host wires
@@ -128,7 +134,29 @@ class RpcAccountClient {
     return res.code;
   }
 
-  Future<AuthSession> refreshSession() async {
+  /// Exchange the stored refresh token for a fresh session.
+  ///
+  /// Shares one in-flight attempt with every concurrent caller. That is not
+  /// an optimisation: the token is single-use, so two callers refreshing at
+  /// once means one of them presents a token the server has already revoked
+  /// and reads the refusal as a dead session. Every path that refreshes —
+  /// [ensureValidToken], boot-time restore, the host's auth-recovery
+  /// handler — must go through here.
+  ///
+  /// Throws [RefreshFailedException]; only `kind == refused` means the
+  /// session is actually dead.
+  Future<AuthSession> refreshSession() {
+    if (_session?.refreshToken == null) {
+      return Future.error(StateError('Not signed in'), StackTrace.current);
+    }
+    final pending = _refreshInFlight;
+    if (pending != null) return pending.future;
+    return _guardedRefresh();
+  }
+
+  /// The bare RPC. Never call directly — it takes no mutex and does not
+  /// classify failures. [refreshSession] is the entry point.
+  Future<AuthSession> _refreshOnce() async {
     final token = _session?.refreshToken;
     if (token == null) throw StateError('Not signed in');
     final session = await _auth.refresh(RefreshRequest(refreshToken: token));
@@ -136,28 +164,15 @@ class RpcAccountClient {
     return session;
   }
 
-  /// Returns a valid access token, refreshing it proactively when the
-  /// recorded expiry is within [_refreshSafetyMargin]. Concurrent
-  /// callers share a single in-flight refresh via [_refreshInFlight]
-  /// so refresh-token rotation can't kill all but one of them.
-  ///
-  /// Transient failures retry with exponential backoff; an
-  /// `unauthenticated` server error short-circuits immediately so the
-  /// caller can prompt for re-login instead of pointlessly retrying.
-  Future<String> ensureValidToken() async {
-    final s = _session;
-    if (s == null) throw StateError('Not signed in');
-    if (!_needsRefresh(s)) return s.accessToken;
-
-    final pending = _refreshInFlight;
-    if (pending != null) return (await pending.future).accessToken;
-
+  /// Runs [_refreshWithRetry] as the single in-flight refresh, handing its
+  /// result (or failure) to everyone who joined while it ran.
+  Future<AuthSession> _guardedRefresh() async {
     final completer = Completer<AuthSession>();
     _refreshInFlight = completer;
     try {
       final fresh = await _refreshWithRetry();
       completer.complete(fresh);
-      return fresh.accessToken;
+      return fresh;
     } catch (e, st) {
       completer.completeError(e, st);
       // The completer only exists to de-dup concurrent refreshes. With no
@@ -172,6 +187,26 @@ class RpcAccountClient {
     }
   }
 
+  /// Returns a valid access token, refreshing it proactively when the
+  /// recorded expiry is within [_refreshSafetyMargin]. Concurrent
+  /// callers share a single in-flight refresh via [_refreshInFlight]
+  /// so refresh-token rotation can't kill all but one of them.
+  ///
+  /// Transient failures retry with exponential backoff; a refusal the
+  /// server issued short-circuits the retry budget so the caller can prompt
+  /// for re-login instead of pointlessly retrying. Failures arrive as
+  /// [RefreshFailedException] — see [refreshSession].
+  Future<String> ensureValidToken() async {
+    final s = _session;
+    if (s == null) throw StateError('Not signed in');
+    if (!_needsRefresh(s)) return s.accessToken;
+
+    final pending = _refreshInFlight;
+    if (pending != null) return (await pending.future).accessToken;
+
+    return (await _guardedRefresh()).accessToken;
+  }
+
   bool _needsRefresh(AuthSession s) {
     final at = s.expiresAt;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -182,11 +217,24 @@ class RpcAccountClient {
     Object? lastError;
     StackTrace? lastStack;
     var unauthAttempts = 0;
+    // Set once an attempt fails without a verdict. The server revokes the
+    // presented refresh token before it answers, so a lost answer burns the
+    // token: every `unauthenticated` from here on is explained by our own
+    // retry and is NOT evidence that the session is dead. Reporting it as
+    // such is what logged users out over a single dropped response.
+    var tokenMayBeSpent = false;
     for (var attempt = 0; attempt < _refreshMaxAttempts; attempt++) {
       try {
-        return await refreshSession();
+        return await _refreshOnce();
+      } on StateError {
+        // No token to present — no network call was made, and retrying
+        // cannot conjure one.
+        rethrow;
       } on RpcException catch (e, st) {
-        if (e.message.startsWith('unauthenticated')) {
+        if (isUnauthenticated(e)) {
+          if (tokenMayBeSpent) {
+            throw RefreshFailedException(RefreshFailureKind.ambiguous, e, st);
+          }
           // Most of the time `unauthenticated` means the refresh token
           // itself is dead and retry can't help — but in the wild we see
           // transient false-positives (server rotation races, network
@@ -194,13 +242,17 @@ class RpcAccountClient {
           // attempt succeeds. Give it exactly one second chance before
           // surrendering and asking the user to re-login.
           unauthAttempts++;
-          if (unauthAttempts >= _maxUnauthRetries) rethrow;
+          if (unauthAttempts >= _maxUnauthRetries) {
+            throw RefreshFailedException(RefreshFailureKind.refused, e, st);
+          }
           await Future<void>.delayed(_unauthRetryDelay);
           continue;
         }
+        tokenMayBeSpent = true;
         lastError = e;
         lastStack = st;
       } catch (e, st) {
+        tokenMayBeSpent = true;
         lastError = e;
         lastStack = st;
       }
@@ -210,7 +262,11 @@ class RpcAccountClient {
         );
       }
     }
-    Error.throwWithStackTrace(lastError!, lastStack ?? StackTrace.current);
+    throw RefreshFailedException(
+      RefreshFailureKind.transient,
+      lastError!,
+      lastStack,
+    );
   }
 
   /// Verify email with token from the verification link.

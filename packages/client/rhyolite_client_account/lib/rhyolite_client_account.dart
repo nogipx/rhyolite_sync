@@ -20,3 +20,4 @@ export 'src/models/user_role.dart';
 export 'src/repositories/i_vault_repository.dart';
 export 'src/repositories/i_subscription_repository.dart';
 export 'src/client/rpc_account_client.dart';
+export 'src/client/refresh_failure.dart';

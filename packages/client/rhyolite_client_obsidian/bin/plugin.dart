@@ -644,7 +644,8 @@ void main() {
                 accountClient.useSession(savedSession);
                 restoredClient = accountClient;
               } else {
-                // Token expired — try to refresh.
+                // Access token expired (they live 15 minutes, so this is the
+                // normal cold-start path) — refresh it.
                 try {
                   accountClient.useSession(savedSession);
                   await accountClient.refreshSession();
@@ -654,10 +655,20 @@ void main() {
                   }
                   restoredClient = accountClient;
                 } catch (e) {
-                  final msg = e.toString();
-                  if (msg.contains('(400)') || msg.contains('(401)')) {
+                  // Only a refusal the server actually issued discards the
+                  // session. Matching on '(401)' used to stand in for that,
+                  // and never matched anything: the transport reports
+                  // `HTTP 401 from <path>` and an RPC-level refusal arrives
+                  // as `unauthenticated: ...`.
+                  if (classifyRefreshFailure(e) == RefreshOutcome.refused) {
+                    _log.warning('Stored session refused by the server — '
+                        'cleared: $e');
                     await configStorage.clearAuthSession();
                   } else {
+                    // Offline at boot, or an answer we never got. Keep the
+                    // session: the provider refreshes again on first use.
+                    _log.warning('Boot refresh inconclusive — keeping the '
+                        'stored session: $e');
                     accountClient.useSession(savedSession);
                     restoredClient = accountClient;
                   }
@@ -1718,7 +1729,7 @@ void main() {
 
             _log.warning('Auth rejected — attempting token refresh');
 
-            var refreshRefused = false;
+            var refreshOutcome = RefreshOutcome.notAttempted;
             if (plan == AuthRecovery.refresh) {
               _authRefreshInFlight = true;
               try {
@@ -1730,9 +1741,12 @@ void main() {
                 await restartForAuth();
                 _log.info('Token refreshed — restarted');
                 return;
-              } catch (_) {
-                refreshRefused = true;
-                _log.warning('Refresh failed — prompting re-authentication');
+              } catch (e) {
+                // Log the reason. Swallowing it made "was my session really
+                // expired?" unanswerable from the logs, which is exactly the
+                // question a surprise logout raises.
+                refreshOutcome = classifyRefreshFailure(e);
+                _log.warning('Refresh failed (${refreshOutcome.name}): $e');
               } finally {
                 _authRefreshInFlight = false;
               }
@@ -1740,13 +1754,40 @@ void main() {
 
             if (shouldClearStoredSession(
               tokenMissing: tokenMissing,
-              refreshRefused: refreshRefused,
+              refresh: refreshOutcome,
             )) {
               await configStorage.clearAuthSession();
               auth.bindAccount(null);
               _setEngineAuth(engine, auth);
             }
             engine.config = buildConfig(engine.config);
+
+            // No verdict: the session we hold may well be fine. Never prompt
+            // on this — prompting is what taught the user to re-login for a
+            // dropped connection. Rebind (an unbound provider is our own bug,
+            // and it is the only thing a restart here can fix) and let the
+            // next incident, or the self-heal timer, retry.
+            if (refreshOutcome == RefreshOutcome.inconclusive) {
+              final stillHaveSession = client.session != null;
+              final unbound = !(auth.hasToken && auth.client != null);
+              if (stillHaveSession &&
+                  unbound &&
+                  _authRebindAttempts < _kMaxAuthRebinds) {
+                _authRebindAttempts++;
+                auth.bindAccount(client);
+                _setEngineAuth(engine, auth);
+                engine.config = buildConfig(engine.config);
+                await restartForAuth();
+                _log.info('Refresh inconclusive — session kept, provider '
+                    'rebound');
+              } else {
+                _log.warning(
+                  'Refresh inconclusive — keeping the stored session, '
+                  'will retry',
+                );
+              }
+              return;
+            }
 
             if (!authConfig.isConfigured) return;
 
@@ -1778,8 +1819,9 @@ void main() {
                     'Token refreshed after modal closed — no prompt needed',
                   );
                   return;
-                } catch (_) {
+                } catch (e) {
                   // Still bad — fall through and prompt.
+                  _log.warning('Refresh after modal close failed: $e');
                 }
               }
               // Browser-auth is the only sign-in method, so there is no

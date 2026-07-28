@@ -1,3 +1,4 @@
+import 'package:rhyolite_client_account/rhyolite_client_account.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_recovery.dart';
 import 'package:test/test.dart';
 
@@ -97,7 +98,10 @@ void main() {
   group('shouldClearStoredSession', () {
     test('token_missing alone never discards the stored session', () {
       expect(
-        shouldClearStoredSession(tokenMissing: true, refreshRefused: false),
+        shouldClearStoredSession(
+          tokenMissing: true,
+          refresh: RefreshOutcome.notAttempted,
+        ),
         isFalse,
         reason:
             'this is the deletion that wiped a just-obtained session and '
@@ -108,15 +112,87 @@ void main() {
     test('a refused refresh discards it, even when the trigger was '
         'token_missing', () {
       expect(
-        shouldClearStoredSession(tokenMissing: true, refreshRefused: true),
+        shouldClearStoredSession(
+          tokenMissing: true,
+          refresh: RefreshOutcome.refused,
+        ),
         isTrue,
       );
     });
 
     test('a token the server refused discards it', () {
       expect(
-        shouldClearStoredSession(tokenMissing: false, refreshRefused: false),
+        shouldClearStoredSession(
+          tokenMissing: false,
+          refresh: RefreshOutcome.notAttempted,
+        ),
         isTrue,
+      );
+    });
+
+    // The logout this whole table exists to prevent: a refresh that failed
+    // without an answer says nothing about the session. Refresh tokens are
+    // single-use, so a lost response burns the token server-side and the
+    // retry comes back `unauthenticated` for a session that is alive.
+    test('an inconclusive refresh never discards the session', () {
+      expect(
+        shouldClearStoredSession(
+          tokenMissing: true,
+          refresh: RefreshOutcome.inconclusive,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldClearStoredSession(
+          tokenMissing: false,
+          refresh: RefreshOutcome.inconclusive,
+        ),
+        isFalse,
+        reason:
+            'a refused access token plus an unanswered refresh is still '
+            'no evidence the refresh token is dead',
+      );
+    });
+  });
+
+  group('classifyRefreshFailure', () {
+    test('only a clean server refusal counts as refused', () {
+      expect(
+        classifyRefreshFailure(
+          const RefreshFailedException(
+            RefreshFailureKind.refused,
+            'unauthenticated: invalid refresh token',
+          ),
+        ),
+        RefreshOutcome.refused,
+      );
+    });
+
+    test('a refusal that our own retry may have caused is inconclusive', () {
+      expect(
+        classifyRefreshFailure(
+          const RefreshFailedException(
+            RefreshFailureKind.ambiguous,
+            'unauthenticated: token revoked',
+          ),
+        ),
+        RefreshOutcome.inconclusive,
+      );
+    });
+
+    test('network failures and unknown errors are inconclusive', () {
+      expect(
+        classifyRefreshFailure(
+          const RefreshFailedException(
+            RefreshFailureKind.transient,
+            'connection closed',
+          ),
+        ),
+        RefreshOutcome.inconclusive,
+      );
+      expect(
+        classifyRefreshFailure(StateError('Not signed in')),
+        RefreshOutcome.inconclusive,
       );
     });
   });

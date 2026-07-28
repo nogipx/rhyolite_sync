@@ -1,3 +1,15 @@
+## [3.10.1] - 2026-07-28
+
+### Bug Fixes
+
+- stop signing the user out when a refresh simply fails (obsidian)
+- never discard a session over a refresh we got no answer to (account)
+
+### Other
+
+- bump plugin to 3.10.1 (obsidian)
+
+
 ## [3.10.0] - 2026-07-28
 
 ### Features

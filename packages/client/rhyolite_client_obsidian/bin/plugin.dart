@@ -129,6 +129,9 @@ StreamSubscription<SyncEngineEvent>? _engineAuthEventsSub;
 /// (its registry entry comes back tombstoned). Cancelled on unload like the
 /// others to avoid leaking a listener across soft reloads.
 StreamSubscription<SyncEngineEvent>? _deletedVaultWatchSub;
+StreamSubscription<SyncEngineEvent>? _stateLostSub;
+StreamSubscription<SyncEngineEvent>? _flushSub;
+Timer? _flushDebounce;
 
 /// Drives the offline self-heal: watches connection events to arm/cancel the
 /// periodic recovery timer. Held so onUnload can cancel it.
@@ -548,13 +551,95 @@ Uri _resolveWasmUri() {
   return Uri.parse(url);
 }
 
+/// Drains the database's pending writes to durable storage.
+///
+/// The IndexedDB VFS acknowledges a write and performs it afterwards from a
+/// queue, so between the two the database has told us "committed" about bytes
+/// that exist only in RAM. Android kills backgrounded WebView apps routinely
+/// and without a clean unload, which is precisely the window: state rolls back
+/// to the last drained write, and sync then re-downloads the vault and undoes
+/// deletes whose records never landed.
+///
+/// [immediate] skips the debounce — used when the host is about to be
+/// suspended and there may be no later chance.
+Future<void> _flushDb({bool immediate = false}) async {
+  final conn = _dbConn;
+  if (conn == null) return;
+  if (immediate) {
+    _flushDebounce?.cancel();
+    _flushDebounce = null;
+    try {
+      await conn.flush();
+    } catch (e) {
+      _log.warning('db flush failed: $e');
+    }
+    return;
+  }
+  // Coalesce: a sync burst emits many convergence points, and each flush only
+  // waits for work queued before it — flushing per event would serialise the
+  // write queue for no added durability.
+  if (_flushDebounce != null) return;
+  _flushDebounce = Timer(const Duration(seconds: 3), () {
+    _flushDebounce = null;
+    unawaited(_flushDb(immediate: true));
+  });
+}
+
+/// Asks the browser to make this origin's storage persistent.
+///
+/// The plugin's whole durable state is one SQLite file in OPFS (IndexedDB
+/// fallback). A default storage bucket is *best-effort*: the OS may evict it
+/// when the app has not been used for a while or when the device is short on
+/// space — and the plugin then boots with an empty database, pulls from cursor
+/// 0 and re-downloads every blob. A granted bucket is exempt from that.
+///
+/// Best-effort in every direction. The API is absent on old WebViews, the
+/// grant can be refused without explanation, and neither case is worth
+/// blocking a boot over — hence the timeout and the swallowed errors. The
+/// outcome is logged because it is the first thing to check when a device
+/// keeps losing its database.
+Future<void> _requestPersistentStorage() async {
+  Future<Object?> call(Object storage, String method) => jsu
+      .promiseToFuture<Object?>(
+        jsu.callMethod<Object>(storage, method, const []),
+      )
+      .timeout(const Duration(seconds: 3), onTimeout: () => null);
+
+  try {
+    final navigator = jsu.getProperty<Object?>(jsu.globalThis, 'navigator');
+    if (navigator == null) return;
+    final storage = jsu.getProperty<Object?>(navigator, 'storage');
+    if (storage == null || !jsu.hasProperty(storage, 'persist')) {
+      _log.warning('boot: storage.persist() unavailable — storage is evictable');
+      return;
+    }
+    if (jsu.hasProperty(storage, 'persisted') &&
+        await call(storage, 'persisted') == true) {
+      _log.info('boot: storage already persistent');
+      return;
+    }
+    final granted = await call(storage, 'persist');
+    if (granted == true) {
+      _log.info('boot: persistent storage granted');
+    } else {
+      _log.warning(
+        'boot: persistent storage NOT granted ($granted) — the OS may evict '
+        'the sync database while Obsidian is unused',
+      );
+    }
+  } catch (e) {
+    _log.warning('boot: persistent storage request failed: $e');
+  }
+}
+
 void main() {
   RpcGzipCodec.register();
   bootstrapPlugin(
     extraCss: '''
       .rhyolite-setting-desc { color: var(--text-muted); font-size: 0.85em; }
       .rhyolite-vault-label { font-weight: 500; }
-    ''',
+$kSyncPanelCss
+''',
     onLoad: (plugin) async {
       // Pick UI strings from Obsidian's language before any UI is built.
       initLocale();
@@ -810,13 +895,46 @@ void main() {
           // start below; the panel toggles it live.
           _syncPaused = raw is Map && raw['syncPaused'] == true;
 
-          final dbConn = await openFileDb(
-            options: SqliteConnectionOptions(
-              webDatabaseName: dbName,
-              webFileName: dbFileName,
-              webSqliteWasmUri: wasmUri,
-            ),
-          );
+          // Ask for a durable storage bucket BEFORE the database is opened.
+          // Everything this plugin persists — FileState registers, the pull
+          // cursor, Fugue trees, the local blob cache — lives in one SQLite
+          // file on OPFS (IndexedDB fallback), i.e. in WebView origin storage.
+          // Without a persistence grant that storage is best-effort and the OS
+          // is free to evict it while Obsidian sits unused; the next launch
+          // then starts from cursor 0 and re-downloads the whole vault.
+          await _requestPersistentStorage();
+
+          // Open the database, refusing the library's silent in-memory
+          // fallback. In-memory looks exactly like a working-but-empty
+          // database: sync would run, pull the entire vault from cursor 0,
+          // write everything into RAM, and do it all again on the next launch
+          // — without a single line saying why. Better to know.
+          //
+          // Not fatal, though: on a device that genuinely has neither OPFS nor
+          // IndexedDB, refusing to open at all would just mean no sync. So the
+          // second attempt takes the fallback deliberately, with the user
+          // warned that nothing will persist past this session.
+          DatabaseConnection dbConn;
+          try {
+            dbConn = await openFileDb(
+              options: SqliteConnectionOptions(
+                webDatabaseName: dbName,
+                webFileName: dbFileName,
+                webSqliteWasmUri: wasmUri,
+                webRequireDurableStorage: true,
+              ),
+            );
+          } on DurableWebStorageUnavailable catch (e) {
+            _log.error('boot: no durable storage for the sync database: $e');
+            showNotice(S.noDurableStorageNotice);
+            dbConn = await openFileDb(
+              options: SqliteConnectionOptions(
+                webDatabaseName: dbName,
+                webFileName: dbFileName,
+                webSqliteWasmUri: wasmUri,
+              ),
+            );
+          }
           _dbConn = dbConn;
           _log.info('boot: openFileDb ${bootSw.elapsedMilliseconds}ms');
 
@@ -1090,6 +1208,30 @@ void main() {
           // null-guard makes it a no-op then and a real reissue on reconnects.
           _configReconnectSub = engine.events.listen((e) {
             if (e is SyncConnected) _configSync?.handleReconnect();
+          });
+
+          // The sync database was there yesterday and is gone today (evicted
+          // WebView storage is the usual reason on mobile). The engine restores
+          // itself, but the user sees the whole vault download again and, if a
+          // delete made here never reached the server, that file back on disk.
+          // Tell them what happened instead of leaving it as a mystery.
+          _stateLostSub = engine.events.listen((e) {
+            if (e is! SyncLocalStateLost) return;
+            _log.warning('Local sync state lost — device ${e.deviceId}');
+            showNotice(S.localStateLostNotice);
+          });
+
+          // Durability barriers at the engine's convergence points. These are
+          // the events emitted right after the store persists (the puller
+          // writes meta, then emits SyncCursorAdvanced), so a flush here means
+          // an abrupt kill costs at most the last few seconds of sync rather
+          // than everything since the last clean unload.
+          _flushSub = engine.events.listen((e) {
+            if (e is SyncCursorAdvanced ||
+                e is SyncFilePushed ||
+                e is SyncStartupBlobUploadDone) {
+              unawaited(_flushDb());
+            }
           });
 
           // Permanent-delete propagation. When another device permanently
@@ -1550,7 +1692,13 @@ void main() {
                       'visible';
                   if (visible) {
                     recoverConnection(requireVisible: true);
-                  } else if (!_syncPaused) {
+                  } else {
+                    // Leaving is the last reliable moment before Android may
+                    // kill the process: drain the write queue now, whether or
+                    // not sync is paused.
+                    unawaited(_flushDb(immediate: true));
+                  }
+                  if (!visible && !_syncPaused) {
                     // Best-effort, no delay: the WebView can suspend right after
                     // 'hidden' (mobile), so fire immediately. sync() is _busy-safe
                     // and a no-op when nothing changed (signature guard).
@@ -1560,6 +1708,17 @@ void main() {
                 }),
               ]);
             }
+            // Second durability barrier. 'hidden' is the one that reliably
+            // fires on Obsidian mobile, but it is not guaranteed to be last —
+            // 'pagehide' catches a teardown that skipped it. Both are
+            // idempotent: a flush with an empty queue completes at once.
+            jsu.callMethod<void>(plugin.raw, 'registerDomEvent', [
+              jsu.globalThis,
+              'pagehide',
+              jsu.allowInterop(
+                (JSAny? _) => unawaited(_flushDb(immediate: true)),
+              ),
+            ]);
             // Network restored: reconnect immediately instead of waiting out the
             // transport's reconnect backoff.
             jsu.callMethod<void>(plugin.raw, 'registerDomEvent', [
@@ -1862,6 +2021,12 @@ void main() {
       _engineAuthEventsSub = null;
       await _deletedVaultWatchSub?.cancel();
       _deletedVaultWatchSub = null;
+      await _stateLostSub?.cancel();
+      _stateLostSub = null;
+      await _flushSub?.cancel();
+      _flushSub = null;
+      _flushDebounce?.cancel();
+      _flushDebounce = null;
       await _selfHealSub?.cancel();
       _selfHealSub = null;
       _cancelSelfHeal();

@@ -21,10 +21,13 @@ import 'websocket_listener_module.dart';
 class SyncServerModule extends RpcServerModule {
   SyncServerModule({
     List<RpcResponderContract> Function(RpcContainer container)? extraContracts,
-  }) : _extraContracts = extraContracts;
+    LogScope? logger,
+  })  : _extraContracts = extraContracts,
+        _logger = logger;
 
   final List<RpcResponderContract> Function(RpcContainer container)?
       _extraContracts;
+  final LogScope? _logger;
 
   @override
   String get name => 'SyncServerModule';
@@ -33,22 +36,44 @@ class SyncServerModule extends RpcServerModule {
   List<Type> get dependencies =>
       [PostgresModule, MinioModule, WebSocketListenerModule];
 
+  /// Registers the blob index's `vaultId` index once at boot.
+  ///
+  /// Not in [buildContracts] — that runs per connection. A failure here only
+  /// costs query speed, so it is logged rather than allowed to abort startup.
+  @override
+  Future<void> onStart(RpcContainer container) async {
+    try {
+      await DataBlobIndex(client: container.get<IDataClient>()).ensureIndexed();
+    } catch (e) {
+      _logger?.warning('blob index: could not register the vaultId index: $e');
+    }
+  }
+
   @override
   List<RpcResponderContract> buildContracts(RpcContainer container) {
     final dataClient = container.get<IDataClient>();
     final blobClient = container.get<IBlobClient>();
     final notifyRepository = container.get<INotifyRepository>();
+    final blobIndex = DataBlobIndex(client: dataClient);
 
     final contracts = <RpcResponderContract>[
       // dataClient enables the backup delete-guard: a client-driven blob delete
       // is refused for chunks a retained snapshot pins. No-op without backups
       // (self-host / free), so it's safe in the shared module.
-      RhyoliteBlobResponder(client: blobClient, dataClient: dataClient),
+      // blobIndex answers "do you already hold these chunks" from the document
+      // store instead of one HEAD per chunk, and is the source the quota/usage
+      // readers move to.
+      RhyoliteBlobResponder(
+        client: blobClient,
+        dataClient: dataClient,
+        blobIndex: blobIndex,
+      ),
       // Orphan-blob sweep: reads state + history to build the live set, lists
       // the shared blob bucket, reclaims the difference (dry-run by default).
       RhyoliteVaultMaintenanceResponder(
         dataClient: dataClient,
         blobClient: blobClient,
+        blobIndex: blobIndex,
       ),
       StateSyncResponder(
         client: dataClient,

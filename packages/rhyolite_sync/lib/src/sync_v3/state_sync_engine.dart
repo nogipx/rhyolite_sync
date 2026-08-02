@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:convergent/convergent.dart';
 import 'package:http/http.dart' as http;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
@@ -26,7 +25,6 @@ class ResolverContext {
     required this.nodeId,
     this.remoteBlobStorage,
     this.chunkedBlobIO,
-    this.findHistoryBaseRef,
   });
 
   final FileStateStore store;
@@ -35,8 +33,6 @@ class ResolverContext {
   final ChunkedBlobIO? chunkedBlobIO;
   final String vaultId;
   final String nodeId;
-  final Future<String?> Function(String fileId, Hlc beforeHlc)?
-  findHistoryBaseRef;
 }
 
 /// State-based sync engine. Each file is one server record; no op log.
@@ -275,6 +271,26 @@ class StateSyncEngine implements ISyncEngine {
       // deviceId doubles as the HLC nodeId — every TaggedValue this device
       // emits is unambiguously attributable.
       final nodeId = _store!.deviceId;
+
+      // The database came up empty while the HOST still remembers a deviceId
+      // for this vault: this install has synced before, so "empty" means the
+      // database is gone, not new. The engine recovers by itself (cursor 0 →
+      // full pull), but silently — and a full re-download of the vault plus
+      // the undo of any delete whose tombstone never reached the server is far
+      // too visible to leave unexplained. Say it out loud, once, at the only
+      // point where the distinction is still observable.
+      final hostDeviceId = config.deviceId;
+      if (_store!.loadedEmpty &&
+          hostDeviceId != null &&
+          hostDeviceId.isNotEmpty) {
+        _log.error(
+          'Local sync database is EMPTY but host remembers deviceId '
+          '$hostDeviceId for this vault — the database was lost (evicted '
+          'browser storage / failed open / manual reset). Restoring from the '
+          'server: pulling from cursor 0, every blob will be re-downloaded.',
+        );
+        _emit(SyncLocalStateLost(deviceId: hostDeviceId));
+      }
 
       // Per-file Fugue sequences (text path). Binary files keep using the
       // state-based blob path; the store stays small in vaults without
@@ -1761,7 +1777,6 @@ class StateSyncEngine implements ISyncEngine {
           chunkedBlobIO: chunkedIO,
           vaultId: config.vaultId,
           nodeId: _store!.deviceId,
-          findHistoryBaseRef: _findHistoryBaseRef,
         ),
       );
     }
@@ -1772,7 +1787,6 @@ class StateSyncEngine implements ISyncEngine {
       chunkedBlobIO: chunkedIO,
       vaultId: config.vaultId,
       nodeId: _store!.deviceId,
-      findHistoryBaseRef: _findHistoryBaseRef,
     );
   }
 
@@ -1910,33 +1924,6 @@ class StateSyncEngine implements ISyncEngine {
     return known;
   }
 
-  /// Looks up an ancestor blobRef via the history service, used by the
-  /// conflict resolver when no local lastSyncedBlobRef is available
-  /// (new device, restore from server, etc).
-  ///
-  /// Returns the newest history event's blobRef for [fileId] whose hlc
-  /// is strictly less than [beforeHlc]. Null if no such event exists in
-  /// the retention window.
-  Future<String?> _findHistoryBaseRef(String fileId, Hlc beforeHlc) async {
-    final history = _conn?.historyCaller;
-    if (history == null) return null;
-    try {
-      final response = await history.getHistory(
-        HistoryGetRequest(
-          vaultId: config.vaultId,
-          fileId: fileId,
-          beforeHlcPacked: beforeHlc.pack(),
-          limit: 1,
-        ),
-      );
-      if (response.events.isEmpty) return null;
-      final ref = response.events.first.blobRef;
-      return ref.isEmpty ? null : ref;
-    } catch (e) {
-      _log.warning('history base lookup failed for $fileId: $e');
-      return null;
-    }
-  }
 
   /// Returns the per-session [BlobTransferHub], building it lazily on
   /// first call after the connection is up. The hub is the single

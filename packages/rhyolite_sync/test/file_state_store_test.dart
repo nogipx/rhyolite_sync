@@ -432,5 +432,41 @@ void main() {
         reason: 'far-future witness must be clamped, not adopted',
       );
     });
+
+  });
+
+  // The host compares this against a deviceId it persists OUTSIDE the sync
+  // database: empty store + remembered device = the database was lost (the
+  // mobile storage-eviction case), which is what SyncLocalStateLost reports.
+  group('FileStateStore — loadedEmpty', () {
+    test('true on a database with nothing persisted', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      expect((await _newStore(env.client)).loadedEmpty, isTrue);
+    });
+
+    test('false once state has been persisted and reloaded', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      await store.persistOne('f1');
+      await store.persistMeta();
+
+      expect((await _newStore(env.client)).loadedEmpty, isFalse);
+    });
+
+    test('false when only meta survives (cursor without registers)', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+      store.setServerCursor(42);
+      await store.persistMeta();
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.loadedEmpty, isFalse);
+      expect(reloaded.serverCursor, 42);
+    });
   });
 }

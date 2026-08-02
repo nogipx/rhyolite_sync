@@ -1,3 +1,24 @@
+## [3.11.0] - 2026-08-02
+
+### Features
+
+- report a lost sync database instead of restoring in silence (core)
+- rebuild the sync panel around a real stylesheet (obsidian)
+
+### Bug Fixes
+
+- keep the sync database durable across an Android app kill (obsidian)
+
+### Refactoring
+
+- drop the 3-way text merge from the binary resolver (core)
+
+### Other
+
+- probe the local blob cache by id instead of listing it (core)
+- bump plugin to 3.11.0 (obsidian)
+
+
 ## [3.10.1] - 2026-07-28
 
 ### Bug Fixes

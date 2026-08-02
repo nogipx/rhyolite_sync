@@ -462,6 +462,8 @@ abstract class AppStrings {
   String get dbCorruptedText;
   String get dbRecoveryDescription;
   String get resetDatabase;
+  String get localStateLostNotice;
+  String get noDurableStorageNotice;
 
   // ── Status bar / floating pill ───────────────────────────────────────────
   String labelUp(int completed, int total);

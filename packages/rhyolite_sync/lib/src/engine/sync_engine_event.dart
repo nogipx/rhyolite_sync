@@ -171,6 +171,33 @@ class SyncVaultReset extends SyncEngineEvent {
   SyncVaultReset();
 }
 
+/// The local sync database came up empty even though the HOST still
+/// remembers a deviceId for this vault — i.e. this install has synced
+/// before and its database is gone, not fresh.
+///
+/// The engine recovers on its own (cursor 0 → full pull → every blob
+/// re-downloaded), so this is not an error. It is emitted because the
+/// recovery is expensive and, from the user's seat, indistinguishable from a
+/// bug: "why is it downloading my whole vault again?". It also has one real
+/// consequence worth surfacing — a delete made on THIS device whose tombstone
+/// never reached the server is undone by the restore, so the file reappears.
+///
+/// On a host that keeps its database in browser storage (the Obsidian plugin
+/// — OPFS, with an IndexedDB fallback and a silent in-memory last resort) the
+/// usual cause is the OS evicting that storage while the app sat unused, or
+/// the storage failing to open at all. Hosts should surface this and, where
+/// the platform allows it, ask for persistent storage (`navigator.storage
+/// .persist()`).
+class SyncLocalStateLost extends SyncEngineEvent {
+  SyncLocalStateLost({required this.deviceId});
+
+  /// The host-persisted device identity that outlived the database.
+  final String deviceId;
+
+  @override
+  String toString() => 'SyncLocalStateLost(deviceId: $deviceId)';
+}
+
 /// Generic envelope for server-side rejections that originate from
 /// application policy (auth, quota, subscription, feature gates) or
 /// from product-specific protocol extensions.

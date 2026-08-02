@@ -66,12 +66,9 @@ class LocalBlobStorageAdapter implements IBlobStorage {
     RpcContext? context,
   }) async {
     if (blobIds.isEmpty) return {};
-    final local = (await _store.listBlobIds(vaultId: _vaultId)).toSet();
-    final present = <String>{};
-    for (final id in blobIds) {
-      // Empty-file blob is reconstructable without the store, so always present.
-      if (id == _emptySha256 || local.contains(id)) present.add(id);
-    }
+    final present = await _store.existing(blobIds, vaultId: _vaultId);
+    // Empty-file blob is reconstructable without the store, so always present.
+    if (blobIds.contains(_emptySha256)) present.add(_emptySha256);
     return present;
   }
 }

@@ -48,19 +48,32 @@ void main() {
     expect(await blobs.read('blob-current', vaultId: _v), isNotNull);
   });
 
-  test('keeps blobs referenced by lastSyncedBlobRef (3-way merge base)',
+  test('drops a lastSyncedBlobRef blob that is no longer current content',
       () async {
     await _seedBlob(blobs, 'blob-base', [2]);
     await _seedBlob(blobs, 'blob-current', [3]);
     store.upsert(_state('f1', blobRef: 'blob-current'));
-    // lastSyncedBlobRef points at a different blob — the base we keep
-    // around for a possible next 3-way merge.
     store.recordSyncedBlobRef('f1', 'blob-base');
 
     final r = await gc();
     expect(r.scanned, 2);
-    expect(r.deleted, 0,
-        reason: 'both current and base must stay alive');
+    // The LCA is compared as a hash and its bytes are never read (the 3-way
+    // merge that once needed them is gone), so keeping a second copy of every
+    // file that has ever changed is pure waste.
+    expect(r.deleted, 1);
+    expect(await blobs.read('blob-current', vaultId: _v), isNotNull);
+    expect(await blobs.read('blob-base', vaultId: _v), isNull);
+  });
+
+  test('keeps a lastSyncedBlobRef blob that is still some file\'s content',
+      () async {
+    await _seedBlob(blobs, 'blob-shared', [7]);
+    store.upsert(_state('f1', blobRef: 'blob-shared'));
+    store.recordSyncedBlobRef('f1', 'blob-shared');
+
+    final r = await gc();
+    expect(r.deleted, 0);
+    expect(await blobs.read('blob-shared', vaultId: _v), isNotNull);
   });
 
   test('deletes orphans not referenced by any file_state or base', () async {

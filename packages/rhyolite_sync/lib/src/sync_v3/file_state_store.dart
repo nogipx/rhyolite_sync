@@ -66,6 +66,18 @@ class FileStateStore {
   int _serverCursor = 0;
   int? _serverEpoch;
 
+  bool _loadedEmpty = false;
+
+  /// [load] found NOTHING persisted: no meta row and no register rows.
+  ///
+  /// True on a genuinely first run — and equally true when a database that
+  /// once held state is gone (evicted browser storage, a failed open that fell
+  /// back to an in-memory VFS, a manual reset). This store cannot tell those
+  /// apart; only the host can, by comparing against an identity it persists
+  /// OUTSIDE this database (see [VaultConfig.deviceId]). The engine does that
+  /// comparison and emits [SyncLocalStateLost].
+  bool get loadedEmpty => _loadedEmpty;
+
   /// Persistent per-install identifier. Also used as the HLC nodeId so
   /// every TaggedValue this device produces is unambiguously attributable.
   String? _deviceId;
@@ -354,6 +366,9 @@ class FileStateStore {
     }
 
     final meta = await _client.get(collection: _metaCol, id: _metaId);
+    // Captured BEFORE the branches below mint a deviceId and write meta back:
+    // after that the store looks initialised and the distinction is gone.
+    _loadedEmpty = meta == null && _registers.isEmpty;
     if (meta != null) {
       _serverCursor = (meta.payload['cursor'] as int?) ?? 0;
       _serverEpoch = meta.payload['epoch'] as int?;

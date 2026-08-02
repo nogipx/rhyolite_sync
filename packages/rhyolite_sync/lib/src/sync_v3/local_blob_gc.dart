@@ -5,8 +5,14 @@ import 'file_state_store.dart';
 ///
 /// A blob is "live" when it is either:
 /// - the current content of some file (file_state.blobRef), or
-/// - the lastSyncedBlobRef of some file (kept for future 3-way merge base), or
 /// - claimed by a sibling sync sharing this cache (see [externalLiveIds]).
+///
+/// `lastSyncedBlobRef` used to be pinned here too, as a 3-way merge base. That
+/// merge is gone (see [StateConflictResolver]: every file reaching it was
+/// classified not-text on purpose, so merging it was never correct), and the
+/// ref itself is only ever compared as a HASH — to tell a real concurrent edit
+/// from a peer re-observing an unchanged copy. Nothing reads those bytes, so
+/// pinning them kept a second copy of every file that has ever changed.
 ///
 /// Everything else is dead weight from past edits and gets deleted.
 ///
@@ -50,11 +56,6 @@ class LocalBlobGc {
       if (state.blobRef.isNotEmpty) live.add(state.blobRef);
       live.addAll(state.chunks);
     }
-    for (final fileId in store.fileIds) {
-      final synced = store.lastSyncedBlobRefFor(fileId);
-      if (synced != null && synced.isNotEmpty) live.add(synced);
-    }
-
     final List<String> allBlobIds;
     try {
       allBlobIds = await blobStore.listBlobIds(vaultId: vaultId);

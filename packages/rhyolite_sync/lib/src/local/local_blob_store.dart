@@ -24,12 +24,8 @@ class LocalBlobStore {
     );
   }
 
-  Future<void> deleteBlobs(List<String> blobIds, {required String vaultId}) async {
-    final collection = _collection(vaultId);
-    for (final blobId in blobIds) {
-      await _repo.deleteBlob(collection, blobId);
-    }
-  }
+  Future<void> deleteBlobs(List<String> blobIds, {required String vaultId}) =>
+      _repo.deleteMany(_collection(vaultId), blobIds);
 
   Future<Uint8List?> read(String blobId, {required String vaultId}) async {
     final result = await _repo.readBlob(
@@ -48,6 +44,20 @@ class LocalBlobStore {
   /// after the server's blob collection has already been dropped.
   Future<void> wipeAll({required String vaultId}) async {
     await _repo.deleteCollection(_collection(vaultId));
+  }
+
+  /// Which of [blobIds] this device holds.
+  ///
+  /// Asks about the ids in question instead of enumerating the vault: the
+  /// caller probes in batches, and listing everything for each batch turns a
+  /// verification pass into a walk of the whole local cache per slice.
+  Future<Set<String>> existing(
+    List<String> blobIds, {
+    required String vaultId,
+  }) async {
+    if (blobIds.isEmpty) return <String>{};
+    final found = await _repo.headMany(_collection(vaultId), blobIds);
+    return found.keys.toSet();
   }
 
   /// All blob ids in the local cache for [vaultId]. Used by the local

@@ -159,8 +159,15 @@ void main() {
     });
   });
 
-  group('StateConflictResolver — 3-way text merge', () {
-    test('non-overlapping edits merge cleanly', () async {
+  group('StateConflictResolver — no content merge', () {
+    // Everything reaching this resolver was classified NOT-text on purpose
+    // (.canvas, the force-binary suffixes, the user's force-binary policy).
+    // The old line-based 3-way merge re-admitted them by sniffing the bytes,
+    // producing exactly the broken structured documents the classification
+    // exists to prevent. Concurrent versions are now always kept whole: LWW
+    // winner plus a conflict-copy of the loser.
+    test('text-looking divergence with a base still yields conflict-copy',
+        () async {
       final baseRef = await _writeBlob(blobStore, 'line A\nline B\nline C\n');
       final localRef =
           await _writeBlob(blobStore, 'line A modified\nline B\nline C\n');
@@ -171,15 +178,13 @@ void main() {
       final remote = _state('f1', blobRef: remoteRef, hlc: Hlc(150, 0, 'B'));
 
       final outcome = await resolver.resolve([local, remote], baseRef: baseRef);
-      expect(outcome, isA<StateMergeMerged>());
-      final m = outcome as StateMergeMerged;
-      expect(m.newBlobBytes, isNotNull);
-      final text = utf8.decode(m.newBlobBytes!);
-      expect(text.contains('line A modified'), isTrue);
-      expect(text.contains('line C modified'), isTrue);
+      expect(outcome, isA<StateMergeConflictCopy>());
+      final c = outcome as StateMergeConflictCopy;
+      expect(c.winner.blobRef, remoteRef, reason: 'higher HLC wins');
+      expect(c.loser.blobRef, localRef, reason: 'loser is preserved, not merged');
     });
 
-    test('falls back to conflict-copy when base blob missing', () async {
+    test('no base available → conflict-copy', () async {
       final localRef = await _writeBlob(blobStore, 'local content');
       final remoteRef = await _writeBlob(blobStore, 'remote content');
 
@@ -193,8 +198,7 @@ void main() {
       expect(c.loser.blobRef, localRef);
     });
 
-    test('binary content falls back to conflict-copy not 3-way merge',
-        () async {
+    test('binary content → conflict-copy', () async {
       final baseBytes = Uint8List.fromList([1, 2, 0, 3]);
       final baseRef = sha256.convert(baseBytes).toString();
       await blobStore.write(baseBytes, baseRef, vaultId: _v);
@@ -212,81 +216,6 @@ void main() {
 
       final outcome = await resolver.resolve([local, remote], baseRef: baseRef);
       expect(outcome, isA<StateMergeConflictCopy>());
-    });
-  });
-
-  group('StateConflictResolver — history fallback for base', () {
-    test('uses history-provided ancestor when no baseRef passed', () async {
-      final baseRef = await _writeBlob(blobStore, 'line A\nline B\n');
-      final localRef =
-          await _writeBlob(blobStore, 'line A modified\nline B\n');
-      final remoteRef =
-          await _writeBlob(blobStore, 'line A\nline B modified\n');
-
-      final r = StateConflictResolver(
-        store: store,
-        blobStore: blobStore,
-        vaultId: _v,
-        nodeId: 'A',
-        findHistoryBaseRef: (fileId, beforeHlc) async {
-          expect(fileId, 'f1');
-          return baseRef;
-        },
-      );
-
-      final local = _state('f1', blobRef: localRef, hlc: Hlc(100, 0, 'A'));
-      final remote = _state('f1', blobRef: remoteRef, hlc: Hlc(150, 0, 'B'));
-
-      final outcome = await r.resolve([local, remote]);
-      expect(outcome, isA<StateMergeMerged>());
-      final merged = (outcome as StateMergeMerged).newBlobBytes!;
-      final text = utf8.decode(merged);
-      expect(text.contains('line A modified'), isTrue);
-      expect(text.contains('line B modified'), isTrue);
-    });
-
-    test('falls back to conflict-copy when history has no ancestor', () async {
-      final localRef = await _writeBlob(blobStore, 'local only');
-      final remoteRef = await _writeBlob(blobStore, 'remote only');
-      final r = StateConflictResolver(
-        store: store,
-        blobStore: blobStore,
-        vaultId: _v,
-        nodeId: 'A',
-        findHistoryBaseRef: (_, __) async => null,
-      );
-      final local = _state('f1', blobRef: localRef, hlc: Hlc(100, 0, 'A'));
-      final remote = _state('f1', blobRef: remoteRef, hlc: Hlc(200, 0, 'B'));
-      final outcome = await r.resolve([local, remote]);
-      expect(outcome, isA<StateMergeConflictCopy>());
-    });
-
-    test('lastSyncedBlobRef takes precedence over history hook', () async {
-      final localBaseRef = await _writeBlob(blobStore, 'local-known base\n');
-      final localRef =
-          await _writeBlob(blobStore, 'local-known base\nlocal addition\n');
-      final remoteRef =
-          await _writeBlob(blobStore, 'local-known base\nremote addition\n');
-      store.recordSyncedBlobRef('f1', localBaseRef);
-
-      var historyCalled = false;
-      final r = StateConflictResolver(
-        store: store,
-        blobStore: blobStore,
-        vaultId: _v,
-        nodeId: 'A',
-        findHistoryBaseRef: (_, __) async {
-          historyCalled = true;
-          return 'should-not-be-used';
-        },
-      );
-
-      final local = _state('f1', blobRef: localRef, hlc: Hlc(100, 0, 'A'));
-      final remote = _state('f1', blobRef: remoteRef, hlc: Hlc(150, 0, 'B'));
-      final outcome = await r.resolve([local, remote]);
-      expect(outcome, isA<StateMergeMerged>());
-      expect(historyCalled, isFalse,
-          reason: 'fast path must skip history when local base is present');
     });
   });
 

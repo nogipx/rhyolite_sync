@@ -1,8 +1,5 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
-import 'package:diff_match_patch/diff_match_patch.dart';
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
@@ -94,8 +91,12 @@ class StateMergeMultiConflict extends StateMergeOutcome {
 /// it to [SyncEngine] via constructor.
 abstract interface class IStateConflictResolver {
   /// Resolve [values] (surviving TaggedValues of one register) into a
-  /// single chosen [FileState]. [baseRef] is the
-  /// `lastSyncedBlobRef[fileId]` (if known) for 3-way-merge base.
+  /// single chosen [FileState].
+  ///
+  /// [baseRef] is `lastSyncedBlobRef[fileId]` when known — the last version
+  /// both sides agreed on. It is compared as a HASH, never fetched: it tells a
+  /// genuine concurrent edit from a peer merely re-observing an unchanged copy
+  /// (see the tombstone branch in [StateConflictResolver._pair]).
   Future<StateMergeOutcome> resolve(List<FileState> values, {String? baseRef});
 }
 
@@ -113,16 +114,10 @@ class StateConflictResolver implements IStateConflictResolver {
   /// hash in sync v3) into the actual concatenated file content. When
   /// non-null, takes precedence over the raw [blobStore] read — the raw
   /// store would return the manifest JSON, not the content, silently
-  /// corrupting any 3-way text merge or conflict-copy write.
+  /// corrupting a conflict-copy write.
   final ChunkedBlobIO? chunkedBlobIO;
   final String vaultId;
   final String nodeId;
-
-  /// Hook to find a base blobRef via the history service when the local
-  /// `lastSyncedBlobRef` is unavailable (new device, restore from server,
-  /// blob cache eviction).
-  final Future<String?> Function(String fileId, Hlc beforeHlc)?
-  findHistoryBaseRef;
 
   StateConflictResolver({
     required this.store,
@@ -131,7 +126,6 @@ class StateConflictResolver implements IStateConflictResolver {
     required this.nodeId,
     this.remoteBlobStorage,
     this.chunkedBlobIO,
-    this.findHistoryBaseRef,
   });
 
   /// Collapse [values] (the surviving TaggedValues of one register) into a
@@ -139,10 +133,14 @@ class StateConflictResolver implements IStateConflictResolver {
   ///
   /// 1. All values share `blobRef` → max-HLC, single-value (no real
   ///    content conflict).
-  /// 2. Tombstone vs non-tombstone → add-wins. Tombstone becomes a
-  ///    conflict-copy marker.
-  /// 3. Real text divergence with base available → 3-way merge.
-  /// 4. Otherwise → LWW by HLC + conflict-copy of the loser.
+  /// 2. Tombstone vs non-tombstone → add-wins, unless the live side is
+  ///    byte-identical to [baseRef] and therefore only a stale copy.
+  /// 3. Otherwise → LWW by HLC + conflict-copy of the loser.
+  ///
+  /// No content merge happens here, by construction: every file that reaches
+  /// this resolver was classified NOT-text on purpose (see
+  /// `RemoteApplier._applyFile` — text goes to Fugue and returns before this),
+  /// and merging those is exactly what that classification exists to prevent.
   ///
   /// For N>2 values, pairwise reduce: resolve(a,b) → c, resolve(c,d) → e, …
   Future<StateMergeOutcome> resolve(
@@ -270,29 +268,17 @@ class StateConflictResolver implements IStateConflictResolver {
       );
     }
 
-    // Try 3-way text merge.
-    String? base = baseRef ?? store.lastSyncedBlobRefFor(local.fileId);
-    if (base == null && findHistoryBaseRef != null) {
-      final beforeHlc = local.hlc.compareTo(remote.hlc) < 0
-          ? local.hlc
-          : remote.hlc;
-      try {
-        base = await findHistoryBaseRef!(local.fileId, beforeHlc);
-      } catch (_) {
-        base = null;
-      }
-    }
-
-    if (base != null) {
-      final outcome = await _tryThreeWayTextMerge(
-        local: local,
-        remote: remote,
-        baseBlobRef: base,
-      );
-      if (outcome != null) return outcome;
-    }
-
-    // LWW fallback + conflict-copy of the loser.
+    // LWW + conflict-copy of the loser.
+    //
+    // There used to be a line-based 3-way text merge here, guarded only by
+    // sniffing whether the bytes looked like text. It could never be right:
+    // this resolver is reached ONLY for files the detector classified as
+    // not-text — `.canvas`, the force-binary suffixes, and the user's own
+    // force-binary policy — and every one of those is structured text that was
+    // routed here precisely BECAUSE merging it produces a syntactically broken
+    // document. Sniffing the content undid that decision. Genuinely binary
+    // content failed the sniff and landed here anyway, so removing the merge
+    // changes nothing for it.
     final winner = local.hlc >= remote.hlc ? local : remote;
     final loser = identical(winner, local) ? remote : local;
 
@@ -325,60 +311,12 @@ class StateConflictResolver implements IStateConflictResolver {
     );
   }
 
-  Future<StateMergeOutcome?> _tryThreeWayTextMerge({
-    required FileState local,
-    required FileState remote,
-    required String baseBlobRef,
-  }) async {
-    final baseBytes = await _readBlob(local.fileId, baseBlobRef);
-    final localBytes = await _readBlob(local.fileId, local.blobRef);
-    final remoteBytes = await _readBlob(local.fileId, remote.blobRef);
-    if (baseBytes == null || localBytes == null || remoteBytes == null) {
-      return null;
-    }
-    if (!_looksLikeText(localBytes) || !_looksLikeText(remoteBytes)) {
-      return null;
-    }
-
-    final baseText = utf8.decode(baseBytes, allowMalformed: true);
-    final localText = utf8.decode(localBytes, allowMalformed: true);
-    final remoteText = utf8.decode(remoteBytes, allowMalformed: true);
-
-    final patches = patchMake(baseText, b: remoteText);
-    final result = patchApply(patches, localText);
-    final applied = (result[1] as List).cast<bool>();
-    if (!applied.every((x) => x)) return null;
-
-    final mergedText = result[0] as String;
-    final mergedBytes = Uint8List.fromList(utf8.encode(mergedText));
-    final mergedRef = sha256.convert(mergedBytes).toString();
-
-    // Fresh HLC for the merge — dominates both inputs. The caller will
-    // re-stamp via store.applyLocal under ownContext anyway, but we set
-    // a sensible default in case callers materialise directly.
-    final mergedHlc = store.nextHlc();
-
-    final merged = local.copyWith(
-      path: local.path,
-      blobRef: mergedRef,
-      sizeBytes: mergedBytes.length,
-      hlc: mergedHlc,
-      tombstone: false,
-    );
-
-    return StateMergeMerged(
-      merged: merged,
-      newBlobRef: mergedRef,
-      newBlobBytes: mergedBytes,
-    );
-  }
-
   Future<Uint8List?> _readBlob(String fileId, String blobRef) async {
     if (blobRef.isEmpty) return null;
     // In sync v3 every blobRef is a chunked-blob manifest hash. Reading
     // it as raw bytes returns the manifest JSON, not the file content —
-    // which silently corrupts 3-way text merges and conflict-copy
-    // writes (they end up containing `{"v":1,"size":..,"chunks":[..]}`).
+    // which silently corrupts conflict-copy writes (they end up containing
+    // `{"v":1,"size":..,"chunks":[..]}`).
     // Resolve through ChunkedBlobIO so we get the concatenated chunks.
     final chunked = chunkedBlobIO;
     if (chunked != null) {
@@ -404,11 +342,6 @@ class StateConflictResolver implements IStateConflictResolver {
       } catch (_) {}
     }
     return null;
-  }
-
-  bool _looksLikeText(Uint8List bytes) {
-    final probe = bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes;
-    return !probe.contains(0);
   }
 
   String _conflictCopyPath(String path, Hlc loserHlc) {

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../chunking/file_type_detector.dart';
+import 'blob_classifier.dart';
 import 'fugue_store.dart';
 
 /// Turns a downloaded content-addressed blob into the readable, on-disk file
@@ -18,18 +19,20 @@ import 'fugue_store.dart';
 /// backup restore and the backup diff view all go through it, so none of them
 /// ever writes/shows the raw `\0fg1` serialization.
 Uint8List? materializeFileContent(Uint8List bytes, String path) {
-  // A magic-prefixed Fugue blob is always text-projectable, regardless of the
-  // path's current classification: a file synced as Fugue but now classified
-  // binary (e.g. .excalidraw.md) must still project, never surface raw \0fg1.
-  final fugue = FugueStore.tryDecodeBlob(bytes);
-  if (fugue != null) {
-    return Uint8List.fromList(utf8.encode(fugue.values.join()));
+  switch (classifyBlob(bytes, isTextPath: const FileTypeDetector().isText(path))) {
+    case BlobKind.fugue:
+      // Non-null by construction — classifyBlob got `fugue` from this decode.
+      final fugue = FugueStore.tryDecodeBlob(bytes)!;
+      return Uint8List.fromList(utf8.encode(fugue.values.join()));
+    case BlobKind.legacySequence:
+    // A format this build cannot read is unavailable for the same reason a
+    // legacy Sequence blob is: the bytes are not document content, and every
+    // caller here (history restore, backup restore, the diff view, the
+    // conflict copy) already treats null as "this version cannot be shown".
+    case BlobKind.unknownTagged:
+      return null;
+    case BlobKind.plainText:
+    case BlobKind.binary:
+      return bytes;
   }
-  // The legacy Sequence probe is a full CBOR/JSON decode and only relevant to
-  // the pre-Fugue text rollout — keep it gated on the text classification.
-  if (const FileTypeDetector().isText(path) &&
-      FugueStore.isLegacySequenceBlob(bytes)) {
-    return null;
-  }
-  return bytes;
 }

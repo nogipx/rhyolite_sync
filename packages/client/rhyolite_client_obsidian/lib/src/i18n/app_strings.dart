@@ -431,6 +431,8 @@ abstract class AppStrings {
   String tooLargeToSync(int n);
   String get tooLargeHint;
   String blockedMeta(String size, String limit);
+  String needsNewerClient(int n);
+  String get needsNewerClientHint;
   String andMore(int n);
   String conflictsLostContent(int n);
   String storageMeterTitle(String plan);

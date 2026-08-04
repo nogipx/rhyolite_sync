@@ -521,18 +521,6 @@ final stats = VaultStatsUseCase(engine.store)();
 
 // All fileIds currently in multi-value register state.
 final conflicts = ConflictListUseCase(engine.store)();
-
-// Escape hatch — decrypt vault into a target directory.
-final report = await ExportVaultUseCase(
-  store: engine.store,
-  chunkedBlobIO: chunkedIO,
-  targetIO: targetPlatformIO,
-  targetRoot: '/tmp/my-export',
-  localBlobStore: blobStore,
-  vaultId: config.vaultId,
-)(onProgress: (done, total) {
-  print('exported $done / $total');
-});
 ```
 
 ### Direct store access (read-only)

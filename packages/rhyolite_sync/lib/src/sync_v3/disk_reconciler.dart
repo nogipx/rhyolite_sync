@@ -4,6 +4,13 @@ import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import '../frontmatter/fm_tail.dart';
+import '../frontmatter/fm_state.dart';
+import '../frontmatter/fm_store.dart';
+import '../frontmatter/frontmatter_document.dart';
+import '../frontmatter/frontmatter_parser.dart';
+import '../frontmatter/frontmatter_split.dart';
+
 /// Holds the disk ↔ CRDT-store reconcile logic in one place.
 ///
 /// Three entry points share a single rule "reconcile-then-act":
@@ -52,8 +59,12 @@ class DiskReconciler {
     Set<String> Function()? forcedBinaryExtensions,
     Set<String>? sizeBlocked,
     StatSigStore? sigStore,
+    FmStore? fmStore,
+    int? Function()? fmGcBarrier,
     LogScope? logger,
-  }) : _chunkedIOBuilder = chunkedIOBuilder,
+  }) : _fmStore = fmStore,
+       _fmGcBarrier = fmGcBarrier ?? (() => null),
+       _chunkedIOBuilder = chunkedIOBuilder,
        _knownChunks = knownChunks,
        _fileIdFor = fileIdFor,
        _emit = emit,
@@ -99,6 +110,15 @@ class DiskReconciler {
   /// file later disappears or shrinks — without it the UI's "too large" list
   /// would never clear.
   final Set<String> _sizeBlocked;
+
+  /// Per-file frontmatter CRDT state. Null in tests that do not wire it, and
+  /// then no tail is written — which is exactly what a peer without the
+  /// feature does, so the path is worth keeping cheap rather than special.
+  final FmStore? _fmStore;
+
+  /// Newest server seq every active device has pulled past, or null when
+  /// unknown. Supplied by [CausalStabilityGc], which already pays the RPC.
+  final int? Function() _fmGcBarrier;
 
   /// Persistent mirror of [_statCache] so the stat short-circuit survives a
   /// plugin restart. Null when unavailable (tests) → in-memory only.
@@ -299,7 +319,8 @@ class DiskReconciler {
     // local edit upgrades them via [loadOrSeedSequence].
     final isTextPath = _detector.isText(state.path);
     final swDecode = Stopwatch()..start();
-    final fugue = _tryDecodeFugueBlob(bytes);
+    final kind = classifyBlob(bytes, isTextPath: isTextPath);
+    final fugue = kind == BlobKind.fugue ? _tryDecodeFugueBlob(bytes) : null;
     swDecode.stop();
     if (fugue != null) {
       // Only text files consult the tree on the push path, so only they need
@@ -307,6 +328,13 @@ class DiskReconciler {
       if (isTextPath) {
         fugueStore.set(state.fileId, fugue);
         await fugueStore.persistOne(state.fileId);
+        // Refresh the frontmatter cache from the same bytes when the peer that
+        // wrote them carried it. Absent is ordinary, not an error.
+        final fm = readFmTail(bytes);
+        if (fm != null) {
+          _fmStore?.set(state.fileId, fm);
+          await _fmStore?.persistOne(state.fileId);
+        }
       }
       // Yield to the host event loop before the projection — for big
       // trees `.values.join()` runs hundreds of ms on the main JS
@@ -322,15 +350,28 @@ class DiskReconciler {
         'project=${swProject.elapsedMilliseconds}ms '
         'projected=${bytes.length}B',
       );
-    } else if (isTextPath && FugueStore.isLegacySequenceBlob(bytes)) {
+    } else if (kind == BlobKind.legacySequence) {
       // A pre-Fugue Sequence blob from a not-yet-upgraded peer. Its bytes
       // are NOT document text — writing them would corrupt the note. Skip
       // without advancing the LCA so a reseed (from this device's own
-      // reconcile-from-disk, or an upgraded peer) replaces it. The probe is a
-      // full CBOR/JSON decode, so keep it off the binary path (large blobs).
+      // reconcile-from-disk, or an upgraded peer) replaces it.
       _log.warning(
         'Skipping legacy Sequence blob for ${state.path} — awaiting reseed',
       );
+      return false;
+    } else if (kind == BlobKind.unknownTagged) {
+      // Written by a newer client in a format this build has no decoder for.
+      // This is the branch that used to fall through to "write as-is" and put
+      // serialised CRDT state inside the user's note — the only path that
+      // corrupts the vault rather than merely showing something unreadable.
+      //
+      // Not advancing the LCA is deliberate: an updated client re-materialises
+      // it later without any repair step.
+      _log.error(
+        'Refusing to write ${state.path}: blob is in an unsupported format '
+        '(written by a newer client) — update this client',
+      );
+      _emit(SyncFileFormatUnsupported(path: state.path));
       return false;
     }
     // Otherwise: a genuine pre-Fugue plain-text blob, or a real binary — write
@@ -415,7 +456,9 @@ class DiskReconciler {
       swDl.stop();
       if (bytes == null) return Fugue<String>();
       final swDecode = Stopwatch()..start();
-      final fugue = _tryDecodeFugueBlob(bytes);
+      // Always the text path: this is only reached from the text reconcile.
+      final kind = classifyBlob(bytes, isTextPath: true);
+      final fugue = kind == BlobKind.fugue ? _tryDecodeFugueBlob(bytes) : null;
       swDecode.stop();
       if (fugue != null) {
         if (swDl.elapsedMilliseconds + swDecode.elapsedMilliseconds > 500) {
@@ -431,9 +474,18 @@ class DiskReconciler {
       // A pre-Fugue Sequence blob (old format) is NOT document text — seeding
       // from its raw bytes would produce garbage. Return empty so the caller
       // reseeds from the current disk content instead.
-      if (FugueStore.isLegacySequenceBlob(bytes)) {
+      if (kind == BlobKind.legacySequence) {
         _log.info('seed path=$relPath legacy Sequence blob — reseed from disk');
         return Fugue<String>();
+      }
+      // A format this build cannot read. Unlike the legacy case there is no
+      // safe fallback here: seeding from the raw bytes produces garbage, and
+      // seeding EMPTY is worse — the caller would diff disk against an empty
+      // tree, push a full-content blob in THIS build's format, and replace
+      // state a newer client wrote. Refusing is the only branch that does not
+      // destroy data, so it throws rather than returning a tree.
+      if (kind == BlobKind.unknownTagged) {
+        throw UnsupportedBlobFormatException(relPath);
       }
       // Genuine plain-text blob — seed deterministically. Two devices
       // independently seeding the same bytes converge by construction.
@@ -447,10 +499,55 @@ class DiskReconciler {
         'seed=${swSeed.elapsedMilliseconds}ms',
       );
       return seeded;
+    } on UnsupportedBlobFormatException {
+      // Must escape this catch-all. Swallowing it and returning an empty tree
+      // is exactly the overwrite the throw exists to prevent.
+      rethrow;
     } catch (e) {
       _log.warning('Fugue seed failed for $relPath: $e');
       return Fugue<String>();
     }
+  }
+
+  /// Loads the composite document for [fileId]: the frontmatter state and the
+  /// body tree.
+  ///
+  /// [fm] is null when the file has never been lifted — its blob is `fugue1`,
+  /// or plain text, or it is new. That is not an error, it is the ordinary
+  /// state of every note until something touches its frontmatter.
+  Future<({FmState? fm, Fugue<String> body})> loadOrSeedDocument(
+    String fileId,
+    String relPath, {
+    RpcContext? context,
+  }) async {
+    final cachedFm = await _fmStore?.get(fileId);
+    final cachedBody = await fugueStore.get(fileId);
+    if (cachedFm != null && cachedBody != null) {
+      return (fm: cachedFm, body: cachedBody);
+    }
+
+    final current = store.get(fileId);
+    if (current == null || current.tombstone || current.blobRef.isEmpty) {
+      return (fm: cachedFm, body: cachedBody ?? Fugue<String>());
+    }
+    final chunkedIO = _chunkedIOBuilder();
+    if (chunkedIO == null) {
+      return (fm: cachedFm, body: cachedBody ?? Fugue<String>());
+    }
+
+    final bytes = await chunkedIO.download(current.blobRef, context: context);
+    if (bytes == null) {
+      return (fm: cachedFm, body: cachedBody ?? Fugue<String>());
+    }
+    // The tree comes back through the ordinary path — the blob IS an ordinary
+    // fugue1 blob. The tail is read off the same bytes, and its absence is not
+    // an error: it means this note has no frontmatter state yet, which is true
+    // of every note until one is written.
+    final fm = readFmTail(bytes);
+    return (
+      fm: fm ?? cachedFm,
+      body: await loadOrSeedSequence(fileId, relPath, context: context),
+    );
   }
 
   /// Renders the deterministic line-union of a multi-value text register to
@@ -625,15 +722,36 @@ class DiskReconciler {
     _log.info('text reconcile read path=$relPath chars=${newText.length}');
 
     final swSeed = Stopwatch()..start();
-    final oldSequence = await loadOrSeedSequence(
-      fileId,
-      relPath,
-      context: context,
-    );
+    final ({FmState? fm, Fugue<String> body}) document;
+    try {
+      document = await loadOrSeedDocument(fileId, relPath, context: context);
+    } on UnsupportedBlobFormatException catch (e) {
+      // The server holds this file in a format this build cannot read. Pushing
+      // anything now would replace it, so the file is left alone entirely —
+      // local edits stay on disk and reach the vault once the client is
+      // updated. Returning false leaves the state untouched, exactly as an
+      // unavailable blob does.
+      _log.error('Skipping text reconcile for $relPath: $e');
+      _emit(SyncFileFormatUnsupported(path: relPath));
+      return false;
+    }
+    final oldSequence = document.body;
     swSeed.stop();
+
+    // Frontmatter state travels alongside the text whenever there is any to
+    // carry. Purely additive: the tree below holds the whole note either way,
+    // so a peer that ignores the tail sees exactly what it sees today.
+    final withFm = _fmStore != null;
+
+    // The tree keeps the FULL note, frontmatter region included. That is what
+    // makes the tail safe to ignore — the text alone is always the complete
+    // answer to "what does this file look like".
+    final split = splitFrontmatter(newText);
+
     _log.info(
       'text reconcile seed-done path=$relPath '
       'elements=${oldSequence.elementCount} '
+      'fm=$withFm '
       'seed=${swSeed.elapsedMilliseconds}ms',
     );
 
@@ -652,6 +770,47 @@ class DiskReconciler {
       newText: newText,
       clock: store.fugueClock,
     );
+
+    // The frontmatter half. Diffed against the materialised state rather than
+    // a remembered document, so a lost local store cannot make ingest re-add
+    // every key and undo deletions that had already propagated (§8.3).
+    FmState? newFm;
+    var fmChanged = false;
+    if (withFm) {
+      final base = document.fm ??
+          FmMapState(
+            entries: const {},
+            fmHlc: store.nextHlc(),
+            trailHlc: store.nextHlc(),
+          );
+      final diskFm = split.region == null
+          ? const FmMap([])
+          : parseFrontmatterRegion(
+              split.region!,
+              // An emptied value keeps the type it had; without this an empty
+              // list and an empty string read back the same and the kind flips
+              // between devices forever (§6.5).
+              priorKinds: _priorKinds(base),
+            );
+      newFm = applyDiskFrontmatter(base, diskFm, store.nextHlc());
+      fmChanged = materializeFm(newFm) != materializeFm(base);
+      // A note that has never had a property carries nothing, and its blob
+      // stays byte-for-byte what it is today. Tombstones still count as
+      // something to carry, or a peer that missed a delete adds the keys back.
+      // Reclaim deletions everyone has already seen — but only here, on a
+      // write that is happening anyway. A sweep of its own would rewrite every
+      // file in the vault, which is the mass re-upload this design avoids.
+      final barrier = _fmGcBarrier();
+      final seq = store.serverSeqFor(fileId);
+      if (barrier != null && seq != null && seq <= barrier) {
+        final pruned = pruneFmTombstones(newFm);
+        if (!identical(pruned, newFm)) {
+          _log.info('fm gc path=$relPath seq=$seq barrier=$barrier');
+          newFm = pruned;
+        }
+      }
+      if (!fmStateIsWorthStoring(newFm)) newFm = null;
+    }
     swDiff.stop();
     _log.info(
       'text reconcile diff-done path=$relPath '
@@ -665,13 +824,18 @@ class DiskReconciler {
     // would phantom-collapse the conflict under this device's HLC, diverging
     // peers. Only a genuinely new file (no register at all) falls through.
     if (identical(newSequence, oldSequence) &&
+        !fmChanged &&
         (current != null || store.hasConflict(fileId))) {
       return false;
     }
 
     final swUpload = Stopwatch()..start();
     _log.info('text reconcile upload-begin path=$relPath');
-    final upload = await _uploadSequenceBlob(newSequence, context: context);
+    final upload = await _uploadSequenceBlob(
+      newSequence,
+      fm: newFm,
+      context: context,
+    );
     swUpload.stop();
     _log.info(
       'text reconcile upload-done path=$relPath '
@@ -703,13 +867,11 @@ class DiskReconciler {
     if (current != null &&
         current.blobRef == upload.manifestHash &&
         !current.tombstone) {
-      fugueStore.set(fileId, newSequence);
-      await fugueStore.persistOne(fileId);
+      await _persistDocument(fileId, newSequence, newFm);
       return false;
     }
 
-    fugueStore.set(fileId, newSequence);
-    await fugueStore.persistOne(fileId);
+    await _persistDocument(fileId, newSequence, newFm);
 
     final hlc = store.nextHlc();
     store.applyLocal(
@@ -734,9 +896,10 @@ class DiskReconciler {
   Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
   uploadSequenceBlob(
     Fugue<String> seq, {
+    FmState? fm,
     RpcContext? context,
   }) =>
-      _uploadSequenceBlob(seq, context: context);
+      _uploadSequenceBlob(seq, fm: fm, context: context);
 
   /// Exposed for the conflict-resolution path in the engine — needs
   /// to probe arbitrary blob bytes when reconstructing a Fugue
@@ -744,9 +907,35 @@ class DiskReconciler {
   Fugue<String>? tryDecodeFugueBlob(Uint8List bytes) =>
       _tryDecodeFugueBlob(bytes);
 
+  /// Persists both halves. The body tree always; the frontmatter only when
+  /// this file is a composite document.
+  Future<void> _persistDocument(
+    String fileId,
+    Fugue<String> body,
+    FmState? fm,
+  ) async {
+    fugueStore.set(fileId, body);
+    await fugueStore.persistOne(fileId);
+    if (fm == null) return;
+    final fmStore = _fmStore;
+    if (fmStore == null) return;
+    fmStore.set(fileId, fm);
+    await fmStore.persistOne(fileId);
+  }
+
+  /// The kind each key currently holds, for §6.5.
+  Map<String, ScalarKind> _priorKinds(FmState state) {
+    if (state is! FmMapState) return const {};
+    return {
+      for (final e in state.entries.entries)
+        if (e.value.value case final FmScalarValue v) e.key: v.kind,
+    };
+  }
+
   Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
   _uploadSequenceBlob(
     Fugue<String> seq, {
+    FmState? fm,
     RpcContext? context,
   }) async {
     final chunkedIO = _chunkedIOBuilder();
@@ -754,7 +943,11 @@ class DiskReconciler {
     final swEncode = Stopwatch()..start();
     // Magic-prefixed compact binary — self-identifying, ~2 B/char, so peers
     // decode it back with FugueStore.tryDecodeBlob and old clients reject it.
-    final bytes = FugueStore.encodeBlob(seq);
+    var bytes = FugueStore.encodeBlob(seq);
+    // Frontmatter state rides after the tree. A reader that does not know
+    // about it decodes the tree and stops before reaching this, which is why
+    // it costs nothing to add.
+    if (fm != null) bytes = appendFmTail(bytes, fm);
     swEncode.stop();
     if (swEncode.elapsedMilliseconds > 50 || bytes.length > 256 * 1024) {
       _log.info(

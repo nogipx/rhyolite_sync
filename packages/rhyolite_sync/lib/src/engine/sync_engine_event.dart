@@ -88,6 +88,22 @@ class SyncFileTypeExcluded extends SyncEngineEvent {
   final String extension;
 }
 
+/// A file is stored in a blob format this build has no decoder for — written
+/// by a NEWER client. It is neither materialised to disk nor re-pushed, so the
+/// newer state stays intact until this client is updated.
+///
+/// Its own event rather than a [SyncError] because the two are not the same
+/// kind of thing. An error is transient and the UI clears it after a few
+/// seconds; this is a standing per-file condition that recurs on every
+/// reconcile and only ends when the user updates. Same shape as
+/// [SyncFileSizeBlocked] for that reason: a named file, a reason, and a list
+/// the UI can show.
+class SyncFileFormatUnsupported extends SyncEngineEvent {
+  SyncFileFormatUnsupported({required this.path});
+
+  final String path;
+}
+
 /// Live per-file blob transfer progress, for an "active transfers" monitor.
 /// Emitted as a file's content blob is uploaded or downloaded through
 /// [ChunkedBlobIO]. [sentBytes]/[totalBytes] are coarse (dedup-skipped chunks

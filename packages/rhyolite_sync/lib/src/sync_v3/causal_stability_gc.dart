@@ -85,6 +85,16 @@ class CausalStabilityGc {
 
   DateTime _lastRunAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  int? _minSafeHeadSeq;
+
+  /// The newest server seq every ACTIVE device has pulled past, as of the last
+  /// run — or null when that could not be established.
+  ///
+  /// Exposed so the reconciler can reclaim frontmatter tombstones on a file it
+  /// is already rewriting. It must not fetch this itself: the answer costs an
+  /// RPC, and this class already pays for it once a minute.
+  int? get minSafeHeadSeq => _minSafeHeadSeq;
+
   Future<void> run() async {
     final fugueStore = _getFugueStore();
     final history = _getHistoryCaller();
@@ -152,6 +162,7 @@ class CausalStabilityGc {
     var metaDirty = false;
     if (store != null) {
       final minSafeHead = _minSafeHead(heads.heads);
+      _minSafeHeadSeq = minSafeHead;
       if (minSafeHead != null) {
         final nowMs = DateTime.now().millisecondsSinceEpoch;
         final backfillMinAgeMs = tombstoneBackfillMinAge.inMilliseconds;

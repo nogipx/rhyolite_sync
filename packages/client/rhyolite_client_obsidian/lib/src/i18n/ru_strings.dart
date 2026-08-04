@@ -1023,6 +1023,12 @@ class RuStrings extends AppStrings {
   @override
   String blockedMeta(String size, String limit) => '$size · лимит $limit';
   @override
+  String needsNewerClient(int n) => 'Нужна свежая версия ($n)';
+  @override
+  String get needsNewerClientHint =>
+      'Сохранены устройством с более новым Rhyolite. Не трогаются ни на диске, '
+      'ни на сервере, пока вы не обновитесь. Правки здесь не синхронизируются.';
+  @override
   String andMore(int n) => '…и ещё $n';
   @override
   String conflictsLostContent(int n) => 'Конфликты с потерей содержимого ($n)';

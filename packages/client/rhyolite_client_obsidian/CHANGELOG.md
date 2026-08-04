@@ -1,3 +1,34 @@
+## [3.12.0] - 2026-08-04
+
+Properties now merge as data. Until now a note was merged character by
+character from end to end — right for prose, and blind to the one rule
+frontmatter has: a property name may appear only once. Two devices adding the
+same property at the same time each contributed their line, and the note ended
+up carrying the key twice. That is valid YAML, so nothing looked broken, and
+Properties, Dataview and every other reader quietly showed half the data.
+
+Both devices need 3.12 for the new merge. Against a device still on an older
+version the previous behaviour applies, and no property is lost either way.
+
+### Features
+
+- merge properties by name, so two devices adding the same one at the same time
+  end up with a single property holding both values (core)
+- leave a file alone when it was written by a newer version of Rhyolite, and
+  list it in the sync panel, instead of writing its internal form into the note
+  (core)
+
+### Bug Fixes
+
+- resolve a conflict between two independently created notes without
+  duplicating the properties of either (core)
+
+### Other
+
+- reclaim deleted properties once every device has seen the deletion (core)
+- bump plugin to 3.12.0 (obsidian)
+
+
 ## [3.11.0] - 2026-08-02
 
 ### Features

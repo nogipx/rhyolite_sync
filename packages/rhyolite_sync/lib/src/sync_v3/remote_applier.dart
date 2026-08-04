@@ -5,6 +5,11 @@ import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import '../frontmatter/fm_state.dart';
+import '../frontmatter/fm_store.dart';
+import '../frontmatter/fm_tail.dart';
+import '../frontmatter/frontmatter_render.dart';
+import '../frontmatter/frontmatter_split.dart';
 import 'disk_reconciler.dart';
 import 'path_normalize.dart';
 import 'state_record_codec.dart';
@@ -35,7 +40,9 @@ class RemoteApplier {
     required LogScope log,
     Set<String> Function()? excludedExtensions,
     Set<String> Function()? forcedBinaryExtensions,
-  }) : _newChunkedIO = newChunkedIO,
+    FmStore? fmStore,
+  }) : _fmStore = fmStore,
+       _newChunkedIO = newChunkedIO,
        _collectKnownChunks = collectKnownChunks,
        _emit = emit,
        _isFatalRejection = isFatalRejection,
@@ -46,6 +53,10 @@ class RemoteApplier {
 
   final FileStateStore store;
   final FugueStore fugueStore;
+
+  /// Frontmatter state, when the feature is wired. Null simply means the
+  /// merge below is text-only — which is what shipped before this existed.
+  final FmStore? _fmStore;
   final DiskReconciler reconciler;
   final StateRecordCodec codec;
   final LocalBlobStore blobStore;
@@ -378,6 +389,7 @@ class RemoteApplier {
         .toList(growable: false);
 
     final sequences = <Fugue<String>>[];
+    final frontmatters = <FmState>[];
     String? path;
     for (final state in joined.allValues) {
       if (state.path.isNotEmpty) path = state.path;
@@ -397,17 +409,31 @@ class RemoteApplier {
       // decode is sync compute; yield before each so multi-version
       // conflicts don't pin the main thread.
       await Future<void>.delayed(Duration.zero);
-      final decoded = reconciler.tryDecodeFugueBlob(bytes);
+      // Always the text path: only text files reach the text conflict resolver.
+      final kind = classifyBlob(bytes, isTextPath: true);
+      final decoded =
+          kind == BlobKind.fugue ? reconciler.tryDecodeFugueBlob(bytes) : null;
       if (decoded != null) {
         sequences.add(decoded);
-      } else if (FugueStore.isLegacySequenceBlob(bytes)) {
-        // A concurrent side still in the old Sequence format (peer not yet
-        // upgraded). We cannot merge it losslessly. Leave it out — the
+        // The frontmatter of this side, when it carried one. Absent is the
+        // ordinary case for a peer that predates the feature, and it degrades
+        // to the text-level merge below rather than to nothing.
+        final fm = readFmTail(bytes);
+        if (fm != null) frontmatters.add(fm);
+      } else if (kind == BlobKind.legacySequence ||
+          kind == BlobKind.unknownTagged) {
+        // A concurrent side we cannot read: either still in the old Sequence
+        // format (peer not yet upgraded), or in a format newer than this
+        // build. Either way we cannot merge it losslessly. Leave it out — the
         // `sequences.length < realValues.length` guard below then defers the
         // whole conflict, keeping the register multi-valued so no side is
-        // dropped until every blob is reachable in the new format.
+        // dropped until every blob is reachable in a format we understand.
+        //
+        // Deferring is what makes the newer-format case safe: collapsing the
+        // register here would seal a winner chosen from the sides this build
+        // happens to understand, discarding one it merely cannot decode.
         _log.warning(
-          'Deferring text conflict for $fileId: legacy Sequence blob present',
+          'Deferring text conflict for $fileId: ${kind.name} blob present',
         );
         continue;
       } else {
@@ -478,9 +504,32 @@ class RemoteApplier {
     // The register is NOT collapsed: it stays a CRDT MV-register and
     // converges; the union is its single-file projection.
     if (sequences.length >= 2 && !sharesGenuineHistory(sequences)) {
-      final union = deterministicLineUnion([
+      var union = deterministicLineUnion([
         for (final s in sequences) s.values.join(),
       ]);
+      // The union is line-based, so the two `---` fences collapse into one
+      // region — and that region then holds every key from both sides, the SAME
+      // duplicate-key file this work exists to eliminate. The frontmatter join
+      // gives a valid region; the body keeps the union, which is the point of
+      // this branch (nothing is dropped when there is no shared history).
+    // Rewriting the region from the joined state is only safe when EVERY side
+    // carried one. A peer without the feature contributes no tail, but its
+    // frontmatter edits are in its TEXT and the character join has already kept
+    // them — so rendering from a partial state would discard exactly the
+    // changes the merge just preserved. Worse than the duplicate key this
+    // exists to remove: that keeps both values, this drops one.
+    //
+    // Same reasoning as the deferral above: never collapse on a partial view.
+    final everySideCarriedFm = frontmatters.length == sequences.length;
+      FmState? unionFm;
+      if (everySideCarriedFm) {
+        for (final fm in frontmatters) {
+          unionFm = unionFm == null ? fm : joinFm(unionFm, fm);
+        }
+      }
+      if (unionFm != null) {
+        union = renderNote(materializeFm(unionFm), splitFrontmatter(union).body);
+      }
       final wrote = await reconciler.renderUnionView(fileId, winnerPath, union);
       if (wrote) _emit(SyncFileModified(winnerPath));
       _emit(
@@ -501,11 +550,50 @@ class RemoteApplier {
       merged = merged.join(sequences[i]);
     }
 
-    final upload = await reconciler.uploadSequenceBlob(merged);
+    // The frontmatter half, and the reason any of this was built. The
+    // character-level join above is lossless but format-blind: two devices
+    // that each added a line under `related:` produce a merged text holding
+    // the key TWICE, which is valid YAML that readers silently halve. Joining
+    // the typed states instead gives one key with both items, and the region
+    // in the text is then rewritten from it.
+    FmState? mergedFm;
+    if (frontmatters.length == sequences.length) {
+      for (final fm in frontmatters) {
+        mergedFm = mergedFm == null ? fm : joinFm(mergedFm, fm);
+      }
+    } else if (frontmatters.isNotEmpty) {
+      _log.info(
+        'Text merge for $fileId keeps the character union: '
+        '${frontmatters.length}/${sequences.length} sides carried frontmatter '
+        'state, and a partial one would drop the rest',
+      );
+    }
+    if (mergedFm != null) {
+      final text = merged.values.join();
+      final parts = splitFrontmatter(text);
+      final desired = renderNote(materializeFm(mergedFm), parts.body);
+      if (desired != text) {
+        // Raise the clock above every dot already present, exactly as the
+        // reconciler does before authoring characters — otherwise the rewrite
+        // can be stamped below adjacent content and land in the wrong place.
+        store.observeDots(merged.dots);
+        merged = await FugueTextSync.applyTextSnapshot(
+          oldFugue: merged,
+          newText: desired,
+          clock: store.fugueClock,
+        );
+      }
+    }
+
+    final upload = await reconciler.uploadSequenceBlob(merged, fm: mergedFm);
     if (upload == null) return;
 
     fugueStore.set(fileId, merged);
     await fugueStore.persistOne(fileId);
+    if (mergedFm != null) {
+      _fmStore?.set(fileId, mergedFm);
+      await _fmStore?.persistOne(fileId);
+    }
 
     final hlc = store.nextHlc();
     final sealed = FileState(

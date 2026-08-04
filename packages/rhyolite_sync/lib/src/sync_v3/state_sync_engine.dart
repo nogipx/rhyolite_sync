@@ -5,6 +5,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 
+import '../frontmatter/fm_store.dart';
 import 'causal_stability_gc.dart';
 import 'disk_reconciler.dart';
 import 'remote_applier.dart';
@@ -129,6 +130,8 @@ class StateSyncEngine implements ISyncEngine {
 
   FileStateStore? _store;
   FugueStore? _fugueStore;
+  FmStore? _fmStore;
+
   StatSigStore? _sigStore;
   DiskReconciler? _reconciler;
   StateRecordCodec? _recordCodec;
@@ -296,12 +299,14 @@ class StateSyncEngine implements ISyncEngine {
       // state-based blob path; the store stays small in vaults without
       // any text edits.
       _fugueStore = FugueStore(client: dataClient, vaultId: config.vaultId);
+      _fmStore = FmStore(client: dataClient, vaultId: config.vaultId);
       // Persistent per-file disk signatures — lets startup skip unchanged text
       // files and the reconciler short-circuit across plugin restarts.
       _sigStore = StatSigStore(client: dataClient, vaultId: config.vaultId);
       await _sigStore!.load();
       final swFugueLoad = Stopwatch()..start();
       await _fugueStore!.load();
+      await _fmStore!.load();
       swFugueLoad.stop();
       final fugueStats = _fugueStore!.stats;
       _log.info(
@@ -335,6 +340,8 @@ class StateSyncEngine implements ISyncEngine {
         forcedBinaryExtensions: () => _forcedBinaryExtensions,
         sizeBlocked: _sizeBlockedPaths,
         sigStore: _sigStore,
+        fmStore: _fmStore,
+        fmGcBarrier: () => _causalGc.minSafeHeadSeq,
         logger: _log,
       );
 
@@ -342,6 +349,7 @@ class StateSyncEngine implements ISyncEngine {
       final applier = RemoteApplier(
         store: _store!,
         fugueStore: _fugueStore!,
+        fmStore: _fmStore,
         reconciler: _reconciler!,
         codec: _recordCodec!,
         blobStore: blobStore,
@@ -736,6 +744,7 @@ class StateSyncEngine implements ISyncEngine {
     await stop();
     await _store?.wipeAll();
     await _fugueStore?.wipeAll();
+    await _fmStore?.wipeAll();
     await _sigStore?.wipeAll();
     // Re-open stores with fresh state so wipeAll persists.
     await FileStateStore(
@@ -744,6 +753,7 @@ class StateSyncEngine implements ISyncEngine {
       deviceId: config.deviceId,
     ).wipeAll();
     await FugueStore(client: dataClient, vaultId: config.vaultId).wipeAll();
+    await FmStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     await StatSigStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     // Drop the local blob cache too. Server's blob collection was wiped
     // above (state_sync_responder.wipeVault), so any cached blob is now
@@ -772,6 +782,7 @@ class StateSyncEngine implements ISyncEngine {
       deviceId: config.deviceId,
     ).wipeAll();
     await FugueStore(client: dataClient, vaultId: vaultId).wipeAll();
+    await FmStore(client: dataClient, vaultId: vaultId).wipeAll();
     await StatSigStore(client: dataClient, vaultId: vaultId).wipeAll();
     try {
       await blobStore.wipeAll(vaultId: vaultId);
@@ -793,6 +804,7 @@ class StateSyncEngine implements ISyncEngine {
       deviceId: config.deviceId,
     ).wipeAll();
     await FugueStore(client: dataClient, vaultId: config.vaultId).wipeAll();
+    await FmStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     await StatSigStore(client: dataClient, vaultId: config.vaultId).wipeAll();
     // Drop the local blob cache too. Restore is semantically "fresh
     // download from server"; keeping the cache would mask a corrupted

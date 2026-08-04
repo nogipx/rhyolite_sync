@@ -432,6 +432,11 @@ class SyncPanel {
   /// Size-blocked files keyed by path (latest event per path wins).
   final Map<String, SyncFileSizeBlocked> _blocked = {};
 
+  /// Paths the server holds in a format this build cannot read. Unlike an
+  /// error this does not clear itself: it recurs on every reconcile and ends
+  /// only when the user updates, so it lives in a list rather than a banner.
+  final Set<String> _needsNewerClient = {};
+
   /// Conflicts where a branch's bytes were unrecoverable — hard warnings.
   final List<SyncDataLoss> _dataLoss = [];
 
@@ -687,6 +692,8 @@ class SyncPanel {
       case SyncFilePulled(:final path):
         _lastSyncedAt = event.timestamp;
         _downloaded++;
+        // It materialised, so this build understands it after all.
+        _needsNewerClient.remove(path);
         if (path.isNotEmpty) {
           _pushRecent(up: false, path: path, at: event.timestamp);
         }
@@ -723,10 +730,13 @@ class SyncPanel {
         _bumpActivity();
       case SyncFileSizeBlocked():
         _blocked[event.path] = event;
+      case SyncFileFormatUnsupported(:final path):
+        _needsNewerClient.add(path);
       case SyncFileSizeUnblocked(:final path):
         _blocked.remove(path);
       case SyncFileDeleted(:final path):
         _blocked.remove(path);
+        _needsNewerClient.remove(path);
       case SyncDataLoss():
         _dataLoss.add(event);
         // Bounded: data-loss is rare, but a very long session must not grow the
@@ -1181,6 +1191,32 @@ class SyncPanel {
           'div',
           cls: 'rh-more',
           text: S.andMore(_blocked.length - 20),
+        );
+      }
+    }
+
+    // ── Files this build cannot read ──
+    // Above the data-loss section on purpose: nothing was lost here, and the
+    // fix is one the user can actually perform.
+    if (_needsNewerClient.isNotEmpty) {
+      final section = _section(
+        root,
+        icon: 'alert-triangle',
+        title: S.needsNewerClient(_needsNewerClient.length),
+        mod: 'mod-warn',
+      );
+      _el(section, 'div', cls: 'rh-hint', text: S.needsNewerClientHint);
+      final paths = _needsNewerClient.toList()..sort();
+      for (final p in paths.take(20)) {
+        final card = _el(section, 'div', cls: 'rh-card mod-warn');
+        _path(_el(card, 'div', cls: 'rh-card-title'), p);
+      }
+      if (paths.length > 20) {
+        _el(
+          section,
+          'div',
+          cls: 'rh-more',
+          text: S.andMore(paths.length - 20),
         );
       }
     }

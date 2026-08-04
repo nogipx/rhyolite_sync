@@ -1004,6 +1004,12 @@ class EnStrings extends AppStrings {
   @override
   String blockedMeta(String size, String limit) => '$size · limit $limit';
   @override
+  String needsNewerClient(int n) => 'Needs a newer version ($n)';
+  @override
+  String get needsNewerClientHint =>
+      'Saved by a device running a newer Rhyolite. Left untouched — on disk '
+      'and on the server — until you update. Editing them here will not sync.';
+  @override
   String andMore(int n) => '…and $n more';
   @override
   String conflictsLostContent(int n) => 'Conflicts with lost content ($n)';

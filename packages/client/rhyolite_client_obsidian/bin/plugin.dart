@@ -12,6 +12,7 @@ import 'package:rhyolite_client_obsidian/src/engine/auth_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_session_state.dart';
 import 'package:rhyolite_client_obsidian/src/engine/backup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
+import 'package:rhyolite_client_obsidian/src/engine/frontmatter_audit_binding.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/diagnostics_logging.dart';
 import 'package:rhyolite_client_obsidian/src/engine/device_management_modal.dart';
@@ -1478,6 +1479,29 @@ $kSyncPanelCss
               showDeviceManagementModal(plugin, engine);
             },
           );
+          // Dev builds only: it walks every note in the vault and exists to
+          // measure the frontmatter recogniser against Obsidian's own parser,
+          // which is useless to anyone not working on that recogniser.
+          if (kDebug) {
+            plugin.addCommand(
+              id: 'rhyolite-audit-frontmatter',
+              name: 'Rhyolite (dev): audit frontmatter parsing',
+              callback: () => unawaited(() async {
+                showNotice('Auditing frontmatter…');
+                final result = await auditVault(plugin.app);
+                _log.info('frontmatter audit\n${result.summary()}');
+                showNotice(
+                  result.clean
+                      ? 'Frontmatter audit: no disagreements '
+                          '(${result.withFrontmatter} notes). See logs.'
+                      : 'Frontmatter audit: '
+                          '${result.regionDisagreements.length} region, '
+                          '${result.keyDisagreements.length} key '
+                          'disagreement(s). See logs.',
+                );
+              }()),
+            );
+          }
           plugin.addCommand(
             id: 'rhyolite-storage-overview',
             name: S.storageOverviewTitle,

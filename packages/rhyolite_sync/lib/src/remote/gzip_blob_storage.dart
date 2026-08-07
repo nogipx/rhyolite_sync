@@ -27,7 +27,7 @@ import 'i_blob_storage.dart';
 ///
 ///   ChunkedBlobIO → BlobTransferHub → **GzipBlobStorage** →
 ///   EncryptedBlobStorage (or backend that encrypts internally) → wire
-class GzipBlobStorage implements IBlobStorage {
+class GzipBlobStorage implements IBlobStorage, IListableBlobStorage {
   const GzipBlobStorage({required this.inner});
 
   final IBlobStorage inner;
@@ -79,4 +79,15 @@ class GzipBlobStorage implements IBlobStorage {
   /// decorator, which pass through untouched.
   Future<Uint8List> _maybeDecompress(Uint8List bytes) async =>
       await gzipDecode(bytes) ?? bytes;
+
+  /// Enumeration passes straight through: blob ids are plaintext content
+  /// hashes at every layer of the stack, so nothing here needs decoding.
+  /// Null when the backend underneath cannot list.
+  @override
+  Future<List<String>?> listBlobIds({RpcContext? context}) {
+    final backend = inner;
+    return backend is IListableBlobStorage
+        ? backend.listBlobIds(context: context)
+        : Future<List<String>?>.value(null);
+  }
 }

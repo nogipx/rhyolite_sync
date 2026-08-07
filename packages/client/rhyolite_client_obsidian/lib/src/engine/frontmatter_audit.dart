@@ -1,6 +1,4 @@
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_document.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_parser.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_split.dart';
+import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 /// Compares our frontmatter recogniser against Obsidian's own, over the real
 /// vault.

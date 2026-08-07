@@ -105,7 +105,11 @@ Future<({
   _MemIo io,
   _MemRemote remote,
   String Function(String) fileIdFor,
-})> _newFixture({Uint8List? blobIdKey, Set<String>? excludedExtensions}) async {
+})> _newFixture({
+  Uint8List? blobIdKey,
+  Set<String>? excludedExtensions,
+  PathScope? pathScope,
+}) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
   final store = FileStateStore(client: env.client, vaultId: _vaultId);
@@ -131,6 +135,7 @@ Future<({
     blobIdKey: blobIdKey,
     excludedExtensions:
         excludedExtensions == null ? null : () => excludedExtensions,
+    pathScope: pathScope == null ? null : () => pathScope,
   );
   return (
     diff: diff,
@@ -471,6 +476,47 @@ void main() {
               'mismatched sig → delegated');
       expect(lastTotal, 1,
           reason: 'only the changed file counts toward startup progress');
+    });
+  });
+
+  group('StateStartupDiff path admission', () {
+    test('only in-scope files are uploaded, the rest are reported', () async {
+      final f = await _newFixture(pathScope: PathScope(include: ['Work']));
+      f.io.files['$_vaultPath/Work/plan.md'] = _randomBytes(1024, 1);
+      f.io.files['$_vaultPath/Personal/diary.md'] = _randomBytes(1024, 2);
+      f.io.files['$_vaultPath/loose.md'] = _randomBytes(1024, 3);
+
+      final result = await f.diff.call();
+
+      expect(result.newFiles, 1, reason: 'only Work/plan.md is in scope');
+      expect(f.remote.uploads, greaterThan(0));
+      expect(f.store.get(f.fileIdFor('Personal/diary.md')), isNull);
+      expect(f.store.get(f.fileIdFor('loose.md')), isNull);
+      expect(
+        result.outOfScope..sort(),
+        ['Personal/diary.md', 'loose.md'],
+      );
+    });
+
+    test('an out-of-scope file that IS on disk is not reported missing',
+        () async {
+      // Otherwise the engine would read it as a delete candidate — the exact
+      // confusion that would turn a narrowed scope into a mass delete.
+      final f = await _newFixture(pathScope: PathScope(include: ['Work']));
+      f.io.files['$_vaultPath/Personal/diary.md'] = _randomBytes(1024, 2);
+      f.store.upsert(FileState(
+        fileId: f.fileIdFor('Personal/diary.md'),
+        path: 'Personal/diary.md',
+        blobRef: 'manifest',
+        sizeBytes: 1024,
+        hlc: f.store.nextHlc(),
+        chunks: const <String>['c1'],
+      ));
+
+      final result = await f.diff.call();
+
+      expect(result.missingFileIds, isEmpty);
+      expect(result.outOfScope, ['Personal/diary.md']);
     });
   });
 }

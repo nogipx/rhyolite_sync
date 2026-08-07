@@ -353,4 +353,177 @@ void main() {
       expect(remote.existsCalls, 2);
     });
   });
+
+  group('VerifyBlobsUseCase — healing from disk', () {
+    test('a chunk absent from the cache is regenerated from the file',
+        () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      const manifest = 'm-disk';
+      const chunk = 'c-disk';
+      final chunkBytes = Uint8List.fromList([1, 2, 3, 4]);
+      remote.store[manifest] = Uint8List.fromList([9]);
+      remote.hideFromExists.add(chunk); // lost server-side, and not cached
+
+      store.applyLocal(FileState(
+        fileId: 'f-disk',
+        path: 'att/photo.bin',
+        blobRef: manifest,
+        sizeBytes: 4,
+        hlc: store.nextHlc(),
+        chunks: const [chunk],
+      ));
+
+      final asked = <String, Set<String>>{};
+      final result = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        recoverFromDisk: (path, wanted) async {
+          asked[path] = wanted;
+          return {chunk: chunkBytes};
+        },
+      )();
+
+      expect(result.unhealable, 0);
+      expect(result.reuploaded, 1);
+      expect(remote.store[chunk], chunkBytes,
+          reason: 'the file on disk is as good a source as the cache was');
+      expect(asked, {'att/photo.bin': {chunk}},
+          reason: 'only the ids actually missing are asked for');
+    });
+
+    test('bytes that no longer hash to the wanted id heal nothing', () async {
+      // The file changed since. A recovery that cannot produce the id simply
+      // returns without it — which is why this needs no freshness check.
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      const chunk = 'c-stale';
+      remote.store['m-stale'] = Uint8List.fromList([9]);
+      remote.hideFromExists.add(chunk);
+      store.applyLocal(FileState(
+        fileId: 'f-stale',
+        path: 'att/edited.bin',
+        blobRef: 'm-stale',
+        sizeBytes: 4,
+        hlc: store.nextHlc(),
+        chunks: const [chunk],
+      ));
+
+      final result = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        // The rewritten file produces entirely different ids.
+        recoverFromDisk: (_, __) async => {'c-other': Uint8List(4)},
+      )();
+
+      expect(result.unhealable, 1);
+      expect(result.reuploaded, 0);
+      expect(remote.store.containsKey('c-other'), isFalse,
+          reason: 'nothing may be uploaded under an id it does not hash to');
+    });
+
+    test('one file is asked once, for all of its missing chunks', () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      remote.store['m-multi'] = Uint8List.fromList([9]);
+      for (final c in ['c1', 'c2', 'c3']) {
+        remote.hideFromExists.add(c);
+      }
+      store.applyLocal(FileState(
+        fileId: 'f-multi',
+        path: 'att/big.bin',
+        blobRef: 'm-multi',
+        sizeBytes: 12,
+        hlc: store.nextHlc(),
+        chunks: const ['c1', 'c2', 'c3'],
+      ));
+
+      var calls = 0;
+      final result = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        recoverFromDisk: (_, wanted) async {
+          calls++;
+          return {for (final id in wanted) id: Uint8List(4)};
+        },
+      )();
+
+      expect(calls, 1, reason: 'reading and chunking a file per chunk is the '
+          'difference between a pass and a stall on a large attachment');
+      expect(result.reuploaded, 3);
+    });
+
+    test('the cache still wins when it has the bytes', () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      const chunk = 'c-cached';
+      final cached = Uint8List.fromList([5, 5]);
+      await local.write(cached, chunk, vaultId: _vaultId);
+      remote.store['m-cached'] = Uint8List.fromList([9]);
+      remote.hideFromExists.add(chunk);
+      store.applyLocal(FileState(
+        fileId: 'f-cached',
+        path: 'att/c.bin',
+        blobRef: 'm-cached',
+        sizeBytes: 2,
+        hlc: store.nextHlc(),
+        chunks: const [chunk],
+      ));
+
+      var diskCalls = 0;
+      await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        recoverFromDisk: (_, __) async {
+          diskCalls++;
+          return const {};
+        },
+      )();
+
+      expect(diskCalls, 0, reason: 'no reason to re-read a file we already hold');
+      expect(remote.store[chunk], cached);
+    });
+
+    test('without a disk source the old cache-only behaviour stands', () async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+
+      remote.store['m-none'] = Uint8List.fromList([9]);
+      remote.hideFromExists.add('c-none');
+      store.applyLocal(FileState(
+        fileId: 'f-none',
+        path: 'att/x.bin',
+        blobRef: 'm-none',
+        sizeBytes: 1,
+        hlc: store.nextHlc(),
+        chunks: const ['c-none'],
+      ));
+
+      final result = await VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+      )();
+
+      expect(result.unhealable, 1);
+    });
+  });
 }

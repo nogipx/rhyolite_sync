@@ -21,7 +21,8 @@ class VerifyBlobsResult {
   final int reuploaded;
 
   /// How many missing blobs could NOT be healed because their bytes are
-  /// not in the local cache (content lives only on another device).
+  /// nowhere on this device — neither in the local cache nor reproducible
+  /// from the file on disk (content lives only on another device).
   final int unhealable;
 
   bool get isClean => missing == 0;
@@ -58,6 +59,7 @@ class VerifyBlobsUseCase {
     this.existsBatch = 128,
     this.uploadBatch = 64,
     this.confirmedPresent,
+    this.recoverFromDisk,
     LogScope? logger,
   }) : _log = logger ?? LogScope.noop;
 
@@ -83,6 +85,25 @@ class VerifyBlobsUseCase {
   /// Owned per session: a blob confirmed present can later be swept away
   /// server-side, and this pass exists to catch lost uploads, not deletions.
   final Set<String>? confirmedPresent;
+
+  /// Regenerates blobs from the file still on disk: given a vault-relative
+  /// path and the ids wanted from it, returns whichever of them that file's
+  /// bytes actually produce.
+  ///
+  /// The local cache used to be the only source of a re-upload, so a chunk
+  /// lost server-side was unhealable the moment the cache no longer held it —
+  /// and the cache is precisely what we want to stop keeping for files that
+  /// are sitting on disk anyway. Chunking is deterministic, so the file is an
+  /// equally good source.
+  ///
+  /// Safe without any freshness check: the implementation returns ids only
+  /// for bytes that really hash to them, so a file edited since simply yields
+  /// different ids and nothing gets uploaded under a wrong name. Null (the
+  /// default) keeps the cache-only behaviour.
+  final Future<Map<String, Uint8List>> Function(
+    String relPath,
+    Set<String> wantedIds,
+  )? recoverFromDisk;
 
   final LogScope _log;
 
@@ -136,20 +157,50 @@ class VerifyBlobsUseCase {
     );
 
     final toUpload = <(Uint8List, String)>[];
-    var unhealable = 0;
+    final notInCache = <String>{};
     for (final id in missing) {
       context?.cancellationToken?.throwIfCancelled();
       final bytes = await localBlobStore.read(id, vaultId: vaultId);
       if (bytes == null) {
-        unhealable++;
-        final tag = id.length <= 8 ? id : id.substring(0, 8);
-        _log.warning(
-          'Blob verify: $tag missing on server and not in '
-          'local cache — cannot heal from this device',
-        );
+        notInCache.add(id);
         continue;
       }
       toUpload.add((bytes, id));
+    }
+
+    // Second source: the file itself. Group the survivors by the path that
+    // references them so a file is read and chunked once, not once per chunk.
+    if (notInCache.isNotEmpty && recoverFromDisk != null) {
+      final byPath = <String, Set<String>>{};
+      for (final state in store.allValuesFlat) {
+        if (state.tombstone || state.path.isEmpty) continue;
+        for (final id in [state.blobRef, ...state.chunks]) {
+          if (notInCache.contains(id)) {
+            (byPath[state.path] ??= <String>{}).add(id);
+          }
+        }
+      }
+      for (final entry in byPath.entries) {
+        context?.cancellationToken?.throwIfCancelled();
+        try {
+          final recovered = await recoverFromDisk!(entry.key, entry.value);
+          for (final found in recovered.entries) {
+            if (!notInCache.remove(found.key)) continue;
+            toUpload.add((found.value, found.key));
+          }
+        } catch (e) {
+          _log.warning('Blob verify: disk recovery for ${entry.key} failed: $e');
+        }
+      }
+    }
+
+    final unhealable = notInCache.length;
+    for (final id in notInCache) {
+      final tag = id.length <= 8 ? id : id.substring(0, 8);
+      _log.warning(
+        'Blob verify: $tag missing on server, absent from the local cache '
+        'and not reproducible from disk — cannot heal from this device',
+      );
     }
 
     var reuploaded = 0;

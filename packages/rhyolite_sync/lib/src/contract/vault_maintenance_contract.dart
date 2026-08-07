@@ -186,6 +186,66 @@ class ReleaseBlobsResponse implements IRpcSerializable {
       };
 }
 
+/// "Which of these blob ids does nothing reference any more?"
+///
+/// The read-only half of [ReleaseBlobsRequest], and it exists for storage the
+/// server cannot reach: on a bring-your-own S3/WebDAV vault the blobs live in
+/// the user's own bucket, so the server can neither enumerate them nor delete
+/// them — but it still holds every state record and history event, which is
+/// all the live set is computed from. So the client enumerates its bucket, asks
+/// here, and deletes what comes back.
+///
+/// The split matters for the same reason it does in [ReleaseBlobsRequest]:
+/// chunks are content-addressed and shared, a peer's un-merged concurrent
+/// value is its own row, and a client that decides for itself is how blobs go
+/// silently missing. Nothing here deletes anything.
+class ClassifyBlobsRequest implements IRpcSerializable {
+  const ClassifyBlobsRequest({required this.vaultId, required this.blobIds});
+
+  final String vaultId;
+
+  /// Candidates to judge. Ids the server has never heard of come back as dead,
+  /// which is exactly right for a bucket orphan.
+  final List<String> blobIds;
+
+  factory ClassifyBlobsRequest.fromJson(Map<String, dynamic> json) =>
+      ClassifyBlobsRequest(
+        vaultId: json['vaultId'] as String,
+        blobIds:
+            ((json['blobIds'] as List?) ?? const []).whereType<String>().toList(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {'vaultId': vaultId, 'blobIds': blobIds};
+}
+
+class ClassifyBlobsResponse implements IRpcSerializable {
+  const ClassifyBlobsResponse({
+    required this.requested,
+    required this.deadBlobIds,
+  });
+
+  final int requested;
+
+  /// The subset of the request nothing references. Everything else is live and
+  /// deliberately not listed — the caller must delete only what is named here.
+  final List<String> deadBlobIds;
+
+  factory ClassifyBlobsResponse.fromJson(Map<String, dynamic> json) =>
+      ClassifyBlobsResponse(
+        requested: (json['requested'] as num?)?.toInt() ?? 0,
+        deadBlobIds: ((json['deadBlobIds'] as List?) ?? const [])
+            .whereType<String>()
+            .toList(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'requested': requested,
+        'deadBlobIds': deadBlobIds,
+      };
+}
+
 @RpcService(
   name: 'RhyoliteVaultMaintenance',
   transferMode: RpcDataTransferMode.codec,
@@ -194,6 +254,12 @@ abstract class IVaultMaintenanceContract {
   @RpcMethod.unary(name: 'sweepOrphanBlobs')
   Future<SweepOrphanBlobsResponse> sweepOrphanBlobs(
     SweepOrphanBlobsRequest request, {
+    RpcContext? context,
+  });
+
+  @RpcMethod.unary(name: 'classifyBlobs')
+  Future<ClassifyBlobsResponse> classifyBlobs(
+    ClassifyBlobsRequest request, {
     RpcContext? context,
   });
 

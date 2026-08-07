@@ -39,6 +39,7 @@ class RemoteApplier {
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
     Set<String> Function()? excludedExtensions,
+    PathScope Function()? pathScope,
     Set<String> Function()? forcedBinaryExtensions,
     FmStore? fmStore,
   }) : _fmStore = fmStore,
@@ -48,6 +49,7 @@ class RemoteApplier {
        _isFatalRejection = isFatalRejection,
        _log = log,
        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+       _pathScope = pathScope ?? (() => PathScope.everything),
        _forcedBinaryExtensions =
            forcedBinaryExtensions ?? (() => const <String>{});
 
@@ -73,6 +75,11 @@ class RemoteApplier {
   /// Live per-device denylist of extensions (no dot) not synced on this device.
   /// A remote file of an excluded type is not downloaded/written (download-skip).
   final Set<String> Function() _excludedExtensions;
+
+  /// Live per-device folder filter. An out-of-scope remote state still joins
+  /// into the store — the metadata is cheap and keeping it is what lets a later
+  /// widening backfill the file — but nothing touches disk for it.
+  final PathScope Function() _pathScope;
 
   /// Live vault-global set of extensions (no dot) forced onto the binary path.
   /// Must match every peer's — the classification here selects the conflict
@@ -267,6 +274,30 @@ class RemoteApplier {
       );
       return;
     }
+    // Path admission (per-device folder filter). The register has already been
+    // joined, so the CRDT converges and the pull cursor advances — this device
+    // simply never touches disk for a file the user put out of scope.
+    //
+    // The gate sits ABOVE the conflict dispatch on purpose. An out-of-scope
+    // file has no local contribution here (the reconciler refuses to push it),
+    // so any divergence is between other peers; sealing a resolution for it
+    // would publish a merge computed from content this device deliberately
+    // does not track. Leaving the register divergent lets a device that does
+    // sync the file resolve it — or this one, once the scope widens.
+    final scopedPath = joined.allValues
+        .map((s) => s.path)
+        .firstWhere((p) => p.isNotEmpty, orElse: () => knownPath);
+    if (scopedPath.isNotEmpty && !_pathScope().allows(scopedPath)) {
+      await store.persistOne(fileId);
+      _emit(SyncFileOutOfScope(path: scopedPath));
+      swApply.stop();
+      _log.info(
+        'apply fileId=$fileId path=$scopedPath records=${records.length} '
+        'total=${swApply.elapsedMilliseconds}ms result=out-of-scope',
+      );
+      return;
+    }
+
     if (!joined.hasConflict) {
       final swMaterialise = Stopwatch()..start();
       await _materialise(joined.singleValue!, context: context);
@@ -671,6 +702,18 @@ class RemoteApplier {
   /// Write a single canonical [FileState] to disk and update the synced
   /// blob ref. No-op when the file already matches.
   Future<void> _materialise(FileState state, {RpcContext? context}) async {
+    // Path admission, second line of defence — [apply] already turned every
+    // out-of-scope file away, but this is the one method that DELETES from
+    // disk, so it re-checks rather than trusting its callers. Note the check
+    // precedes the tombstone branch, unlike the type denylist below: a peer's
+    // delete of an out-of-scope path must not reach this device, where the
+    // user still keeps that file and only asked us to stop syncing it.
+    //
+    // Deliberately no [recordSyncedBlobRef]: leaving the LCA untouched is what
+    // marks the state "never materialised here", which is how the startup
+    // backfill recognises a file that has just come back into scope.
+    if (!_pathScope().allows(state.path)) return;
+
     if (state.tombstone) {
       final fullPath = '$vaultPath/${state.path}';
       if (await io.fileExists(fullPath)) {

@@ -176,4 +176,115 @@ void main() {
       expect(r.deleted, 1);
     });
   });
+
+  group('regenerable blobs', () {
+    FileState binary(String id, {required List<String> chunks, String? path}) =>
+        FileState(
+          fileId: id,
+          path: path ?? 'att/$id.bin',
+          blobRef: 'manifest-$id',
+          sizeBytes: 1,
+          hlc: Hlc(1, 0, 'A'),
+          chunks: chunks,
+        );
+
+    test('drops the chunks of a file that can rebuild them', () async {
+      await _seedBlob(blobs, 'manifest-a', [1]);
+      await _seedBlob(blobs, 'chunk-a', [2]);
+      store.upsert(binary('a', chunks: ['chunk-a']));
+
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        isRegenerable: (_) async => true,
+      )();
+
+      expect(r.deleted, 2, reason: 'the manifest is derivable too');
+      expect(await blobs.listBlobIds(vaultId: _v), isEmpty);
+    });
+
+    test('keeps them when the file cannot rebuild them', () async {
+      await _seedBlob(blobs, 'manifest-a', [1]);
+      await _seedBlob(blobs, 'chunk-a', [2]);
+      store.upsert(binary('a', chunks: ['chunk-a']));
+
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        isRegenerable: (_) async => false,
+      )();
+
+      expect(r.deleted, 0);
+    });
+
+    test('a chunk shared with a file that cannot rebuild it survives',
+        () async {
+      // Content addressing means one chunk can belong to several files. The
+      // deciding vote is the owner that still needs it kept.
+      await _seedBlob(blobs, 'manifest-a', [1]);
+      await _seedBlob(blobs, 'manifest-b', [1]);
+      await _seedBlob(blobs, 'shared', [2]);
+      store.upsert(binary('a', chunks: ['shared']));
+      store.upsert(binary('b', chunks: ['shared']));
+
+      await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        // Only 'a' is on disk.
+        isRegenerable: (state) async => state.fileId == 'a',
+      )();
+
+      final left = await blobs.listBlobIds(vaultId: _v);
+      expect(left, contains('shared'),
+          reason: "b still needs it, and b's copy is the only one left");
+      expect(left, contains('manifest-b'));
+      expect(left, isNot(contains('manifest-a')));
+    });
+
+    test('a sibling sync claim outranks regenerability', () async {
+      await _seedBlob(blobs, 'manifest-a', [1]);
+      await _seedBlob(blobs, 'chunk-a', [2]);
+      store.upsert(binary('a', chunks: ['chunk-a']));
+
+      await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        externalLiveIds: () => {'chunk-a'},
+        isRegenerable: (_) async => true,
+      )();
+
+      final left = await blobs.listBlobIds(vaultId: _v);
+      expect(left, ['chunk-a'],
+          reason: 'the settings sync stores its blobs here too, and no file '
+              'on disk can rebuild those');
+    });
+
+    test('without the predicate nothing referenced is dropped', () async {
+      await _seedBlob(blobs, 'manifest-a', [1]);
+      await _seedBlob(blobs, 'chunk-a', [2]);
+      store.upsert(binary('a', chunks: ['chunk-a']));
+
+      final r = await LocalBlobGc(
+        store: store, blobStore: blobs, vaultId: _v)();
+
+      expect(r.deleted, 0, reason: 'the behaviour that shipped before this');
+    });
+
+    test('orphans are still collected regardless', () async {
+      await _seedBlob(blobs, 'nobody', [9]);
+
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        isRegenerable: (_) async => true,
+      )();
+
+      expect(r.deleted, 1);
+    });
+  });
 }

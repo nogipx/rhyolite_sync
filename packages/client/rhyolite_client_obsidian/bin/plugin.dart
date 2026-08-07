@@ -361,7 +361,7 @@ Future<void> _launchConfigSync({
   // the toggle) means a vault whose plan changed stops capturing immediately.
   final gate = pluginCodeAvailability(
     selfHost: _selfHostActive,
-    externalStorage: engine.config.externalBlobConfig != null,
+    externalStorage: engine.config.externalStorageKind != null,
     managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
   );
   final pluginCodeOn = prefs.categories.contains(
@@ -638,6 +638,10 @@ void main() {
   bootstrapPlugin(
     extraCss: '''
       .rhyolite-setting-desc { color: var(--text-muted); font-size: 0.85em; }
+      .rhyolite-group-note {
+        color: var(--text-muted); font-size: 0.85em;
+        margin: -0.5em 0 0.75em 0;
+      }
       .rhyolite-vault-label { font-weight: 500; }
 $kSyncPanelCss
 ''',
@@ -1027,12 +1031,21 @@ $kSyncPanelCss
             // The managed per-file size limit only applies to managed storage —
             // not BYO/external, where we never see the bytes. Callback so a
             // tier change is picked up without reconstructing the engine.
-            maxFileSizeBytes: () => activeConfig.externalBlobConfig != null
+            //
+            // Keyed on the non-secret marker: the credentials are never
+            // persisted, so this snapshot has `externalBlobConfig == null` even
+            // on a BYO vault, and asking it applied the managed plan's
+            // per-file cap to storage the plan does not govern.
+            maxFileSizeBytes: () => activeConfig.externalStorageKind != null
                 ? null
                 : _capabilities?.maxFileSizeBytes,
             // Per-device denylist, read live so a settings change is picked up
             // on the next reconcile without reconstructing the engine.
             excludedExtensions: () => fileFilterPrefs.excludedExtensions,
+            // Per-device folder filter, same live-read contract. Narrowing
+            // takes effect on the next reconcile; widening needs the restart
+            // the settings callback performs.
+            pathScope: () => fileFilterPrefs.pathScope,
           );
           _engine = engine;
           // Settings sync stores plugin-code blobs in the SAME local cache
@@ -1119,7 +1132,12 @@ $kSyncPanelCss
 
           // Backend/tier labels for the panel — stable at construction, so
           // derived from the connection mode rather than (later-fetched) caps.
-          final byo = activeConfig.externalBlobConfig != null;
+          //
+          // From the non-secret marker: the credentials are deliberately never
+          // persisted, so a boot-time config has `externalBlobConfig == null`
+          // on a BYO vault too, and reading it labelled every such vault
+          // "Managed" on every launch.
+          final byo = activeConfig.externalStorageKind != null;
           final String backendLabel;
           if (selfHostActive) {
             final host = Uri.tryParse(selfHost.syncUrl)?.host;
@@ -1373,16 +1391,16 @@ $kSyncPanelCss
             },
             fileFilterPrefs: () => fileFilterPrefs,
             onFileFilterChanged: (next) async {
-              // Persist + swap the live var; the engine reads the denylist
-              // through its callback, so uploads/downloads for changed types
-              // take effect on the next reconcile/pull. Re-including a type
-              // that was previously skipped re-fetches its files on the next
-              // server notify (or via the panel's Download-from-server action).
-              // No refreshSettings() — the extensions text field fires per
-              // keystroke and a tab rebuild would drop the caret.
+              // Persist + swap the live var, then restart. A pull would be
+              // enough for NARROWING (the next reconcile turns the file away),
+              // but widening either filter has to re-scan disk for files that
+              // were never uploaded and backfill states the applier skipped —
+              // both of which only happen inside StartupDiff. The settings tab
+              // commits on an explicit Save precisely so this restart is a
+              // deliberate act and not a consequence of typing a character.
               fileFilterPrefs = next;
               await configStorage.saveFileFilter(next.toJson());
-              engine.triggerPull();
+              await restartForAuth();
             },
             // Vault-global force-binary list — read from / written to the
             // engine's encrypted vault-meta so it is the same on every device.
@@ -2108,10 +2126,14 @@ void Function() _registerSettings({
     authConfig: authConfig,
     authClient: auth.client,
     accountClient: accountClient,
-    onFetchUsage: (selfHostEnabled || config.externalBlobConfig != null)
-        ? () async =>
-              null // no managed quota on self-host / BYO
-        : () => _fetchVaultUsage(engine, config.vaultId),
+    // Evaluated per call, not once at wiring: a vault can be marked BYO after
+    // this closure is built (the credentials arrive from the server during
+    // start()), and a ternary resolved here would keep fetching a managed
+    // quota that does not apply.
+    onFetchUsage: () async =>
+        (selfHostEnabled || engine.config.externalStorageKind != null)
+            ? null // no managed quota on self-host / BYO
+            : _fetchVaultUsage(engine, config.vaultId),
     openUrl: _openExternalUrl,
     authWebUrl: kEnv.siteUrl,
     onConfigChanged: (updated) async {
@@ -2240,7 +2262,7 @@ void Function() _registerSettings({
     // session, and the measurement lands asynchronously after boot.
     pluginCodeAvailability: () => pluginCodeAvailability(
       selfHost: selfHostEnabled,
-      externalStorage: engine.config.externalBlobConfig != null,
+      externalStorage: engine.config.externalStorageKind != null,
       managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
     ),
     pluginCodeSize: () {
@@ -2250,7 +2272,7 @@ void Function() _registerSettings({
     onShowStorageOverview: () => _showStorageOverview(
       plugin,
       engine,
-      fetchUsage: (selfHostEnabled || config.externalBlobConfig != null)
+      fetchUsage: (selfHostEnabled || engine.config.externalStorageKind != null)
           ? null
           : () => _fetchVaultUsage(engine, config.vaultId),
     ),

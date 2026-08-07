@@ -38,6 +38,18 @@ export 'src/crypto/i_vault_cipher.dart';
 export 'src/crypto/passphrase_validator.dart';
 export 'src/crypto/vault_cipher.dart';
 
+// --- Frontmatter (text-level surface only) ------------------------------
+// The parse/render half is public because a host may legitimately want to read
+// a note's properties the same way the engine does — the in-plugin audit
+// against Obsidian's own parser is exactly that. The CRDT half (fm_state,
+// fm_codec, fm_tail, fm_store, frac_index) stays private: it is how the engine
+// stores and merges, and an embedder reaching into it would be depending on a
+// representation, not on a meaning.
+export 'src/frontmatter/frontmatter_document.dart';
+export 'src/frontmatter/frontmatter_parser.dart';
+export 'src/frontmatter/frontmatter_render.dart';
+export 'src/frontmatter/frontmatter_split.dart';
+
 // --- Chunking ----------------------------------------------------------
 export 'src/chunking/blob_manifest.dart';
 export 'src/chunking/content_defined_chunker.dart';
@@ -67,6 +79,7 @@ export 'src/engine/sync_engine_event.dart';
 export 'src/engine/vault_config.dart';
 export 'src/sync_v3/blob_classifier.dart';
 export 'src/sync_v3/blob_janitor.dart';
+export 'src/sync_v3/byo_blob_janitor.dart';
 export 'src/sync_v3/chunked_blob_io.dart';
 export 'src/sync_v3/content_materializer.dart';
 export 'src/sync_v3/file_state.dart';
@@ -76,6 +89,7 @@ export 'src/sync_v3/fugue_store.dart';
 export 'src/sync_v3/fugue_text_sync.dart';
 export 'src/sync_v3/history_browser.dart';
 export 'src/sync_v3/local_blob_gc.dart';
+export 'src/sync_v3/path_scope.dart';
 export 'src/sync_v3/record_id.dart';
 export 'src/sync_v3/notify_coordinator.dart';
 export 'src/sync_v3/stat_sig_store.dart';
@@ -99,6 +113,7 @@ export 'src/use_cases/conflict_list_use_case.dart';
 export 'src/use_cases/device_registry_use_case.dart';
 export 'src/use_cases/diff_text_use_case.dart';
 export 'src/use_cases/inspect_backup_use_case.dart';
+export 'src/use_cases/local_cache_usage_use_case.dart';
 export 'src/use_cases/repair_vault_use_case.dart';
 export 'src/use_cases/restore_backup_use_case.dart';
 export 'src/use_cases/vault_stats_use_case.dart';

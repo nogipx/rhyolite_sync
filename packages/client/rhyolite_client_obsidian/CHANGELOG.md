@@ -1,3 +1,56 @@
+## [3.13.0] - 2026-08-07
+
+Choose which folders this device syncs. The only filter so far was by file
+type, so putting one folder on a phone meant naming every folder you did not
+want. Now you name the ones you do — from a picker that lists your vault's
+folders with their file counts, or by typing them — and you can punch a hole
+in that: sync `Work`, skip `Work/scratch`.
+
+The filter belongs to the device, not the vault. Nothing about it reaches the
+server or your other devices, and leaving a folder out is not a delete — those
+files stay on disk, stay on the server, and keep syncing everywhere else. Add
+a folder back and its files arrive on the next sync.
+
+Attachments no longer take up twice the space. Each one was kept twice on the
+device: once as the file in your vault, once inside the plugin's own database.
+The second copy is now dropped once the first is in place, so a vault that is
+mostly attachments roughly halves what the plugin occupies. Notes keep theirs,
+because what is stored for a note is its editing history — the thing that makes
+conflict-free merging possible in the first place. Storage overview has a new
+Local database card showing the split.
+
+Settings say who they apply to. The file-type and folder filters are yours
+alone; the "sync as whole files" list is shared with every device you sync.
+Those sat under one heading with nothing to tell them apart, and now sit under
+two that say which is which. The file-type list moved to an explicit Save
+along the way, since applying either filter restarts sync.
+
+### Features
+
+- sync only the folders you choose on this device, with an optional list of
+  folders to skip inside them (obsidian)
+- see what the plugin itself occupies on this device, split between notes and
+  attachments, in Storage overview (obsidian)
+- reclaim unreferenced files from your own S3 or WebDAV storage: your device
+  lists the bucket, the server decides what is safe to remove (core)
+- restore a file the server has lost from the copy already in your vault, not
+  only from the plugin's cache (core)
+
+### Bug Fixes
+
+- a vault on your own storage no longer reports itself as managed after a
+  restart, and no longer applies the managed plan's per-file size limit to
+  storage that plan does not govern (obsidian)
+- WebDAV: recreate the vault folder and retry when the server reports it
+  missing, instead of failing the upload (core)
+- stop re-sending a directory-creation request to S3, which has no directories
+  (core)
+
+### Other
+
+- bump plugin to 3.13.0 (obsidian)
+
+
 ## [3.12.0] - 2026-08-04
 
 Properties now merge as data. Until now a note was merged character by

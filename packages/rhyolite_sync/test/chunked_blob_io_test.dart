@@ -276,4 +276,55 @@ void main() {
       expect(got!.length, content.length);
     });
   });
+
+  group('recompute', () {
+    test('reproduces exactly the ids upload produced', () async {
+      // The load-bearing claim behind healing from disk and behind dropping a
+      // binary's cached chunks: the same bytes yield the same blobs, manifest
+      // included. If these ever drift, a re-upload lands under an id nothing
+      // refers to and the file stays broken while the pass reports success.
+      final original = _bytes('a' * 700 + 'b' * 700);
+      final uploaded = await io.upload(original, {});
+
+      final produced = await io.recompute(original);
+
+      expect(
+        produced.keys.toSet(),
+        {...uploaded.chunkHashes, uploaded.manifestHash},
+        reason: 'chunks AND the manifest must both come back',
+      );
+      for (final hash in uploaded.chunkHashes) {
+        expect(produced[hash], isNotNull);
+      }
+    });
+
+    test('the recomputed bytes reassemble into the original file', () async {
+      final original = _bytes('x' * 500 + 'y' * 500);
+      final uploaded = await io.upload(original, {});
+
+      final produced = await io.recompute(original);
+      final rebuilt = <int>[];
+      for (final hash in uploaded.chunkHashes) {
+        rebuilt.addAll(produced[hash]!);
+      }
+
+      expect(rebuilt, original);
+    });
+
+    test('different bytes produce different ids, so a stale file heals nothing',
+        () async {
+      final uploaded = await io.upload(_bytes('c' * 900), {});
+      final produced = await io.recompute(_bytes('c' * 900 + 'tail'));
+
+      expect(produced.containsKey(uploaded.manifestHash), isFalse);
+    });
+
+    test('caches nothing and uploads nothing', () async {
+      final before = remote.store.length;
+      await io.recompute(_bytes('quiet'));
+
+      expect(remote.store.length, before);
+      expect(await local.listBlobIds(vaultId: _v), isEmpty);
+    });
+  });
 }

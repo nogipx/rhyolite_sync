@@ -88,6 +88,20 @@ class SyncFileTypeExcluded extends SyncEngineEvent {
   final String extension;
 }
 
+/// A file lies outside this device's [PathScope] — the user restricted sync to
+/// a set of folders and this path is not in them. Neither uploaded (local) nor
+/// materialised (remote), and a local delete of it is not propagated.
+///
+/// Device-local like [SyncFileTypeExcluded], and equally non-destructive: the
+/// file stays on disk, stays on the server, and peers keep syncing it. Emitted
+/// for every out-of-scope path during the startup scan and whenever a
+/// reconcile / apply touches one, so the UI can rebuild its list from truth.
+class SyncFileOutOfScope extends SyncEngineEvent {
+  SyncFileOutOfScope({required this.path});
+
+  final String path;
+}
+
 /// A file is stored in a blob format this build has no decoder for — written
 /// by a NEWER client. It is neither materialised to disk nor re-pushed, so the
 /// newer state stays intact until this client is updated.

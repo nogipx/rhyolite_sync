@@ -271,6 +271,75 @@ class RevokeSubscriptionResponse implements IRpcSerializable {
   Map<String, dynamic> toJson() => {'revoked': revoked};
 }
 
+/// Records a refund that was already paid out by hand.
+///
+/// The acquirer (Сам.Эквайринг) has no refund operation at all — money goes
+/// back as an ordinary transfer, see docs/operations/billing-runbook.md. This
+/// only writes down what happened so the user's payment history stops
+/// claiming the invoice is simply "paid".
+class RefundInvoiceRequest implements IRpcSerializable {
+  const RefundInvoiceRequest({
+    required this.invoiceRef,
+    required this.refundedAmountKopecks,
+    this.reason,
+  });
+
+  /// Either the acquirer's `order_id` or the invoice record id. The order id
+  /// is what the Selfwork cabinet shows, so it is the one an operator has.
+  final String invoiceRef;
+
+  /// Kopecks actually returned. Equal to the invoice amount for a full
+  /// refund, less for the pro-rata case.
+  final int refundedAmountKopecks;
+
+  final String? reason;
+
+  factory RefundInvoiceRequest.fromJson(Map<String, dynamic> json) =>
+      RefundInvoiceRequest(
+        invoiceRef: json['invoiceRef'] as String,
+        refundedAmountKopecks:
+            (json['refundedAmountKopecks'] as num).toInt(),
+        reason: json['reason'] as String?,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'invoiceRef': invoiceRef,
+        'refundedAmountKopecks': refundedAmountKopecks,
+        if (reason != null) 'reason': reason,
+      };
+}
+
+class RefundInvoiceResponse implements IRpcSerializable {
+  const RefundInvoiceResponse({
+    required this.invoiceId,
+    required this.status,
+    required this.refundedAmountKopecks,
+  });
+
+  final String invoiceId;
+
+  /// `refunded` or `partially_refunded`.
+  final String status;
+
+  final int refundedAmountKopecks;
+
+  factory RefundInvoiceResponse.fromJson(Map<String, dynamic> json) =>
+      RefundInvoiceResponse(
+        invoiceId: json['invoiceId'] as String,
+        status: json['status'] as String,
+        refundedAmountKopecks:
+            (json['refundedAmountKopecks'] as num).toInt(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'invoiceId': invoiceId,
+        'status': status,
+        'refundedAmountKopecks': refundedAmountKopecks,
+      };
+}
+
 class ChangeUserRoleRequest implements IRpcSerializable {
   const ChangeUserRoleRequest({
     required this.targetUserId,
@@ -341,6 +410,12 @@ abstract class IAdminContract {
   @RpcMethod.unary(name: 'changeUserRole')
   Future<ChangeUserRoleResponse> changeUserRole(
     ChangeUserRoleRequest request, {
+    RpcContext? context,
+  });
+
+  @RpcMethod.unary(name: 'refundInvoice')
+  Future<RefundInvoiceResponse> refundInvoice(
+    RefundInvoiceRequest request, {
     RpcContext? context,
   });
 }

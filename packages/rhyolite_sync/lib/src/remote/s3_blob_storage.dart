@@ -52,6 +52,7 @@ class S3BlobConfig extends ExternalBlobConfig {
     return HttpBlobStorage(
       baseUrl: baseUrl,
       prefix: 'blobs/$vaultId/',
+      backend: HttpBlobBackend.s3,
       httpClient: httpClient,
       auth: S3HttpBlobAuth(
         accessKey: accessKey,
@@ -106,6 +107,7 @@ class WebDavBlobConfig extends ExternalBlobConfig {
     return HttpBlobStorage(
       baseUrl: baseUrl,
       prefix: 'blobs/$vaultId/',
+      backend: HttpBlobBackend.webdav,
       httpClient: httpClient,
       auth: BasicHttpBlobAuth(username: username, password: password),
     );

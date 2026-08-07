@@ -195,6 +195,14 @@ class RuStrings extends AppStrings {
       'очистки) и маркеры удалённых файлов, которые уже увидели все устройства. '
       'Содержимое остаётся восстановимым через историю / точки восстановления.';
   @override
+  String get reclaimStorageByoDescription =>
+      'Объекты в вашем хранилище, на которые больше не ссылается ни один файл, '
+      'ни запись истории, ни точка восстановления — обычно остатки прерванных '
+      'загрузок. Устройство перечисляет бакет, а решение принимает сервер: '
+      'только он видит данные всех ваших устройств.';
+  @override
+  String reclaimedByo(int n) => 'Освобождено объектов: $n.';
+  @override
   String get totalBlobs => 'Всего блобов';
   @override
   String get orphanedBlobsReclaimable => 'Осиротевшие блобы (освобождаемые)';
@@ -226,6 +234,22 @@ class RuStrings extends AppStrings {
   String get storageOverviewTitle => 'Обзор хранилища';
   @override
   String get contentThisDevice => 'Содержимое (это устройство)';
+  @override
+  String get localDatabaseSection => 'Локальная база';
+  @override
+  String get localDatabaseTotal => 'Всего на этом устройстве';
+  @override
+  String get localDatabaseNotes => 'Заметки';
+  @override
+  String get localDatabaseAttachments => 'Вложения';
+  @override
+  String get localDatabaseReclaimable => 'Можно освободить';
+  @override
+  String get localDatabaseExplainer =>
+      'Сколько занимает собственное хранилище плагина — это отдельно от файлов '
+      'в вашем хранилище. Заметки хранятся вместе с историей правок, именно она '
+      'позволяет сливать изменения без конфликтов. Вложения хранятся копией '
+      'самого файла.';
   @override
   String get notSyncedYet => 'Ещё не синхронизировано.';
   @override
@@ -731,15 +755,47 @@ class RuStrings extends AppStrings {
       'отладочные логи этого устройства на адрес выше. Логи включают пути '
       'файлов, id, хэши, размеры и тайминги — но не содержимое файлов.';
   @override
-  String get fileTypesSection => 'Типы файлов';
+  String get deviceSettingsSection => 'Только на этом устройстве';
+  @override
+  String get deviceSettingsNote =>
+      'Хранится в этой установке и никуда не передаётся. Другие ваши устройства '
+      'не затронуты, а исключённое остаётся и на диске, и на сервере.';
+  @override
+  String get sharedSettingsSection => 'Общие для всех устройств';
+  @override
+  String get sharedSettingsNote =>
+      'Хранится вместе с хранилищем, поэтому значение одинаково на каждом '
+      'устройстве, где вы синхронизируетесь.';
+  @override
+  String get syncOnlyPaths => 'Синхронизировать только эти папки';
+  @override
+  String get syncOnlyPathsDescription =>
+      'Список через запятую (напр. Работа, Личное/Дневник). Если он задан, это '
+      'устройство не синхронизирует ничего за пределами этих папок. Оставьте '
+      'пустым, чтобы синхронизировать всё хранилище. Возврат папки скачает её '
+      'файлы при следующей синхронизации.';
+  @override
+  String get dontSyncPaths => 'Не синхронизировать эти папки';
+  @override
+  String get dontSyncPathsDescription =>
+      'Список через запятую, применяется поверх списка выше — можно '
+      'синхронизировать Работа, но пропустить Работа/черновики.';
+  @override
+  String get chooseFolders => 'Выбрать папки…';
+  @override
+  String get chooseFoldersToSkip => 'Выбрать папки для пропуска…';
+  @override
+  String get deviceFiltersSaved =>
+      'Фильтры сохранены. Синхронизация перезапускается.';
+  @override
+  String get noFoldersFound => 'В этом хранилище пока нет папок.';
   @override
   String get dontSyncExtensions => 'Не синхронизировать эти расширения';
   @override
   String get dontSyncDescription =>
       'Список через запятую (напр. pdf, zip, mp4). Файлы с этими расширениями '
-      'пропускаются только на этом устройстве — не загружаются и не скачиваются. '
-      'Другие устройства не затронуты. Оставьте пустым, чтобы синхронизировать '
-      'всё. Возврат типа скачает его файлы при следующей синхронизации.';
+      'не загружаются и не скачиваются. Оставьте пустым, чтобы синхронизировать '
+      'все типы. Возврат типа скачает его файлы при следующей синхронизации.';
   @override
   String get forceBinaryExtensions => 'Синхронизировать эти расширения целиком';
   @override
@@ -747,17 +803,13 @@ class RuStrings extends AppStrings {
       'Список через запятую (напр. excalidraw, drawio). Такие файлы '
       'синхронизируются целыми снимками по правилу «последний победил», а не '
       'построчным слиянием — это верный выбор для структурных форматов '
-      '(рисунки, диаграммы), которые слияние текста испортит. Общий список для '
-      'всех ваших устройств. .excalidraw.md и .canvas всегда обрабатываются так. '
-      'Существующие файлы переведутся при следующем изменении. Нажмите '
-      '«Сохранить», чтобы применить.';
+      '(рисунки, диаграммы), которые слияние текста испортит. .excalidraw.md и '
+      '.canvas всегда обрабатываются так. Существующие файлы переведутся при '
+      'следующем изменении.';
   @override
-  String get forceBinarySave => 'Сохранить';
+  String get forceBinarySaved => 'Сохранено. Применится на всех устройствах.';
   @override
-  String get forceBinarySaved =>
-      'Список сохранён. Он применится на всех устройствах.';
-  @override
-  String forceBinarySaveFailed(Object error) => 'Не удалось сохранить: $error';
+  String filtersSaveFailed(Object error) => 'Не удалось сохранить: $error';
 
   // ── Settings: external storage ──
   @override

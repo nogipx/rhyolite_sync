@@ -136,6 +136,7 @@ typedef _Fixture = ({
 
 Future<_Fixture> _newFixture({
   int? Function()? maxFileSizeBytes,
+  PathScope? pathScope,
   bool frontmatter = true,
   int? fmGcBarrier,
 }) async {
@@ -179,6 +180,7 @@ Future<_Fixture> _newFixture({
     fileIdFor: fileIdFor,
     emit: events.add,
     maxFileSizeBytes: maxFileSizeBytes,
+    pathScope: pathScope == null ? null : () => pathScope,
     fmStore: frontmatter ? fmStore : null,
     fmGcBarrier: () => fmGcBarrier,
   );
@@ -871,6 +873,75 @@ void main() {
         '---\nx: 2\n---\nbody\n',
         reason: 'the note itself is untouched',
       );
+    });
+  });
+
+  group('DiskReconciler - path admission', () {
+    test('an in-scope file syncs normally', () async {
+      final f = await _newFixture(pathScope: PathScope(include: ['Work']));
+      f.io.files['$_vaultPath/Work/plan.md'] = _bytes('hello');
+
+      final changed = await f.reconciler.reconcileWithDisk('Work/plan.md');
+
+      expect(changed, isTrue);
+      expect(f.store.get(f.fileIdFor('Work/plan.md')), isNotNull);
+      expect(f.events.whereType<SyncFileOutOfScope>(), isEmpty);
+    });
+
+    test('an out-of-scope file is neither read nor uploaded', () async {
+      final f = await _newFixture(pathScope: PathScope(include: ['Work']));
+      f.io.files['$_vaultPath/Personal/diary.md'] = _bytes('secret');
+
+      final changed = await f.reconciler.reconcileWithDisk('Personal/diary.md');
+
+      expect(changed, isFalse);
+      expect(f.store.get(f.fileIdFor('Personal/diary.md')), isNull,
+          reason: 'no FileState is minted for a path out of scope');
+      expect(f.remote.store, isEmpty, reason: 'nothing was uploaded');
+      expect(
+        f.events.whereType<SyncFileOutOfScope>().map((e) => e.path),
+        ['Personal/diary.md'],
+      );
+    });
+
+    test('narrowing the scope does not tombstone what falls out of it',
+        () async {
+      // The file was synced while everything was in scope...
+      final wide = await _newFixture();
+      wide.io.files['$_vaultPath/Personal/diary.md'] = _bytes('secret');
+      await wide.reconciler.reconcileWithDisk('Personal/diary.md');
+      final fileId = wide.fileIdFor('Personal/diary.md');
+      expect(wide.store.get(fileId)?.tombstone, isFalse);
+
+      // ...then the user restricts sync to Work/ and deletes the file (or it
+      // simply stops being visible). A delete reaches the reconciler as a
+      // reconcile of a path with no file behind it; out of scope, that must
+      // NOT become a tombstone the peers would act on.
+      final narrow = await _newFixture(pathScope: PathScope(include: ['Work']));
+      narrow.store.applyLocal(wide.store.get(fileId)!);
+      // no file on disk in the narrow fixture
+
+      final changed =
+          await narrow.reconciler.reconcileWithDisk('Personal/diary.md');
+
+      expect(changed, isFalse);
+      expect(narrow.store.get(fileId)?.tombstone, isFalse,
+          reason: 'a scope change is not a delete');
+    });
+
+    test('exclude carves a hole inside an included folder', () async {
+      final f = await _newFixture(
+        pathScope: PathScope(include: ['Work'], exclude: ['Work/scratch']),
+      );
+      f.io.files['$_vaultPath/Work/plan.md'] = _bytes('keep');
+      f.io.files['$_vaultPath/Work/scratch/tmp.md'] = _bytes('drop');
+
+      expect(await f.reconciler.reconcileWithDisk('Work/plan.md'), isTrue);
+      expect(
+        await f.reconciler.reconcileWithDisk('Work/scratch/tmp.md'),
+        isFalse,
+      );
+      expect(f.store.get(f.fileIdFor('Work/scratch/tmp.md')), isNull);
     });
   });
 }

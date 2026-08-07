@@ -21,7 +21,7 @@ import 'i_blob_storage.dart';
 /// the caller from waiting; the underlying task continues if other
 /// subscribers exist, and only fires its own cancel when the last
 /// subscriber leaves.
-class BlobTransferHub implements IBlobStorage {
+class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
   BlobTransferHub({
     required this.inner,
     this.maxConcurrent = 3,
@@ -29,6 +29,17 @@ class BlobTransferHub implements IBlobStorage {
 
   final IBlobStorage inner;
   final int maxConcurrent;
+
+  /// Enumeration passes straight through: blob ids are plaintext content
+  /// hashes at every layer of the stack, so nothing here needs decoding.
+  /// Null when the backend underneath cannot list.
+  @override
+  Future<List<String>?> listBlobIds({RpcContext? context}) {
+    final backend = inner;
+    return backend is IListableBlobStorage
+        ? backend.listBlobIds(context: context)
+        : Future<List<String>?>.value(null);
+  }
 
   final Map<String, _DownloadTask> _downloads = {};
   final Map<String, _UploadTask> _uploads = {};

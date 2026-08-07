@@ -46,3 +46,25 @@ abstract interface class IBlobStorage {
     RpcContext? context,
   });
 }
+
+/// A backend that can enumerate what it holds.
+///
+/// Separate from [IBlobStorage] because most cannot, and the ones that can do
+/// it over a protocol of their own (S3 `list-type=2`, WebDAV `PROPFIND`). Only
+/// one caller needs it: the bring-your-own orphan sweep, which has to know what
+/// is actually in the user's bucket before it can ask the server which of it is
+/// dead. Everything else addresses blobs by id and never asks "what is there?".
+///
+/// Decorators ([GzipBlobStorage], [EncryptedBlobStorage]) forward this when the
+/// backend they wrap supports it — the ids are plaintext content hashes at
+/// every layer, so listing needs no decoding.
+abstract interface class IListableBlobStorage implements IBlobStorage {
+  /// Every blob id the backend holds for this vault, or null when it cannot
+  /// enumerate at all (protocol unsupported, request refused).
+  ///
+  /// A short listing is not a hazard and needs no special signal: the sweep
+  /// only ever deletes ids it was shown, so missing a page costs a later
+  /// sweep, not data. Null exists to keep "I cannot answer" from reading as
+  /// "the bucket is empty" in a caller that reports findings to the user.
+  Future<List<String>?> listBlobIds({RpcContext? context});
+}

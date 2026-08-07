@@ -21,12 +21,17 @@ class StateStartupDiffResult {
   /// type-exclusion denylist. The engine emits [SyncFileTypeExcluded] for each.
   final List<({String path, String extension})> excluded;
 
+  /// Files skipped this scan because they fall outside the per-device
+  /// [PathScope]. The engine emits [SyncFileOutOfScope] for each.
+  final List<String> outOfScope;
+
   const StateStartupDiffResult({
     required this.newFiles,
     required this.modifiedFiles,
     required this.missingFileIds,
     this.blocked = const [],
     this.excluded = const [],
+    this.outOfScope = const [],
   });
 }
 
@@ -114,6 +119,7 @@ class StateStartupDiff {
     Uint8List? recordIdKey,
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
+    PathScope Function()? pathScope,
     Set<String> Function()? forcedBinaryExtensions,
     LogScope? logger,
   })  : _blobIdKey = blobIdKey,
@@ -121,12 +127,18 @@ class StateStartupDiff {
         _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
         _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
         _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+        _pathScope = pathScope ?? (() => PathScope.everything),
         _forcedBinaryExtensions =
             forcedBinaryExtensions ?? (() => const <String>{}),
         log = logger ?? LogScope.noop;
 
   /// Live per-device denylist of extensions (no dot) not synced on this device.
   final Set<String> Function() _excludedExtensions;
+
+  /// Live per-device folder filter. Out-of-scope paths are not read or
+  /// uploaded, and leave no stat signature — so widening the scope makes the
+  /// next scan re-evaluate them from scratch.
+  final PathScope Function() _pathScope;
 
   /// Live vault-global set of extensions (no dot) forced onto the binary path.
   final Set<String> Function() _forcedBinaryExtensions;
@@ -170,7 +182,9 @@ class StateStartupDiff {
         FileTypeDetector(extraBinaryExtensions: _forcedBinaryExtensions());
     final blocked = <({String path, int sizeBytes, int limitBytes})>[];
     final excluded = <({String path, String extension})>[];
+    final outOfScope = <String>[];
     final denylist = _excludedExtensions();
+    final scope = _pathScope();
 
     // First pass: scan disk, collect which files need upload and read
     // their bytes. We don't upload yet so we know how many to push and
@@ -196,6 +210,14 @@ class StateStartupDiff {
       final relPath = normalizeVaultPath(absPath.substring(vaultPath.length + 1));
       if (_isHidden(relPath)) continue;
       diskRelPaths.add(relPath);
+
+      // Path admission (per-device folder filter): out of scope means the file
+      // is not read, hashed or uploaded. Recorded in [diskRelPaths] first, so
+      // an out-of-scope file that IS on disk never lands in [missingFileIds].
+      if (!scope.allows(relPath)) {
+        outOfScope.add(relPath);
+        continue;
+      }
 
       // Type admission (per-device denylist): skip excluded extensions — not
       // read/uploaded, and no stat signature written, so a re-included type is
@@ -539,6 +561,7 @@ class StateStartupDiff {
       missingFileIds: missingFileIds,
       blocked: blocked,
       excluded: excluded,
+      outOfScope: outOfScope,
     );
   }
 

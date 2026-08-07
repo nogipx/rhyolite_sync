@@ -60,6 +60,27 @@ docker compose up -d
 Clients connect to `wss://SYNC_DOMAIN` with the token as their bearer secret.
 Postgres schemas and MinIO buckets are created on first run.
 
+### Upgrading from 1.x to 2.0.0
+
+2.0.0 stores blobs in **one bucket, keyed by a per-vault prefix**. Every 1.x
+release used a bucket per vault, and those objects are not where the new
+layout looks for them — so after the upgrade a vault appears empty even
+though nothing was lost.
+
+Your notes on disk are untouched, and re-uploading them is the fix:
+
+1. Upgrade the server (`docker compose pull && docker compose up -d`).
+2. On the device that has the complete vault, open **Settings → Rhyolite Sync
+   → Troubleshooting → Re-upload from this device**.
+3. Your other devices download the re-uploaded files on their next sync.
+
+Pick the source device deliberately: re-upload makes it the source of truth
+and replaces the server's history with what it holds. If your devices have
+drifted, sync them to each other on 1.x first, then upgrade.
+
+The old per-vault buckets are left alone by all of this. Once your vaults
+read and write correctly, they are yours to delete and reclaim the space.
+
 ### TLS (`SYNC_DOMAIN`)
 
 Caddy terminates TLS and reverse-proxies the WebSocket to the server. What you

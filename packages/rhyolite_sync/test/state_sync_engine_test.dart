@@ -633,6 +633,167 @@ void main() {
       );
     });
 
+    test('the folder filter keeps out-of-scope files off disk, and widening '
+        'it backfills them', () async {
+      final remote = _MemRemote();
+
+      // Device A syncs the whole vault and publishes two files in different
+      // folders.
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      a.io.files['$_vaultPath/Work/plan.bin'] =
+          Uint8List.fromList(List.generate(64, (i) => i));
+      a.io.files['$_vaultPath/Personal/diary.bin'] =
+          Uint8List.fromList(List.generate(64, (i) => 255 - i));
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+      expect(records.length, 2, reason: 'A must publish both files');
+
+      // Device B syncs only Work/. The scope is read live, so the same engine
+      // instance can be restarted with a wider one below — exactly what the
+      // settings callback does.
+      var scope = PathScope(include: ['Work']);
+      final b = await _Harness.create(
+        sharedRemote: remote,
+        pathScope: () => scope,
+      );
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      expect(b.io.files.containsKey('$_vaultPath/Work/plan.bin'), isTrue,
+          reason: 'the in-scope file is materialised');
+      expect(b.io.files.containsKey('$_vaultPath/Personal/diary.bin'), isFalse,
+          reason: 'the out-of-scope file must not be written to disk');
+      expect(
+        b.events.whereType<SyncFileOutOfScope>().map((e) => e.path),
+        contains('Personal/diary.bin'),
+      );
+
+      // The user widens the scope to the whole vault and the host restarts the
+      // engine. The pull cursor has long since passed those records, so only
+      // the startup backfill can bring the file down.
+      scope = PathScope.everything;
+      await b.engine.stop();
+      // Cursor already at the head: a fresh pull returns nothing new, which is
+      // the whole point — the backfill works off local state, not the wire.
+      b.state.recordsFor = (since) => const [];
+      await b.engine.start();
+
+      expect(b.io.files.containsKey('$_vaultPath/Personal/diary.bin'), isTrue,
+          reason: 'widening the scope must backfill what was skipped');
+      expect(
+        b.io.files['$_vaultPath/Personal/diary.bin'],
+        a.io.files['$_vaultPath/Personal/diary.bin'],
+        reason: 'and the bytes must be the real content',
+      );
+    });
+
+    test('an out-of-scope file costs no bandwidth — its blobs are never '
+        'requested, not merely discarded after the fact', () async {
+      final remote = _MemRemote();
+
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      a.io.files['$_vaultPath/Work/plan.bin'] =
+          Uint8List.fromList(List.generate(64, (i) => i));
+      a.io.files['$_vaultPath/Personal/diary.bin'] =
+          Uint8List.fromList(List.generate(64, (i) => 255 - i));
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+      expect(records.length, 2);
+
+      final b = await _Harness.create(
+        sharedRemote: remote,
+        pathScope: () => PathScope(include: ['Work']),
+      );
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      remote.downloadedIds.clear();
+      await b.engine.start();
+
+      expect(b.io.files.containsKey('$_vaultPath/Work/plan.bin'), isTrue);
+      expect(b.io.files.containsKey('$_vaultPath/Personal/diary.bin'), isFalse);
+
+      // Which record carries which path is only visible after decrypting, so
+      // identify them by what was fetched: exactly one file's chunks may have
+      // been asked for, and the other's must never appear on the wire.
+      final asked = remote.downloadedIds.toSet();
+      final fetched =
+          records.where((r) => r.chunks.any(asked.contains)).toList();
+      expect(fetched, hasLength(1),
+          reason: 'only the in-scope file may reach the network');
+      final skipped =
+          records.firstWhere((r) => !identical(r, fetched.single));
+      for (final chunk in skipped.chunks) {
+        expect(asked, isNot(contains(chunk)),
+            reason: 'no chunk of a filtered file may be requested');
+      }
+      expect(asked, isNot(contains(skipped.blobRef)),
+          reason: 'not even its manifest');
+    });
+
+    test("an attachment's chunks leave the cache once the file itself holds "
+        'them, and it still syncs', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'att/photo.bin')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/att/photo.bin'] =
+          Uint8List.fromList(List.generate(4096, (i) => (i * 37) % 256));
+      h.changes.emit(const FileCreatedEvent(relativePath: 'att/photo.bin'));
+      await pushed;
+
+      // Right after the upload the cache holds a full second copy: that is
+      // what the eviction exists to remove.
+      final cachedBefore =
+          await h.engine.blobStore.listBlobIds(vaultId: _vaultId);
+      expect(cachedBefore, isNotEmpty);
+
+      await h.engine.runLocalBlobGc();
+
+      final cachedAfter =
+          await h.engine.blobStore.listBlobIds(vaultId: _vaultId);
+      expect(cachedAfter, isEmpty,
+          reason: 'the vault file is the copy; the cache need not be a second');
+
+      // And the file is still perfectly syncable: the record the peer needs
+      // was pushed, and its bytes are on the server, not in our cache.
+      final pushedState = h.state.puts
+          .expand((p) => p.items)
+          .lastWhere((it) => !it.tombstone);
+      expect(pushedState.chunks, isNotEmpty);
+      for (final chunk in pushedState.chunks) {
+        expect(h.remote.store.containsKey(chunk), isTrue,
+            reason: 'evicting locally must never touch the server copy');
+      }
+    });
+
+    test('a text note keeps its cached blob — disk holds a projection, not it',
+        () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'note.md')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.md'] =
+          Uint8List.fromList('hello notes'.codeUnits);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
+      await pushed;
+
+      await h.engine.runLocalBlobGc();
+
+      expect(await h.engine.blobStore.listBlobIds(vaultId: _vaultId), isNotEmpty,
+          reason: "a note's blob is its Fugue tree, which disk does not hold");
+    });
+
     test('a pushed file is not re-pushed on every notify-triggered pull '
         '(no push -> notify -> pull -> push storm)', () async {
       // Regression: the server echoes a device's own write back as a notify;
@@ -920,6 +1081,7 @@ class _Harness {
     PriorityTaskScheduler? scheduler,
     IVaultCipher? cipher,
     Set<String> Function()? excludedExtensions,
+    PathScope Function()? pathScope,
     ITokenProvider? tokenProvider,
   }) async {
     final env = await DataServiceFactory.inMemory();
@@ -950,6 +1112,7 @@ class _Harness {
       changeProvider: changes,
       scheduler: sched,
       excludedExtensions: excludedExtensions,
+      pathScope: pathScope,
       connectionFactory: ({required serverUrl, tokenProvider, logger}) {
         connection.boundProviders.add(tokenProvider);
         return connection;
@@ -1139,6 +1302,11 @@ class _FakeConnection implements SyncConnection {
 class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
+  /// Every blob id this device actually asked the server for. Lets a test
+  /// assert that a filtered file cost no bandwidth, not merely that it was
+  /// left off disk.
+  final List<String> downloadedIds = [];
+
   @override
   Future<Set<String>> exists(
     List<String> blobIds, {
@@ -1162,10 +1330,13 @@ class _MemRemote implements IBlobStorage {
   Future<Map<String, Uint8List>> download(
     List<String> blobIds, {
     RpcContext? context,
-  }) async => {
-    for (final id in blobIds)
-      if (store.containsKey(id)) id: store[id]!,
-  };
+  }) async {
+    downloadedIds.addAll(blobIds);
+    return {
+      for (final id in blobIds)
+        if (store.containsKey(id)) id: store[id]!,
+    };
+  }
 
   @override
   Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {

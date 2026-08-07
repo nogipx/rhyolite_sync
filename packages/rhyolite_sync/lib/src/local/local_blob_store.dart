@@ -62,18 +62,32 @@ class LocalBlobStore {
 
   /// All blob ids in the local cache for [vaultId]. Used by the local
   /// blob cache garbage collector to find candidates for deletion.
-  Future<List<String>> listBlobIds({required String vaultId}) async {
+  Future<List<String>> listBlobIds({required String vaultId}) async => [
+        for (final entry in await listBlobSizes(vaultId: vaultId)) entry.id,
+      ];
+
+  /// Every blob in the local cache with the size it occupies.
+  ///
+  /// Reads descriptors, never bodies — the size is a column, so weighing the
+  /// whole cache costs a listing rather than a full read of every chunk. That
+  /// is the difference between an overview the UI can open on demand and one
+  /// that stalls a phone on a gigabyte of attachments.
+  Future<List<({String id, int sizeBytes})>> listBlobSizes({
+    required String vaultId,
+  }) async {
     final collection = _collection(vaultId);
-    final ids = <String>[];
+    final out = <({String id, int sizeBytes})>[];
     String? cursor;
     while (true) {
       final response = await _repo.listBlobs(
         ListBlobsRequest(collection: collection, cursor: cursor),
       );
-      ids.addAll(response.items.map((d) => d.id));
+      for (final d in response.items) {
+        out.add((id: d.id, sizeBytes: d.length));
+      }
       cursor = response.nextCursor;
       if (cursor == null) break;
     }
-    return ids;
+    return out;
   }
 }

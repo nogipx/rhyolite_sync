@@ -1,11 +1,14 @@
 import '../local/local_blob_store.dart';
+import 'file_state.dart';
 import 'file_state_store.dart';
 
 /// Garbage-collects blobs in the local cache that are no longer referenced.
 ///
 /// A blob is "live" when it is either:
 /// - the current content of some file (file_state.blobRef), or
-/// - claimed by a sibling sync sharing this cache (see [externalLiveIds]).
+/// - claimed by a sibling sync sharing this cache (see [externalLiveIds]),
+///
+/// and is NOT regenerable from the vault itself (see [isRegenerable]).
 ///
 /// `lastSyncedBlobRef` used to be pinned here too, as a 3-way merge base. That
 /// merge is gone (see [StateConflictResolver]: every file reaching it was
@@ -25,6 +28,7 @@ class LocalBlobGc {
     required this.blobStore,
     required this.vaultId,
     this.externalLiveIds,
+    this.isRegenerable,
   });
 
   final FileStateStore store;
@@ -41,6 +45,25 @@ class LocalBlobGc {
   /// is the one failure this must never have; a postponed sweep costs nothing.
   final Set<String>? Function()? externalLiveIds;
 
+  /// Whether a file's blobs can be rebuilt from the file itself, so the cache
+  /// need not hold a second copy of them.
+  ///
+  /// This is what stops an attachment costing its own size twice — once in the
+  /// vault, once here as chunks. Chunking is deterministic, so for a binary
+  /// still sitting on disk the cache is pure duplication; the pull path
+  /// already treats a cache miss as routine and refetches, and blob verify can
+  /// now re-derive a lost chunk from the file.
+  ///
+  /// Applies only where the answer is exact. A text file's blob is its Fugue
+  /// tree — the disk holds a rendered projection, not the blob — so text is
+  /// never regenerable and its cache entries stay. Null (the default) keeps
+  /// every referenced blob, the behaviour that shipped before this.
+  ///
+  /// A blob is dropped only when EVERY state referencing it says yes: chunks
+  /// are content-addressed and shared, and one shared with a file that is not
+  /// on disk must survive.
+  final Future<bool> Function(FileState state)? isRegenerable;
+
   Future<LocalBlobGcResult> call() async {
     final live = <String>{};
 
@@ -49,12 +72,26 @@ class LocalBlobGc {
       return const LocalBlobGcResult(scanned: 0, deleted: 0, skipped: true);
     }
     if (external != null) live.addAll(external);
+    // Blobs referenced by at least one state that CANNOT rebuild them. A
+    // shared chunk is kept if any of its owners needs it kept, which is why
+    // this is collected separately rather than decided per state.
+    final pinned = <String>{};
+    final regenerable = isRegenerable;
     // Walk every TaggedValue across all registers — multi-value registers
     // pin each concurrent version's blobs until the resolver collapses
     // them (doc §9).
     for (final state in store.allValuesFlat) {
-      if (state.blobRef.isNotEmpty) live.add(state.blobRef);
-      live.addAll(state.chunks);
+      final refs = [
+        if (state.blobRef.isNotEmpty) state.blobRef,
+        ...state.chunks,
+      ];
+      live.addAll(refs);
+      if (regenerable == null || !await regenerable(state)) pinned.addAll(refs);
+    }
+    // Anything live only on behalf of files that can rebuild it is dropped —
+    // the vault is holding those bytes already.
+    if (regenerable != null) {
+      live.removeWhere((id) => !pinned.contains(id) && !(external?.contains(id) ?? false));
     }
     final List<String> allBlobIds;
     try {

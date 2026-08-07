@@ -19,6 +19,7 @@ import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
 import 'build_env.dart';
 import 'db_recovery.dart';
+import 'folder_scope_modal.dart';
 import 'modal_lock.dart';
 import 'obsidian_config_storage.dart';
 import 'self_host_modal.dart';
@@ -74,8 +75,9 @@ void Function() registerSettingsTab({
   // this device's debug logs to a collector URL for support/debugging.
   required DiagnosticsPrefs Function() diagnosticsPrefs,
   required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
-  // Per-device file-type sync filter (denylist of extensions this device skips
-  // both uploading and downloading). Device-local; default empty (sync all).
+  // Per-device sync filters (folders + file types this device skips, both
+  // uploading and downloading). Device-local; default empty (sync all).
+  // Applying them restarts the engine — see [addDeviceFiltersSection].
   required FileFilterPrefs Function() fileFilterPrefs,
   required Future<void> Function(FileFilterPrefs next) onFileFilterChanged,
   // Vault-global force-binary list (synced across devices via the engine's
@@ -398,49 +400,121 @@ void Function() registerSettingsTab({
       );
     }
 
-    // Per-device file-type filter — a denylist of extensions this device skips
-    // both uploading and downloading. Device-local (not synced), so each device
-    // decides what it can afford. Text onChange never refreshes the tab so the
-    // caret stays put while typing.
-    void addFileFilterSection(PluginSettingsTab t) {
-      t.addSection(S.fileTypesSection);
+    // Per-device filters: which folders and file types THIS device syncs.
+    // One group, one Save — applying any of them restarts the engine, because
+    // only a full startup scan re-evaluates every path and materialises what a
+    // widened filter brought back into view. That rules out the per-keystroke
+    // commit the extension field used to have. The folder pickers commit
+    // straight away: clicking through a folder list IS the explicit action.
+    void addDeviceFiltersSection(PluginSettingsTab t) {
+      var include = fileFilterPrefs().pathScope.include;
+      var exclude = fileFilterPrefs().pathScope.exclude;
+      var extensions = fileFilterPrefs().excludedExtensions;
+
+      Future<void> commit() async {
+        try {
+          await onFileFilterChanged(
+            fileFilterPrefs().copyWith(
+              excludedExtensions: extensions,
+              pathScope: PathScope(include: include, exclude: exclude),
+            ),
+          );
+          showNotice(S.deviceFiltersSaved);
+          tab.show();
+        } catch (e) {
+          showNotice(S.filtersSaveFailed(e));
+        }
+      }
+
+      _addGroupHeading(t, S.deviceSettingsSection, S.deviceSettingsNote);
+      t.addText(
+        name: S.syncOnlyPaths,
+        description: S.syncOnlyPathsDescription,
+        initialValue: PathScope.render(include),
+        placeholder: 'Work, Personal/Journal',
+        onChange: (v) => include = PathScope.parse(v),
+      );
+      t.addButton(
+        name: '',
+        description: '',
+        buttonText: S.chooseFolders,
+        onClick: () async {
+          final picked = await showFolderScopeModal(
+            plugin,
+            title: S.syncOnlyPaths,
+            description: S.syncOnlyPathsDescription,
+            initial: include,
+          );
+          if (picked == null) return;
+          include = picked;
+          await commit();
+        },
+      );
+      t.addText(
+        name: S.dontSyncPaths,
+        description: S.dontSyncPathsDescription,
+        initialValue: PathScope.render(exclude),
+        placeholder: 'Work/scratch',
+        onChange: (v) => exclude = PathScope.parse(v),
+      );
+      t.addButton(
+        name: '',
+        description: '',
+        buttonText: S.chooseFoldersToSkip,
+        onClick: () async {
+          final picked = await showFolderScopeModal(
+            plugin,
+            title: S.dontSyncPaths,
+            description: S.dontSyncPathsDescription,
+            initial: exclude,
+          );
+          if (picked == null) return;
+          exclude = picked;
+          await commit();
+        },
+      );
       t.addText(
         name: S.dontSyncExtensions,
         description: S.dontSyncDescription,
-        initialValue: fileFilterPrefs().display,
+        initialValue: FileFilterPrefs.render(extensions),
         placeholder: 'pdf, zip, mp4',
-        onChange: (v) => onFileFilterChanged(
-          fileFilterPrefs().copyWith(
-            excludedExtensions: FileFilterPrefs.parse(v),
-          ),
-        ),
+        onChange: (v) => extensions = FileFilterPrefs.parse(v),
+      );
+      t.addButton(
+        name: '',
+        description: '',
+        buttonText: S.save,
+        onClick: commit,
       );
     }
 
-    // Vault-global "sync as whole files" list. Server round-trip, so unlike the
-    // per-device denylist it commits on an explicit Save button (not per
-    // keystroke). The text field feeds an edit buffer; Save persists via the
-    // engine, which writes it to the encrypted vault-meta slot for every device.
-    void addForcedBinarySection(PluginSettingsTab t) {
+    // The other half of the pair: settings that belong to the VAULT, so every
+    // device sees the same value. Currently just the force-binary list, which
+    // has to match across devices — the classification picks the conflict
+    // resolver, and a per-device mismatch would make two peers resolve one
+    // divergence differently and never converge. Server round-trip, hence its
+    // own Save.
+    void addSharedFiltersSection(PluginSettingsTab t) {
       var buffer = forcedBinaryExtensions();
+      _addGroupHeading(t, S.sharedSettingsSection, S.sharedSettingsNote);
       t.addText(
         name: S.forceBinaryExtensions,
         description: S.forceBinaryDescription,
-        initialValue: (forcedBinaryExtensions().toList()..sort()).join(', '),
+        initialValue: FileFilterPrefs.render(forcedBinaryExtensions()),
         placeholder: 'excalidraw, drawio',
         onChange: (v) => buffer = FileFilterPrefs.parse(v),
       );
       t.addButton(
         name: '',
         description: '',
-        buttonText: S.forceBinarySave,
+        buttonText: S.save,
         onClick: () async {
           try {
             await onForcedBinaryChanged(buffer);
             showNotice(S.forceBinarySaved);
             tab.show();
           } catch (e) {
-            showNotice(S.forceBinarySaveFailed(e));
+            showNotice(S.filtersSaveFailed(e));
           }
         },
       );
@@ -522,11 +596,13 @@ void Function() registerSettingsTab({
       );
     }
 
-    // Per-device file-type filter — only meaningful once a vault is connected.
+    // Sync filters, split by who they apply to — only meaningful once a vault
+    // is connected. The split is the point: the two groups used to share one
+    // "File types" heading, which put a device-local denylist and a
+    // vault-global list side by side with nothing to tell them apart.
     if (currentConfig.vaultId.isNotEmpty) {
-      addFileFilterSection(t);
-      // Vault-global "sync as whole files" list lives in the same section.
-      addForcedBinarySection(t);
+      addDeviceFiltersSection(t);
+      addSharedFiltersSection(t);
     }
 
     // Settings sync (.obsidian) — placed below "File types" as a normal open
@@ -668,6 +744,19 @@ void Function() registerSettingsTab({
   return tab.show; // caller can trigger a refresh
 }
 
+/// A section heading plus a muted note under it.
+///
+/// [PluginSettingsTab.addSection] renders the heading alone, and for the
+/// device-vs-vault split the note IS the point: whether a setting stays on
+/// this install or reaches every device is not something the reader should
+/// have to infer from a paragraph three rows down.
+void _addGroupHeading(PluginSettingsTab t, String title, String note) {
+  t.addSection(title);
+  final el = jsu.callMethod<Object>(t.containerEl, 'createEl', ['div']);
+  jsu.setProperty(el, 'className', 'rhyolite-group-note');
+  jsu.setProperty(el, 'textContent', note);
+}
+
 // ---------------------------------------------------------------------------
 // External storage settings
 // ---------------------------------------------------------------------------
@@ -680,14 +769,26 @@ void _addExternalStorageSection(
 }) {
   t.addSection(S.externalStorageSection);
 
+  // Decided by the NON-SECRET marker, not by the secret. The credentials are
+  // never written to data.json — they live only in the E2EE config on the
+  // server and are fetched into memory during start() — so a config loaded
+  // from disk has `externalBlobConfig == null` ALWAYS, and asking it made a
+  // configured vault look unconfigured on every launch.
+  final kind = config.externalStorageKind;
   final current = config.externalBlobConfig;
 
-  if (current != null) {
-    // Show current config summary + disconnect button.
+  if (kind != null) {
+    // The endpoint comes from the secret when it is loaded; before that only
+    // the backend name is known, which is still the thing the user asked
+    // about ("did my WebDAV setting survive?").
     final summary = switch (current) {
       S3BlobConfig(:final endpoint, :final bucket) => 'S3: $endpoint/$bucket',
       WebDavBlobConfig(:final endpoint) => 'WebDAV: $endpoint',
-      _ => 'Custom',
+      _ => switch (kind) {
+          's3' => 'S3',
+          'webdav' => 'WebDAV',
+          _ => 'Custom',
+        },
     };
     t.addCustom((s) {
       s.setName(S.connected);

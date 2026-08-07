@@ -11,6 +11,7 @@ import '../sync_v3/file_state.dart';
 import '../sync_v3/file_state_store.dart';
 import '../sync_v3/fugue_store.dart';
 import '../sync_v3/fugue_text_sync.dart';
+import '../sync_v3/path_scope.dart';
 import '../sync_v3/record_id.dart';
 
 /// Result of a vault repair pass.
@@ -64,6 +65,7 @@ class RepairVaultUseCase {
     required this.logWarning,
     this.forcedBinaryExtensions = const <String>{},
     this.recordIdKey,
+    this.pathScope = PathScope.everything,
   });
 
   final IPlatformIO io;
@@ -80,6 +82,11 @@ class RepairVaultUseCase {
   /// Snapshot of the vault-global force-binary extension policy, so a
   /// user-forced-binary file is NOT rebuilt as a Fugue text tree here.
   final Set<String> forcedBinaryExtensions;
+
+  /// This device's folder filter. Repair reseeds a file's Fugue tree AND
+  /// uploads it, so running it over an out-of-scope path would push exactly
+  /// the content the user told this device not to sync.
+  final PathScope pathScope;
 
   /// Caller-supplied uploader. The engine wires this to its
   /// chunked-blob + cipher + remote-storage pipeline so this use case
@@ -106,6 +113,7 @@ class RepairVaultUseCase {
     for (final abs in all) {
       final rel = abs.substring(vaultPath.length + 1);
       if (_isHidden(rel)) continue;
+      if (!pathScope.allows(rel)) continue;
       if (!detector.isText(rel)) continue;
       textPaths.add(rel);
     }

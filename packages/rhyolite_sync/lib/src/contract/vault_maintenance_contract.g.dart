@@ -13,12 +13,19 @@ class VaultMaintenanceContractNames {
   static const service = 'RhyoliteVaultMaintenance';
   static String instance(String suffix) => '$service\_$suffix';
   static const sweepOrphanBlobs = 'sweepOrphanBlobs';
+  static const classifyBlobs = 'classifyBlobs';
   static const releaseBlobs = 'releaseBlobs';
   static const sweepStableTombstones = 'sweepStableTombstones';
 }
 
 class VaultMaintenanceContractCodecs {
   const VaultMaintenanceContractCodecs._();
+  static const codecClassifyBlobsRequest =
+      RpcCodec<ClassifyBlobsRequest>.withDecoder(ClassifyBlobsRequest.fromJson);
+  static const codecClassifyBlobsResponse =
+      RpcCodec<ClassifyBlobsResponse>.withDecoder(
+        ClassifyBlobsResponse.fromJson,
+      );
   static const codecReleaseBlobsRequest =
       RpcCodec<ReleaseBlobsRequest>.withDecoder(ReleaseBlobsRequest.fromJson);
   static const codecReleaseBlobsResponse =
@@ -63,6 +70,20 @@ class VaultMaintenanceContractCaller extends RpcCallerContract
       requestCodec: VaultMaintenanceContractCodecs.codecSweepOrphanBlobsRequest,
       responseCodec:
           VaultMaintenanceContractCodecs.codecSweepOrphanBlobsResponse,
+      request: request,
+      context: context,
+    );
+  }
+
+  @override
+  Future<ClassifyBlobsResponse> classifyBlobs(
+    ClassifyBlobsRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<ClassifyBlobsRequest, ClassifyBlobsResponse>(
+      methodName: VaultMaintenanceContractNames.classifyBlobs,
+      requestCodec: VaultMaintenanceContractCodecs.codecClassifyBlobsRequest,
+      responseCodec: VaultMaintenanceContractCodecs.codecClassifyBlobsResponse,
       request: request,
       context: context,
     );
@@ -120,6 +141,12 @@ abstract class VaultMaintenanceContractResponder extends RpcResponderContract
       requestCodec: VaultMaintenanceContractCodecs.codecSweepOrphanBlobsRequest,
       responseCodec:
           VaultMaintenanceContractCodecs.codecSweepOrphanBlobsResponse,
+    );
+    addUnaryMethod<ClassifyBlobsRequest, ClassifyBlobsResponse>(
+      methodName: VaultMaintenanceContractNames.classifyBlobs,
+      handler: classifyBlobs,
+      requestCodec: VaultMaintenanceContractCodecs.codecClassifyBlobsRequest,
+      responseCodec: VaultMaintenanceContractCodecs.codecClassifyBlobsResponse,
     );
     addUnaryMethod<ReleaseBlobsRequest, ReleaseBlobsResponse>(
       methodName: VaultMaintenanceContractNames.releaseBlobs,

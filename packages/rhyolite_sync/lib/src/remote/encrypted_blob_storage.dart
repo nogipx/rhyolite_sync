@@ -6,7 +6,7 @@ import 'package:rpc_dart/rpc_dart.dart';
 /// Wraps any [IBlobStorage] with optional encrypt-on-upload / decrypt-on-download.
 ///
 /// When [cipher] is null, data passes through unchanged.
-class EncryptedBlobStorage implements IBlobStorage {
+class EncryptedBlobStorage implements IBlobStorage, IListableBlobStorage {
   const EncryptedBlobStorage({
     required this.inner,
     required this.cipher,
@@ -64,4 +64,15 @@ class EncryptedBlobStorage implements IBlobStorage {
     RpcContext? context,
   }) =>
       inner.exists(blobIds, context: context);
+
+  /// Enumeration passes straight through: blob ids are plaintext content
+  /// hashes at every layer of the stack, so nothing here needs decoding.
+  /// Null when the backend underneath cannot list.
+  @override
+  Future<List<String>?> listBlobIds({RpcContext? context}) {
+    final backend = inner;
+    return backend is IListableBlobStorage
+        ? backend.listBlobIds(context: context)
+        : Future<List<String>?>.value(null);
+  }
 }

@@ -53,6 +53,13 @@ Future<void> showStorageOverviewModal(
   try {
     devices = await registry?.call() ?? const [];
   } catch (_) {}
+  // What the plugin's own database weighs. A listing over blob descriptors,
+  // not a read of their bodies — cheap enough to do on open, which is why it
+  // lives here rather than behind another button.
+  LocalCacheUsage? cache;
+  try {
+    cache = await engine.localCacheUsage();
+  } catch (_) {}
   List<BackupSnapshotInfo> restorePoints = const [];
   var restorePointsUnavailable = false;
   try {
@@ -111,6 +118,31 @@ Future<void> showStorageOverviewModal(
         if (stats.tombstones > 0) {
           _kv(doc, content, S.deletedTombstoned, '${stats.tombstones}');
         }
+      }
+
+      // ── Local database ──
+      // The figure above is the vault's logical size; this is what the plugin
+      // actually occupies on the device. They differ, sometimes by a factor of
+      // two, and until now only the first was visible.
+      if (cache != null && cache.totalBytes > 0) {
+        final body = _card(doc, root, S.localDatabaseSection);
+        _kv(doc, body, S.localDatabaseTotal, formatBytes(cache.totalBytes));
+        if (cache.textBytes > 0) {
+          _kv(doc, body, S.localDatabaseNotes, formatBytes(cache.textBytes));
+        }
+        if (cache.binaryBytes > 0) {
+          _kv(
+            doc,
+            body,
+            S.localDatabaseAttachments,
+            formatBytes(cache.binaryBytes),
+          );
+        }
+        if (cache.orphanBytes > 0) {
+          _kv(doc, body, S.localDatabaseReclaimable,
+              formatBytes(cache.orphanBytes));
+        }
+        _muted(doc, body, S.localDatabaseExplainer);
       }
 
       // ── Plugins and themes ──

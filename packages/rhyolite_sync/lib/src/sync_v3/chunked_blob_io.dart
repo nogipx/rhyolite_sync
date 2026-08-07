@@ -86,20 +86,12 @@ class ChunkedBlobIO {
     // dart2js, fully synchronous. Without this yield N back-to-back
     // uploads keep the JS thread pinned and the Obsidian UI frozen
     // through the whole burst.
-    final result = await _chunker(bytes);
-    final manifest = result.manifest;
-    final chunkBytes = result.chunks;
-    final orderedHashes = manifest.chunks
-        .map((c) => c.hash)
-        .toList(growable: false);
-
-    final manifestJson = jsonEncode({
-      'v': 1,
-      'size': manifest.totalSize,
-      'chunks': manifest.chunks.map((c) => {'h': c.hash, 's': c.size}).toList(),
-    });
-    final manifestPlain = Uint8List.fromList(utf8.encode(manifestJson));
-    final manifestHash = _hasher(manifestPlain);
+    final built = await _build(bytes);
+    final manifest = built.manifest;
+    final chunkBytes = built.chunkBytes;
+    final orderedHashes = built.orderedHashes;
+    final manifestPlain = built.manifestPlain;
+    final manifestHash = built.manifestHash;
 
     token?.throwIfCancelled();
     // Local cache mirrors everything in plain — same as the legacy
@@ -162,6 +154,54 @@ class ChunkedBlobIO {
     onProgress?.call(total, total);
 
     return (manifestHash: manifestHash, chunkHashes: orderedHashes);
+  }
+
+  /// Chunks [bytes] and derives the manifest exactly as [upload] does,
+  /// without uploading, caching or touching the network.
+  ///
+  /// Factored out rather than duplicated because the manifest JSON *is* part
+  /// of the content address: a second copy of that literal, drifting by one
+  /// field name, would produce a manifest hash that looks plausible and
+  /// matches nothing.
+  Future<
+      ({
+        BlobManifest manifest,
+        Map<String, Uint8List> chunkBytes,
+        List<String> orderedHashes,
+        Uint8List manifestPlain,
+        String manifestHash,
+      })> _build(Uint8List bytes) async {
+    final result = await _chunker(bytes);
+    final manifest = result.manifest;
+    final manifestJson = jsonEncode({
+      'v': 1,
+      'size': manifest.totalSize,
+      'chunks': manifest.chunks.map((c) => {'h': c.hash, 's': c.size}).toList(),
+    });
+    final manifestPlain = Uint8List.fromList(utf8.encode(manifestJson));
+    return (
+      manifest: manifest,
+      chunkBytes: result.chunks,
+      orderedHashes:
+          manifest.chunks.map((c) => c.hash).toList(growable: false),
+      manifestPlain: manifestPlain,
+      manifestHash: _hasher(manifestPlain),
+    );
+  }
+
+  /// Every blob (chunks + manifest) that [bytes] would produce, keyed by id.
+  ///
+  /// Lets a caller regenerate blobs it no longer holds from the file still on
+  /// disk. Self-verifying by construction: an id only appears here if these
+  /// bytes really hash to it, so a file that has changed since simply yields
+  /// different ids and the caller finds nothing it was looking for. That is
+  /// why healing from disk needs no mtime check to be safe.
+  Future<Map<String, Uint8List>> recompute(Uint8List bytes) async {
+    final built = await _build(bytes);
+    return {
+      ...built.chunkBytes,
+      built.manifestHash: built.manifestPlain,
+    };
   }
 
   /// Fetch manifest by hash, fetch any chunks not in the local cache, and

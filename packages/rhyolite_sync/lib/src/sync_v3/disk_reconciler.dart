@@ -56,6 +56,7 @@ class DiskReconciler {
     required void Function(SyncEngineEvent event) emit,
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
+    PathScope Function()? pathScope,
     Set<String> Function()? forcedBinaryExtensions,
     Set<String>? sizeBlocked,
     StatSigStore? sigStore,
@@ -70,6 +71,7 @@ class DiskReconciler {
        _emit = emit,
        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+       _pathScope = pathScope ?? (() => PathScope.everything),
        _forcedBinaryExtensions =
            forcedBinaryExtensions ?? (() => const <String>{}),
        _sizeBlocked = sizeBlocked ?? <String>{},
@@ -96,6 +98,12 @@ class DiskReconciler {
   /// Live per-device denylist of lowercase extensions (no dot) the user chose
   /// not to sync on this device. Callback so a settings change takes effect.
   final Set<String> Function() _excludedExtensions;
+
+  /// Live per-device folder filter. A path outside it is never read, chunked,
+  /// uploaded — nor tombstoned when it disappears from disk, which is the
+  /// whole point: narrowing the scope must not look like a mass delete to the
+  /// user's other devices.
+  final PathScope Function() _pathScope;
 
   /// Live vault-global set of extensions (no dot) forced onto the binary path.
   /// Callback so the synced policy takes effect without rebuilding the engine.
@@ -169,6 +177,17 @@ class DiskReconciler {
     // overwrite-with-same-mtime+size, which doesn't happen with normal
     // editors.
     final absPath = '$vaultPath/$relPath';
+
+    // Path admission (per-device folder filter): a path the user put out of
+    // scope is invisible to this device — no read, no upload, and crucially no
+    // tombstone when it vanishes from disk. Deletes reach this method too
+    // (the engine reconciles the deleted path), so gating here is what keeps
+    // "I only sync Work/ now" from propagating as a delete of everything else.
+    final scope = _pathScope();
+    if (!scope.allows(relPath)) {
+      _emit(SyncFileOutOfScope(path: relPath));
+      return false;
+    }
 
     // Type admission (per-device denylist): a file whose extension the user
     // excluded ON THIS DEVICE is never read/chunked/uploaded. Cheap (extension

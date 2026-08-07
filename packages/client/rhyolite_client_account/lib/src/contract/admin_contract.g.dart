@@ -17,6 +17,7 @@ class AdminContractNames {
   static const grantSubscription = 'grantSubscription';
   static const revokeSubscription = 'revokeSubscription';
   static const changeUserRole = 'changeUserRole';
+  static const refundInvoice = 'refundInvoice';
 }
 
 class AdminContractCodecs {
@@ -49,6 +50,12 @@ class AdminContractCodecs {
   static const codecListUsersResponse = RpcCodec<ListUsersResponse>.withDecoder(
     ListUsersResponse.fromJson,
   );
+  static const codecRefundInvoiceRequest =
+      RpcCodec<RefundInvoiceRequest>.withDecoder(RefundInvoiceRequest.fromJson);
+  static const codecRefundInvoiceResponse =
+      RpcCodec<RefundInvoiceResponse>.withDecoder(
+        RefundInvoiceResponse.fromJson,
+      );
   static const codecRevokeSubscriptionRequest =
       RpcCodec<RevokeSubscriptionRequest>.withDecoder(
         RevokeSubscriptionRequest.fromJson,
@@ -139,6 +146,20 @@ class AdminContractCaller extends RpcCallerContract implements IAdminContract {
       context: context,
     );
   }
+
+  @override
+  Future<RefundInvoiceResponse> refundInvoice(
+    RefundInvoiceRequest request, {
+    RpcContext? context,
+  }) {
+    return callUnary<RefundInvoiceRequest, RefundInvoiceResponse>(
+      methodName: AdminContractNames.refundInvoice,
+      requestCodec: AdminContractCodecs.codecRefundInvoiceRequest,
+      responseCodec: AdminContractCodecs.codecRefundInvoiceResponse,
+      request: request,
+      context: context,
+    );
+  }
 }
 
 abstract class AdminContractResponder extends RpcResponderContract
@@ -182,6 +203,12 @@ abstract class AdminContractResponder extends RpcResponderContract
       handler: changeUserRole,
       requestCodec: AdminContractCodecs.codecChangeUserRoleRequest,
       responseCodec: AdminContractCodecs.codecChangeUserRoleResponse,
+    );
+    addUnaryMethod<RefundInvoiceRequest, RefundInvoiceResponse>(
+      methodName: AdminContractNames.refundInvoice,
+      handler: refundInvoice,
+      requestCodec: AdminContractCodecs.codecRefundInvoiceRequest,
+      responseCodec: AdminContractCodecs.codecRefundInvoiceResponse,
     );
   }
 }

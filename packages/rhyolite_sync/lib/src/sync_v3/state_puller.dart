@@ -40,6 +40,7 @@ class StatePuller {
     required Future<void> Function(String blobRef, {RpcContext? context})
         prefetchContentFile,
     required int downloadConcurrency,
+    Future<bool> Function(StateRecord record)? shouldPrefetch,
     String Function()? clientName,
     String clientVersion = '',
     String clientKind = '',
@@ -52,6 +53,7 @@ class StatePuller {
         _isFatalRejection = isFatalRejection,
         _log = log,
         _prefetchContentFile = prefetchContentFile,
+        _shouldPrefetch = shouldPrefetch ?? ((_) async => true),
         _downloadConcurrency = downloadConcurrency,
         _clientName = clientName ?? (() => ''),
         _clientVersion = clientVersion,
@@ -81,6 +83,18 @@ class StatePuller {
   /// (serial) apply is an all-cache-hit assemble.
   final Future<void> Function(String blobRef, {RpcContext? context})
       _prefetchContentFile;
+
+  /// Whether a record's content is worth pulling down at all — the device's
+  /// folder/type filter, asked per record.
+  ///
+  /// The prefetch is the ONLY place the decision can save bandwidth: by the
+  /// time [RemoteApplier] turns an out-of-scope file away, its blobs are
+  /// already in the local cache. A record's path lives inside its encrypted
+  /// payload, so answering this costs a decrypt — which is why the caller
+  /// short-circuits to true when the filter is empty, the case every device
+  /// without a filter is in. Omitted → everything is prefetched, the behaviour
+  /// that shipped before the filters existed.
+  final Future<bool> Function(StateRecord record) _shouldPrefetch;
 
   /// Max concurrent file prefetches (mirrors the upload worker-pool bound).
   final int _downloadConcurrency;
@@ -447,13 +461,21 @@ class StatePuller {
   /// Distinct files with content to prefetch in [records] (non-tombstone,
   /// non-empty ref) — drives the pull's progress total. A cached file still
   /// counts; its parallel prefetch is just a fast cache hit.
-  Future<int> _countMissingBlobRefs(List<StateRecord> records) async {
+  Future<int> _countMissingBlobRefs(List<StateRecord> records) async =>
+      (await _prefetchableRefs(records)).length;
+
+  /// Distinct blobRefs in [records] this device actually wants: content-bearing
+  /// (non-tombstone, non-empty ref) AND admitted by the device's filter. Shared
+  /// by the progress total and the prefetch itself so the bar counts what will
+  /// really be fetched.
+  Future<Set<String>> _prefetchableRefs(List<StateRecord> records) async {
     final refs = <String>{};
     for (final r in records) {
       if (r.tombstone || r.blobRef.isEmpty) continue;
+      if (!await _shouldPrefetch(r)) continue;
       refs.add(r.blobRef);
     }
-    return refs.length;
+    return refs;
   }
 
   /// Prefetch the CONTENT of every file in [records] (manifest + chunks) into
@@ -474,12 +496,7 @@ class StatePuller {
   }) async {
     if (records.isEmpty) return 0;
     if (_getRemoteBlobStorage() == null) return 0; // offline — nothing to fetch
-    // Distinct files with content (skip tombstones + empty refs).
-    final refs = <String>{};
-    for (final r in records) {
-      if (r.tombstone || r.blobRef.isEmpty) continue;
-      refs.add(r.blobRef);
-    }
+    final refs = await _prefetchableRefs(records);
     if (refs.isEmpty) return 0;
 
     final interleaved = progressTotal != null;

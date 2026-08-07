@@ -152,7 +152,7 @@ typedef _Fx = ({
   String Function(String) fileIdFor,
 });
 
-Future<_Fx> _newApplier() async {
+Future<_Fx> _newApplier({PathScope? pathScope}) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
 
@@ -187,6 +187,7 @@ Future<_Fx> _newApplier() async {
     knownChunks: () => {for (final s in store.allValuesFlat) ...s.chunks},
     fileIdFor: fileIdFor,
     emit: events.add,
+    pathScope: pathScope == null ? null : () => pathScope,
   );
 
   final codec = StateRecordCodec(cipher: _IdentityCipher());
@@ -206,6 +207,7 @@ Future<_Fx> _newApplier() async {
     emit: events.add,
     isFatalRejection: (_) => false,
     log: LogScope.noop,
+    pathScope: pathScope == null ? null : () => pathScope,
   );
 
   return (
@@ -553,6 +555,82 @@ void main() {
           .apply(fileId, [await _record(f.codec, evil, 1)], _UnusedResolver());
       expect(f.io.files, isEmpty);
       expect(f.store.get(fileId), isNull);
+    });
+  });
+
+  group('RemoteApplier - path admission', () {
+    test('an out-of-scope remote file is not downloaded or written', () async {
+      final f = await _newApplier(pathScope: PathScope(include: ['Work']));
+      final fileId = f.fileIdFor('Personal/diary.md');
+      final up =
+          await f.builder()!.upload(_bytes('peer content'), <String>{});
+      final state = FileState(
+        fileId: fileId,
+        path: 'Personal/diary.md',
+        blobRef: up.manifestHash,
+        sizeBytes: 12,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: up.chunkHashes,
+      );
+
+      await f.applier
+          .apply(fileId, [await _record(f.codec, state, 1)], _UnusedResolver());
+
+      expect(f.io.files.containsKey('$_vaultPath/Personal/diary.md'), isFalse);
+      expect(f.store.get(fileId), isNotNull,
+          reason: 'the register still joins — the metadata is what lets a '
+              'later widening backfill the file');
+      expect(f.store.lastSyncedBlobRefFor(fileId), isNull,
+          reason: 'an empty LCA is the marker the backfill looks for');
+      expect(
+        f.events.whereType<SyncFileOutOfScope>().map((e) => e.path),
+        contains('Personal/diary.md'),
+      );
+    });
+
+    test("a peer's delete of an out-of-scope path does not touch local disk",
+        () async {
+      final f = await _newApplier(pathScope: PathScope(include: ['Work']));
+      final fileId = f.fileIdFor('Personal/diary.md');
+      // The user still keeps this file locally; they only stopped syncing it.
+      f.io.files['$_vaultPath/Personal/diary.md'] = _bytes('mine');
+
+      final tombstone = FileState(
+        fileId: fileId,
+        path: 'Personal/diary.md',
+        blobRef: '',
+        sizeBytes: 0,
+        hlc: Hlc(2000, 0, 'device-A'),
+        tombstone: true,
+      );
+      await f.applier.apply(
+          fileId, [await _record(f.codec, tombstone, 1)], _UnusedResolver());
+
+      expect(
+        utf8.decode(f.io.files['$_vaultPath/Personal/diary.md']!),
+        'mine',
+        reason: 'a scope the user opted out of must not delete their files',
+      );
+    });
+
+    test('an in-scope remote file still lands on disk', () async {
+      final f = await _newApplier(pathScope: PathScope(include: ['Work']));
+      final fileId = f.fileIdFor('Work/plan.md');
+      final up = await f.builder()!.upload(_bytes('peer content'), <String>{});
+      final state = FileState(
+        fileId: fileId,
+        path: 'Work/plan.md',
+        blobRef: up.manifestHash,
+        sizeBytes: 12,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: up.chunkHashes,
+      );
+
+      await f.applier
+          .apply(fileId, [await _record(f.codec, state, 1)], _UnusedResolver());
+
+      expect(utf8.decode(f.io.files['$_vaultPath/Work/plan.md']!),
+          'peer content');
     });
   });
 }

@@ -67,15 +67,27 @@ class InvoiceDto implements IRpcSerializable {
     required this.currency,
     required this.status,
     required this.createdAt,
+    this.refundedAmount,
+    this.refundedAt,
   });
 
   final String invoiceId;
   final int amount;
   final String currency;
+
+  /// `paid`, `pending`, `failed`, `refunded` or `partially_refunded`.
   final String status;
 
   /// Unix timestamp (seconds).
   final int createdAt;
+
+  /// Kopecks actually returned to the user. Null unless the invoice was
+  /// refunded. Below [amount] for the pro-rata refunds the refund policy
+  /// prescribes — the used part of the period is kept.
+  final int? refundedAmount;
+
+  /// Unix timestamp (seconds) of the refund. Null unless refunded.
+  final int? refundedAt;
 
   factory InvoiceDto.fromJson(Map<String, dynamic> json) => InvoiceDto(
     invoiceId: json['invoice_id'] as String,
@@ -83,6 +95,8 @@ class InvoiceDto implements IRpcSerializable {
     currency: json['currency'] as String,
     status: json['status'] as String,
     createdAt: (json['created_at'] as num).toInt(),
+    refundedAmount: (json['refunded_amount'] as num?)?.toInt(),
+    refundedAt: (json['refunded_at'] as num?)?.toInt(),
   );
 
   @override
@@ -92,6 +106,8 @@ class InvoiceDto implements IRpcSerializable {
     'currency': currency,
     'status': status,
     'created_at': createdAt,
+    if (refundedAmount != null) 'refunded_amount': refundedAmount,
+    if (refundedAt != null) 'refunded_at': refundedAt,
   };
 }
 

@@ -12,6 +12,13 @@ Future<void> showOrphanSweepModal(
   ISyncEngine engine,
 ) async {
   final janitor = engine is StateSyncEngine ? engine.createBlobJanitor() : null;
+  // A bring-your-own vault keeps its blobs in the user's own bucket, which the
+  // server can neither enumerate nor delete — so its orphans need the split
+  // sweep (client lists and deletes, server judges) rather than the managed one.
+  final byo = engine is StateSyncEngine ? engine.createByoBlobJanitor() : null;
+  if (byo != null) {
+    return _showByoSweepModal(plugin, byo);
+  }
   if (janitor == null) {
     showNotice(S.storageSweepUnavailable);
     return;
@@ -115,4 +122,67 @@ String _bytes(int n) {
     return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
   return '${(n / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+/// The bring-your-own variant. Same shape as the managed sweep — dry run,
+/// show the numbers, delete only on confirmation — but the enumeration
+/// happens here and only the verdict comes from the server.
+Future<void> _showByoSweepModal(
+  PluginHandle plugin,
+  ByoBlobJanitor janitor,
+) async {
+  showNotice(S.scanningStorage);
+  final ByoSweepPlan plan;
+  try {
+    plan = await janitor.scan();
+  } catch (e) {
+    showNotice(S.storageScanFailed(e));
+    return;
+  }
+  if (plan.unsupported) {
+    showNotice(S.storageSweepNotSupported);
+    return;
+  }
+
+  return showModalWith<void>(
+    plugin,
+    build: (ctx) {
+      ctx.h3(S.reclaimStorageTitle);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.reclaimStorageByoDescription,
+      );
+      ctx.spaceVertical(px: 12);
+
+      _kv(ctx, S.totalBlobs, '${plan.totalBlobs}');
+      _kv(ctx, S.orphanedBlobsReclaimable, '${plan.deadCount}');
+      ctx.spaceVertical(px: 16);
+
+      if (plan.isClean) {
+        ctx.createEl('p', text: S.nothingToReclaim);
+        ctx.buttonRow([ButtonSpec(S.close, () => ctx.close(null))]);
+        ctx.onEscape(() => ctx.close(null));
+        return;
+      }
+
+      ctx.buttonRow([
+        ButtonSpec(
+          '${S.reclaimVerb} ${plan.deadCount}',
+          () async {
+            ctx.close(null);
+            try {
+              final deleted = await janitor.execute(plan);
+              showNotice(S.reclaimedByo(deleted));
+            } catch (e) {
+              showNotice(S.reclaimFailed(e));
+            }
+          },
+          variant: ButtonVariant.destructive,
+        ),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
+      ]);
+      ctx.onEscape(() => ctx.close(null));
+    },
+  );
 }

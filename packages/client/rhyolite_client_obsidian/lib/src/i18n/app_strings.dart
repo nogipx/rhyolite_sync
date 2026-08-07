@@ -89,6 +89,8 @@ abstract class AppStrings {
   String get storageSweepNotSupported;
   String get reclaimStorageTitle;
   String get reclaimStorageDescription;
+  String get reclaimStorageByoDescription;
+  String reclaimedByo(int n);
   String get totalBlobs;
   String get orphanedBlobsReclaimable;
   String get deletedMarkersReclaimable;
@@ -105,6 +107,12 @@ abstract class AppStrings {
   String get storageOverviewUnavailable;
   String get storageOverviewTitle;
   String get contentThisDevice;
+  String get localDatabaseSection;
+  String get localDatabaseTotal;
+  String get localDatabaseNotes;
+  String get localDatabaseAttachments;
+  String get localDatabaseReclaimable;
+  String get localDatabaseExplainer;
   String get notSyncedYet;
   String get files;
   String get contentSize;
@@ -314,14 +322,24 @@ abstract class AppStrings {
   String get logCollectorDescription;
   String get sendLogsToCollector;
   String get sendLogsDescription;
-  String get fileTypesSection;
+  String get deviceSettingsSection;
+  String get deviceSettingsNote;
+  String get sharedSettingsSection;
+  String get sharedSettingsNote;
+  String get syncOnlyPaths;
+  String get syncOnlyPathsDescription;
+  String get dontSyncPaths;
+  String get dontSyncPathsDescription;
+  String get chooseFolders;
+  String get chooseFoldersToSkip;
+  String get deviceFiltersSaved;
+  String get noFoldersFound;
   String get dontSyncExtensions;
   String get dontSyncDescription;
   String get forceBinaryExtensions;
   String get forceBinaryDescription;
-  String get forceBinarySave;
   String get forceBinarySaved;
-  String forceBinarySaveFailed(Object error);
+  String filtersSaveFailed(Object error);
 
   // ── Settings: external storage ───────────────────────────────────────────
   String get externalStorageSection;

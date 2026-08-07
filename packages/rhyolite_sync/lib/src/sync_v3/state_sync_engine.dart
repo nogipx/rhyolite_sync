@@ -58,9 +58,11 @@ class StateSyncEngine implements ISyncEngine {
     this.startupUploadConcurrency = 4,
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
+    PathScope Function()? pathScope,
   }) : _scheduler = scheduler,
        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+       _pathScope = pathScope ?? (() => PathScope.everything),
        _log = logger ?? LogScope.noop,
        _resolverFactory = resolverFactory,
        _rejections = ServerRejectionMapper(factory: rejectionFactory),
@@ -107,6 +109,15 @@ class StateSyncEngine implements ISyncEngine {
   /// Callback so a settings change takes effect without reconstructing the
   /// engine; the host restarts the engine on change to re-evaluate all files.
   final Set<String> Function() _excludedExtensions;
+
+  /// Live per-device folder filter — "sync only these paths", plus an optional
+  /// denylist on top (data.json, not synced). Threaded into the reconciler +
+  /// startup diff (upload-skip, and delete-suppression: narrowing the scope is
+  /// not a delete) and the applier (download-skip). Callback so a settings
+  /// change takes effect without reconstructing the engine; the host restarts
+  /// the engine on change so a WIDENED scope gets a full re-scan and the
+  /// backfill pass in [start] materialises whatever came back into view.
+  final PathScope Function() _pathScope;
 
   /// Vault-global set of extensions (lowercase, no dot) the user forces onto
   /// the binary LWW + conflict-copy path (e.g. `excalidraw` alongside the
@@ -244,6 +255,19 @@ class StateSyncEngine implements ISyncEngine {
   }
 
   @override
+  Future<LocalCacheUsage?> localCacheUsage() async {
+    final store = _store;
+    if (store == null) return null;
+    return LocalCacheUsageUseCase(
+      store: store,
+      blobStore: blobStore,
+      vaultId: config.vaultId,
+      forcedBinaryExtensions: _forcedBinaryExtensions,
+      fileOnDisk: (relPath) => io.fileExists('$vaultPath/$relPath'),
+    )();
+  }
+
+  @override
   List<ConflictedFile> conflictSnapshot() {
     final store = _store;
     if (store == null) return const [];
@@ -337,6 +361,7 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         maxFileSizeBytes: _maxFileSizeBytes,
         excludedExtensions: _excludedExtensions,
+        pathScope: _pathScope,
         forcedBinaryExtensions: () => _forcedBinaryExtensions,
         sizeBlocked: _sizeBlockedPaths,
         sigStore: _sigStore,
@@ -363,6 +388,7 @@ class StateSyncEngine implements ISyncEngine {
         isFatalRejection: _rejections.isFatal,
         log: _log,
         excludedExtensions: _excludedExtensions,
+        pathScope: _pathScope,
         forcedBinaryExtensions: () => _forcedBinaryExtensions,
       );
       _puller = StatePuller(
@@ -380,6 +406,7 @@ class StateSyncEngine implements ISyncEngine {
         isFatalRejection: _rejections.isFatal,
         log: _log,
         prefetchContentFile: _prefetchContentFile,
+        shouldPrefetch: _recordWantedOnThisDevice,
         downloadConcurrency: startupUploadConcurrency,
         clientName: () => config.clientName ?? '',
         clientVersion: config.clientVersion ?? '',
@@ -482,6 +509,7 @@ class StateSyncEngine implements ISyncEngine {
         // (unkeyed) fileId.
         recordIdKey: _resolveRecordIdKey(),
         excludedExtensions: _excludedExtensions,
+        pathScope: _pathScope,
         forcedBinaryExtensions: () => _forcedBinaryExtensions,
         // Route text files through the Fugue reconciler so startup uses the
         // same blob format as the runtime path. Without this, text was
@@ -529,6 +557,11 @@ class StateSyncEngine implements ISyncEngine {
       for (final e in diff.excluded) {
         _emit(SyncFileTypeExcluded(path: e.path, extension: e.extension));
       }
+      // Same for the per-device folder filter.
+      for (final path in diff.outOfScope) {
+        _emit(SyncFileOutOfScope(path: path));
+      }
+      await _backfillNewlyInScope(diff.missingFileIds);
 
       final swStartupPush = Stopwatch()..start();
       await _push();
@@ -877,6 +910,7 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         logWarning: _log.warning,
         forcedBinaryExtensions: _forcedBinaryExtensions,
+        pathScope: _pathScope(),
         // Reseed under the SAME keyed fileId the live record uses, or the
         // repaired state lands on a different id and never overwrites it.
         recordIdKey: _resolveRecordIdKey(),
@@ -1194,21 +1228,30 @@ class StateSyncEngine implements ISyncEngine {
   void rescheduleLocalBlobGc() => _scheduleLocalBlobGc();
 
   void _scheduleLocalBlobGc() {
-    _scheduleBackground('local-blob-gc', (_) async {
-      final store = _store;
-      if (store == null) return;
-      final gc = await LocalBlobGc(
-        store: store,
-        blobStore: blobStore,
-        vaultId: config.vaultId,
-        externalLiveIds: siblingLiveBlobIds,
-      )();
-      if (gc.skipped) {
-        _log.info('Local blob GC skipped: sibling live set unavailable');
-      } else if (gc.deleted > 0) {
-        _log.info('Local blob GC: scanned=${gc.scanned} deleted=${gc.deleted}');
-      }
-    });
+    _scheduleBackground('local-blob-gc', (_) => runLocalBlobGc());
+  }
+
+  /// Sweeps the local blob cache now, rather than on the maintenance tier.
+  /// Exposed so a host can offer "clean up" and so tests can observe a sweep
+  /// without racing the scheduler.
+  Future<LocalBlobGcResult> runLocalBlobGc() async {
+    final store = _store;
+    if (store == null) {
+      return const LocalBlobGcResult(scanned: 0, deleted: 0);
+    }
+    final gc = await LocalBlobGc(
+      store: store,
+      blobStore: blobStore,
+      vaultId: config.vaultId,
+      externalLiveIds: siblingLiveBlobIds,
+      isRegenerable: _blobsRebuildableFromDisk,
+    )();
+    if (gc.skipped) {
+      _log.info('Local blob GC skipped: sibling live set unavailable');
+    } else if (gc.deleted > 0) {
+      _log.info('Local blob GC: scanned=${gc.scanned} deleted=${gc.deleted}');
+    }
+    return gc;
   }
 
   /// Local-blob GC + server blob-integrity verify, as background tasks (see
@@ -1229,6 +1272,7 @@ class StateSyncEngine implements ISyncEngine {
         // yields, and without this it would re-probe everything and never
         // finish on a device that keeps interrupting it.
         confirmedPresent: _verifiedPresent,
+        recoverFromDisk: _regenerateBlobsFromDisk,
         logger: _log,
       )(context: ctx);
       if (!verify.isClean) _log.info('Startup blob verify: $verify');
@@ -1328,6 +1372,148 @@ class StateSyncEngine implements ISyncEngine {
   Future<void> _onFileDeleted(String relPath) async {
     await _reconciler?.reconcileWithDisk(relPath);
     _markPending(_deterministicFileId(relPath));
+  }
+
+  /// Whether [state]'s blobs are a redundant second copy of a file already on
+  /// disk, so the local cache need not keep them.
+  ///
+  /// Binary only, for the reason [_regenerateBlobsFromDisk] gives: a text
+  /// file's blob is its Fugue tree, and disk holds a projection of it.
+  ///
+  /// The stat signature is the freshness check: a file whose mtime+size still
+  /// match what the last reconcile recorded holds the bytes behind
+  /// `state.blobRef`. Same trust the startup scan already places in it, and
+  /// the fallbacks are gentle if it is ever wrong — a cache miss on the pull
+  /// path refetches from the server, and blob verify re-derives. Costs one
+  /// stat per binary file, on the maintenance tier.
+  Future<bool> _blobsRebuildableFromDisk(FileState state) async {
+    if (state.tombstone || state.path.isEmpty) return false;
+    if (_detector.isText(state.path)) return false;
+    // A signature means a reconcile once read this file and derived
+    // state.blobRef from what it found.
+    final sig = _sigStore?.get(state.fileId);
+    if (sig == null) return false;
+    final stat = await io.statFile('$vaultPath/${state.path}');
+    if (stat == null) return false;
+    return stat.mtimeMs == sig.mtimeMs && stat.sizeBytes == sig.sizeBytes;
+  }
+
+  /// Reproduces blobs from the file at [relPath], for a caller that has lost
+  /// them (a chunk the server dropped, a cache we deliberately stopped
+  /// keeping). Returns only the wanted ids these bytes really produce.
+  ///
+  /// BINARY files only. A text file's blob is its Fugue tree, not its text:
+  /// what is on disk is the rendered projection, so re-chunking it would
+  /// produce ids belonging to nothing. Their blobs stay cache-only.
+  Future<Map<String, Uint8List>> _regenerateBlobsFromDisk(
+    String relPath,
+    Set<String> wantedIds,
+  ) async {
+    if (wantedIds.isEmpty) return const {};
+    if (_detector.isText(relPath)) return const {};
+    final chunkedIO = _newChunkedIO();
+    if (chunkedIO == null) return const {};
+    final absPath = '$vaultPath/$relPath';
+    if (!await io.fileExists(absPath)) return const {};
+
+    final Uint8List bytes;
+    try {
+      bytes = await io.readFile(absPath);
+    } catch (e) {
+      _log.warning('Regenerate from disk: cannot read $relPath: $e');
+      return const {};
+    }
+    final produced = await chunkedIO.recompute(bytes);
+    return {
+      for (final entry in produced.entries)
+        if (wantedIds.contains(entry.key)) entry.key: entry.value,
+    };
+  }
+
+  /// Whether a pulled record's CONTENT should be downloaded on this device.
+  ///
+  /// The puller prefetches whole files into the local blob cache before the
+  /// applier ever sees them, so without this the folder/type filters would
+  /// save nothing: every byte of every peer's file would land in the cache
+  /// and only then be declined. A phone told to carry `Work/` would still
+  /// pay for the whole vault on its first sync.
+  ///
+  /// A record's path is inside its encrypted payload, so deciding costs a
+  /// decrypt. Two things keep that honest: a device with no filter returns
+  /// early and pays nothing, and the payload is the small state record (path,
+  /// hlc, chunk hashes) — never the file content. A record we cannot decode
+  /// is prefetched; the applier re-checks the scope before writing anything,
+  /// so guessing wrong here wastes a download and nothing else.
+  Future<bool> _recordWantedOnThisDevice(StateRecord record) async {
+    final scope = _pathScope();
+    final denylist = _excludedExtensions();
+    if (scope.isUnrestricted && denylist.isEmpty) return true;
+    final codec = _recordCodec;
+    if (codec == null) return true;
+    try {
+      final path = (await codec.decode(record)).value.path;
+      if (path.isEmpty) return true;
+      if (!scope.allows(path)) return false;
+      final ext = FileTypeDetector.extensionOf(path);
+      return ext.isEmpty || !denylist.contains(ext);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Writes out files that are tracked in the store but have never existed on
+  /// this device's disk — the shape a state is left in when an earlier pull
+  /// skipped it as out-of-scope (or out-of-type). Runs once per startup, after
+  /// [StateStartupDiff] has told us which tracked paths are absent.
+  ///
+  /// Without it, widening the folder filter would be a one-way door: the pull
+  /// cursor has already advanced past those records, so nothing ever
+  /// re-delivers them and the newly-included folder would stay empty until a
+  /// full restore-from-server. The FileState (path, blobRef, chunk list) is
+  /// already local — only the bytes are missing — so the backfill is a plain
+  /// blob download per file.
+  ///
+  /// Two gates decide "never existed here", and both are safety, not
+  /// optimisation. A file this device DID have and that is now missing from
+  /// disk is a local delete the watcher slept through, and writing it back
+  /// would resurrect it:
+  ///   * a non-empty `lastSyncedBlobRef` means a pull once materialised it;
+  ///   * a stat signature means a reconcile once read it off disk (the case a
+  ///     file created offline and deleted before its seal came back falls
+  ///     into — its LCA is still empty, so the signature is what catches it).
+  Future<void> _backfillNewlyInScope(List<String> missingFileIds) async {
+    final store = _store;
+    final reconciler = _reconciler;
+    if (store == null || reconciler == null) return;
+    if (missingFileIds.isEmpty) return;
+
+    final denylist = _excludedExtensions();
+    final scope = _pathScope();
+    var restored = 0;
+    for (final fileId in missingFileIds) {
+      if (!_running) return;
+      final state = store.get(fileId);
+      if (state == null || state.tombstone) continue;
+      if (state.path.isEmpty || state.blobRef.isEmpty) continue;
+      if ((store.lastSyncedBlobRefFor(fileId) ?? '').isNotEmpty) continue;
+      if (_sigStore?.get(fileId) != null) continue;
+      if (!scope.allows(state.path)) continue;
+      final ext = FileTypeDetector.extensionOf(state.path);
+      if (ext.isNotEmpty && denylist.contains(ext)) continue;
+      try {
+        if (await reconciler.writeFileToDisk(state)) {
+          store.recordSyncedBlobRef(fileId, state.blobRef);
+          await store.persistOne(fileId);
+          restored++;
+          _emit(SyncFileModified(state.path));
+        }
+      } catch (e) {
+        _log.warning('Backfill of ${state.path} failed: $e');
+      }
+    }
+    if (restored > 0) {
+      _log.info('Backfill: materialised $restored file(s) newly in scope');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1601,6 +1787,27 @@ class StateSyncEngine implements ISyncEngine {
       maintenanceCaller: endpoint != null
           ? VaultMaintenanceContractCaller(endpoint)
           : null,
+    );
+  }
+
+  /// Orphan sweep for a bring-your-own vault, or null when this vault is not
+  /// BYO (the managed path has its own server-side sweep) or nothing is
+  /// connected yet.
+  ///
+  /// Deliberately a separate factory from [createBlobJanitor]: the two answer
+  /// the same question about different storage, and handing the managed
+  /// janitor a BYO vault would have it enumerate the server's bucket — which
+  /// holds none of this vault's blobs — and cheerfully report it clean.
+  ByoBlobJanitor? createByoBlobJanitor() {
+    if (config.externalBlobConfig == null) return null;
+    final remote = _getRemoteBlobStorage();
+    final endpoint = _conn?.endpoint;
+    if (remote == null || endpoint == null) return null;
+    return ByoBlobJanitor(
+      blobStorage: remote,
+      maintenanceCaller: VaultMaintenanceContractCaller(endpoint),
+      vaultId: config.vaultId,
+      logger: _log,
     );
   }
 

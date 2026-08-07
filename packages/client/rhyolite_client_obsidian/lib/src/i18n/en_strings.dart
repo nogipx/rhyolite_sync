@@ -190,6 +190,14 @@ class EnStrings extends AppStrings {
       'residue) and deleted-file markers every device has already seen. Content '
       'stays recoverable via history / restore points.';
   @override
+  String get reclaimStorageByoDescription =>
+      'Objects in your own storage that no file, no history entry and no '
+      'restore point refers to any more — usually residue from interrupted '
+      'uploads. Your device lists the bucket; the server, which sees every '
+      "device's data, decides what is safe to remove.";
+  @override
+  String reclaimedByo(int n) => 'Reclaimed $n object(s).';
+  @override
   String get totalBlobs => 'Total blobs';
   @override
   String get orphanedBlobsReclaimable => 'Orphaned blobs (reclaimable)';
@@ -220,6 +228,22 @@ class EnStrings extends AppStrings {
   String get storageOverviewTitle => 'Storage overview';
   @override
   String get contentThisDevice => 'Content (this device)';
+  @override
+  String get localDatabaseSection => 'Local database';
+  @override
+  String get localDatabaseTotal => 'Total on this device';
+  @override
+  String get localDatabaseNotes => 'Notes';
+  @override
+  String get localDatabaseAttachments => 'Attachments';
+  @override
+  String get localDatabaseReclaimable => 'Reclaimable';
+  @override
+  String get localDatabaseExplainer =>
+      "What the plugin's own storage occupies, separate from the files in "
+      'your vault. Notes are kept as editing history, which is what makes '
+      'conflict-free merging possible. Attachments are kept as a copy of the '
+      'file itself.';
   @override
   String get notSyncedYet => 'Not synced yet.';
   @override
@@ -720,15 +744,45 @@ class EnStrings extends AppStrings {
       "device's debug logs to the URL above. Logs include file paths, ids, "
       'hashes, sizes and timings — never file content.';
   @override
-  String get fileTypesSection => 'File types';
+  String get deviceSettingsSection => 'On this device only';
+  @override
+  String get deviceSettingsNote =>
+      'Stored in this install and never sent anywhere. Your other devices are '
+      'unaffected, and anything left out stays on disk and on the server.';
+  @override
+  String get sharedSettingsSection => 'Shared across all your devices';
+  @override
+  String get sharedSettingsNote =>
+      'Stored with the vault, so every device you sync uses the same value.';
+  @override
+  String get syncOnlyPaths => 'Sync only these folders';
+  @override
+  String get syncOnlyPathsDescription =>
+      'Comma-separated list (e.g. Work, Personal/Journal). When set, this '
+      'device syncs nothing outside these folders. Leave empty to sync the '
+      'whole vault. Adding a folder back downloads its files on the next sync.';
+  @override
+  String get dontSyncPaths => "Don't sync these folders";
+  @override
+  String get dontSyncPathsDescription =>
+      'Comma-separated list, applied on top of the list above — so you can '
+      'sync Work but skip Work/scratch.';
+  @override
+  String get chooseFolders => 'Choose folders…';
+  @override
+  String get chooseFoldersToSkip => 'Choose folders to skip…';
+  @override
+  String get deviceFiltersSaved =>
+      'Filters saved. Sync is restarting to apply them.';
+  @override
+  String get noFoldersFound => 'This vault has no folders yet.';
   @override
   String get dontSyncExtensions => "Don't sync these extensions";
   @override
   String get dontSyncDescription =>
       'Comma-separated list (e.g. pdf, zip, mp4). Files with these extensions '
-      'are skipped on this device only — neither uploaded nor downloaded. Other '
-      'devices are unaffected. Leave empty to sync everything. Re-adding a type '
-      'downloads its files on the next sync.';
+      'are neither uploaded nor downloaded. Leave empty to sync every type. '
+      'Re-adding a type downloads its files on the next sync.';
   @override
   String get forceBinaryExtensions => 'Sync these extensions as whole files';
   @override
@@ -736,15 +790,12 @@ class EnStrings extends AppStrings {
       'Comma-separated list (e.g. excalidraw, drawio). These files are synced '
       'as whole snapshots with last-writer-wins instead of line-by-line merge — '
       'the right choice for structured formats (drawings, diagrams) a text '
-      'merge would corrupt. Shared across all your devices. .excalidraw.md and '
-      '.canvas are always treated this way. Existing files convert on their '
-      'next edit. Save to apply.';
+      'merge would corrupt. .excalidraw.md and .canvas are always treated this '
+      'way. Existing files convert on their next edit.';
   @override
-  String get forceBinarySave => 'Save';
+  String get forceBinarySaved => 'Saved. It applies on all devices.';
   @override
-  String get forceBinarySaved => 'Sync list saved. It applies on all devices.';
-  @override
-  String forceBinarySaveFailed(Object error) => 'Could not save: $error';
+  String filtersSaveFailed(Object error) => 'Could not save: $error';
 
   // ── Settings: external storage ──
   @override

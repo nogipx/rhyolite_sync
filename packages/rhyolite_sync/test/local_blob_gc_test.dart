@@ -263,6 +263,48 @@ void main() {
               'on disk can rebuild those');
     });
 
+    test('a contested file keeps every version\'s blobs', () async {
+      // Two live values share one fileId and one path. Disk holds the winner;
+      // the loser's bytes exist only here, and the conflict copy that should
+      // preserve them reads from this cache. Evicting them as "the file is on
+      // disk" would delete the one copy of the version nobody has.
+      await _seedBlob(blobs, 'winner-chunk', [1]);
+      await _seedBlob(blobs, 'loser-chunk', [2]);
+      final winner = FileState(
+        fileId: 'contested',
+        path: 'att/photo.png',
+        blobRef: 'manifest-w',
+        sizeBytes: 1,
+        hlc: Hlc(2, 0, 'A'),
+        chunks: const ['winner-chunk'],
+      );
+      final loser = FileState(
+        fileId: 'contested',
+        path: 'att/photo.png',
+        blobRef: 'manifest-l',
+        sizeBytes: 1,
+        hlc: Hlc(2, 0, 'B'),
+        chunks: const ['loser-chunk'],
+      );
+      store.applyLocal(winner);
+      store.applyRemote('contested', [TaggedValue(loser, loser.hlc)]);
+      expect(store.hasConflict('contested'), isTrue,
+          reason: 'the fixture must really be in conflict');
+
+      // The engine refuses on conflict; here we model a predicate that cannot
+      // tell the two values apart, which is exactly what a path+signature
+      // check does.
+      await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        isRegenerable: (s) async => !store.hasConflict(s.fileId),
+      )();
+
+      final left = await blobs.listBlobIds(vaultId: _v);
+      expect(left, containsAll(['winner-chunk', 'loser-chunk']));
+    });
+
     test('without the predicate nothing referenced is dropped', () async {
       await _seedBlob(blobs, 'manifest-a', [1]);
       await _seedBlob(blobs, 'chunk-a', [2]);

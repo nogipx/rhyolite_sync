@@ -1376,6 +1376,17 @@ class StateSyncEngine implements ISyncEngine {
   Future<bool> _blobsRebuildableFromDisk(FileState state) async {
     if (state.tombstone || state.path.isEmpty) return false;
     if (_detector.isText(state.path)) return false;
+    // A file in conflict has SEVERAL live values under one fileId and one
+    // path, and the checks below cannot tell them apart: they ask whether a
+    // file exists at that path with a matching signature, which is true for
+    // every value in the register though only ONE of them is the content on
+    // disk. Say yes and the losing version's chunks are evicted as
+    // "regenerable" from bytes that would only ever reproduce the winner —
+    // and the conflict copy that should preserve it then has nowhere to read
+    // it from but the network. Conflicts are rare and short-lived; keeping
+    // every blob of a contested file until the resolver collapses it costs
+    // almost nothing.
+    if (_store?.hasConflict(state.fileId) ?? true) return false;
     // A signature means a reconcile once read this file and derived
     // state.blobRef from what it found.
     final sig = _sigStore?.get(state.fileId);

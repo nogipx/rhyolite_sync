@@ -1,3 +1,23 @@
+## [3.13.3] - 2026-08-08
+
+Fixes a way the copy kept of a losing version could be discarded too early.
+
+When the same attachment is changed on two devices at once, Rhyolite keeps
+both: the newer one stays in place and the other is saved beside it as a
+conflict copy. Since 3.13.0 an attachment already present in your vault is
+no longer also held inside the plugin — and while a file was in that
+unresolved state, that rule was being applied to *every* version of it,
+including the one not on disk. The version that lost could lose its local
+copy before it had been written out.
+
+Now nothing belonging to a file in conflict is dropped until the conflict is
+resolved. Worth updating if you edit attachments on more than one device.
+
+### Other
+
+- bump plugin to 3.13.3 (obsidian)
+
+
 ## [3.13.2] - 2026-08-08
 
 The "Choose folders…" buttons are gone; the folder filters are typed in

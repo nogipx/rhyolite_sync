@@ -765,14 +765,8 @@ class RuStrings extends AppStrings {
       'Список через запятую, применяется поверх списка выше — можно '
       'синхронизировать Работа, но пропустить Работа/черновики.';
   @override
-  String get chooseFolders => 'Выбрать папки…';
-  @override
-  String get chooseFoldersToSkip => 'Выбрать папки для пропуска…';
-  @override
   String get deviceFiltersSaved =>
       'Фильтры сохранены. Синхронизация перезапускается.';
-  @override
-  String get noFoldersFound => 'В этом хранилище пока нет папок.';
   @override
   String get dontSyncExtensions => 'Не синхронизировать эти расширения';
   @override

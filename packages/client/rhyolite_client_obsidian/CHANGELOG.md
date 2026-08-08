@@ -1,3 +1,23 @@
+## [3.13.2] - 2026-08-08
+
+The "Choose folders…" buttons are gone; the folder filters are typed in
+directly, as the file-type list already was.
+
+They were aimed at the wrong half of the problem. What made folder filtering
+tedious elsewhere is having to name every folder you do *not* want — and
+naming the one or two you *do* was never the hard part. Meanwhile the picker
+listed only folders present on this device, which meant it omitted exactly
+the ones you had excluded earlier: you could narrow the filter through it and
+never widen it again.
+
+Anything already chosen keeps working. Folder names are matched ignoring
+case, and stray slashes or spaces around them do not matter.
+
+### Other
+
+- bump plugin to 3.13.2 (obsidian)
+
+
 ## [3.13.1] - 2026-08-08
 
 The Local database card that 3.13.0 added to Storage overview is gone again.

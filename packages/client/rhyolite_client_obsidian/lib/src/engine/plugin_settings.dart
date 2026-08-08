@@ -19,7 +19,6 @@ import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
 import 'build_env.dart';
 import 'db_recovery.dart';
-import 'folder_scope_modal.dart';
 import 'modal_lock.dart';
 import 'obsidian_config_storage.dart';
 import 'self_host_modal.dart';
@@ -404,8 +403,14 @@ void Function() registerSettingsTab({
     // One group, one Save — applying any of them restarts the engine, because
     // only a full startup scan re-evaluates every path and materialises what a
     // widened filter brought back into view. That rules out the per-keystroke
-    // commit the extension field used to have. The folder pickers commit
-    // straight away: clicking through a folder list IS the explicit action.
+    // commit the extension field used to have.
+    //
+    // Typed, not picked. A folder picker shipped here briefly and earned
+    // nothing: the complaint this feature answers was having to name every
+    // folder you did NOT want, and an include list already reduces that to
+    // one or two you do. What the picker did add was a list built from the
+    // files on THIS device — which omits exactly the folders you excluded
+    // earlier, making the filter one-way.
     void addDeviceFiltersSection(PluginSettingsTab t) {
       var include = fileFilterPrefs().pathScope.include;
       var exclude = fileFilterPrefs().pathScope.exclude;
@@ -434,44 +439,12 @@ void Function() registerSettingsTab({
         placeholder: 'Work, Personal/Journal',
         onChange: (v) => include = PathScope.parse(v),
       );
-      t.addButton(
-        name: '',
-        description: '',
-        buttonText: S.chooseFolders,
-        onClick: () async {
-          final picked = await showFolderScopeModal(
-            plugin,
-            title: S.syncOnlyPaths,
-            description: S.syncOnlyPathsDescription,
-            initial: include,
-          );
-          if (picked == null) return;
-          include = picked;
-          await commit();
-        },
-      );
       t.addText(
         name: S.dontSyncPaths,
         description: S.dontSyncPathsDescription,
         initialValue: PathScope.render(exclude),
         placeholder: 'Work/scratch',
         onChange: (v) => exclude = PathScope.parse(v),
-      );
-      t.addButton(
-        name: '',
-        description: '',
-        buttonText: S.chooseFoldersToSkip,
-        onClick: () async {
-          final picked = await showFolderScopeModal(
-            plugin,
-            title: S.dontSyncPaths,
-            description: S.dontSyncPathsDescription,
-            initial: exclude,
-          );
-          if (picked == null) return;
-          exclude = picked;
-          await commit();
-        },
       );
       t.addText(
         name: S.dontSyncExtensions,

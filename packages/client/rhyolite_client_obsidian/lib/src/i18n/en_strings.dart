@@ -752,14 +752,8 @@ class EnStrings extends AppStrings {
       'Comma-separated list, applied on top of the list above — so you can '
       'sync Work but skip Work/scratch.';
   @override
-  String get chooseFolders => 'Choose folders…';
-  @override
-  String get chooseFoldersToSkip => 'Choose folders to skip…';
-  @override
   String get deviceFiltersSaved =>
       'Filters saved. Sync is restarting to apply them.';
-  @override
-  String get noFoldersFound => 'This vault has no folders yet.';
   @override
   String get dontSyncExtensions => "Don't sync these extensions";
   @override

@@ -324,10 +324,7 @@ abstract class AppStrings {
   String get syncOnlyPathsDescription;
   String get dontSyncPaths;
   String get dontSyncPathsDescription;
-  String get chooseFolders;
-  String get chooseFoldersToSkip;
   String get deviceFiltersSaved;
-  String get noFoldersFound;
   String get dontSyncExtensions;
   String get dontSyncDescription;
   String get forceBinaryExtensions;

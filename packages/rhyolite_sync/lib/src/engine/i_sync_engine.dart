@@ -1,6 +1,5 @@
 import '../crypto/i_vault_cipher.dart';
 import '../use_cases/conflict_list_use_case.dart';
-import '../use_cases/local_cache_usage_use_case.dart';
 import '../use_cases/vault_stats_use_case.dart';
 import 'vault_config.dart';
 import 'sync_engine_event.dart';
@@ -29,12 +28,6 @@ abstract interface class ISyncEngine {
   /// server cursor). Null when the engine has no store yet (not started).
   /// Cheap — in-memory, safe to poll from UI.
   VaultStats? statsSnapshot();
-
-  /// What the local blob cache weighs on this device, attributed to the files
-  /// that reference it. Unlike [statsSnapshot] this reads the blob store, so
-  /// it is a listing rather than an in-memory lookup — call it on demand (the
-  /// storage overview), not on a timer. Null when the engine has no store yet.
-  Future<LocalCacheUsage?> localCacheUsage();
 
   /// Files whose register currently has more than one surviving value —
   /// i.e. an unresolved multi-value conflict. Empty when not started.

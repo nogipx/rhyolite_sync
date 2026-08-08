@@ -107,12 +107,6 @@ abstract class AppStrings {
   String get storageOverviewUnavailable;
   String get storageOverviewTitle;
   String get contentThisDevice;
-  String get localDatabaseSection;
-  String get localDatabaseTotal;
-  String get localDatabaseNotes;
-  String get localDatabaseAttachments;
-  String get localDatabaseReclaimable;
-  String get localDatabaseExplainer;
   String get notSyncedYet;
   String get files;
   String get contentSize;

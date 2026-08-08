@@ -134,7 +134,19 @@ typedef _Fixture = ({
   String Function(String) fileIdFor,
 });
 
+/// Stands in for the encrypt decorator meeting an envelope tag it does not
+/// know: the fetch succeeds, the decrypt refuses.
+class _SealedRemote extends _MemRemote {
+  @override
+  Future<Map<String, Uint8List>> download(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async =>
+      throw const UnsupportedCipherVersion(0x7f);
+}
+
 Future<_Fixture> _newFixture({
+  _MemRemote? remoteOverride,
   int? Function()? maxFileSizeBytes,
   PathScope? pathScope,
   bool frontmatter = true,
@@ -153,7 +165,7 @@ Future<_Fixture> _newFixture({
   final io = _MemIo();
   final changes = _NoopChangeProvider();
   final localBlobs = LocalBlobStore(InMemoryBlobRepository());
-  final remote = _MemRemote();
+  final remote = remoteOverride ?? _MemRemote();
 
   String fileIdFor(String relPath) => const Uuid().v5(_vaultId, relPath);
 
@@ -942,6 +954,40 @@ void main() {
         isFalse,
       );
       expect(f.store.get(f.fileIdFor('Work/scratch/tmp.md')), isNull);
+    });
+  });
+
+  group('DiskReconciler - a blob this build cannot decrypt', () {
+    test('is surfaced as an unreadable file, not retried in silence',
+        () async {
+      // A blob sealed by a NEWER client: the fetch succeeds, the cipher
+      // refuses the envelope. Before this the exception fell into the generic
+      // "chunked download failed" catch, became "blob not available", and the
+      // file retried forever with nothing to explain why.
+      final f = await _newFixture(remoteOverride: _SealedRemote());
+      final state = FileState(
+        fileId: f.fileIdFor('att/photo.bin'),
+        path: 'att/photo.bin',
+        blobRef: 'sealed-manifest',
+        sizeBytes: 4,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: const ['sealed-chunk'],
+      );
+      f.store.applyLocal(state);
+
+      final wrote = await f.reconciler.writeFileToDisk(state);
+
+      expect(wrote, isFalse);
+      expect(
+        f.events.whereType<SyncFileFormatUnsupported>().map((e) => e.path),
+        contains('att/photo.bin'),
+        reason: 'the user must be told to update, not left with a file that '
+            'silently never arrives',
+      );
+      expect(f.io.files.containsKey('$_vaultPath/att/photo.bin'), isFalse,
+          reason: 'nothing may be written from bytes we could not open');
+      expect(f.store.lastSyncedBlobRefFor(state.fileId), isNull,
+          reason: 'the LCA must not advance, so an updated client heals it');
     });
   });
 }

@@ -229,22 +229,6 @@ class EnStrings extends AppStrings {
   @override
   String get contentThisDevice => 'Content (this device)';
   @override
-  String get localDatabaseSection => 'Local database';
-  @override
-  String get localDatabaseTotal => 'Total on this device';
-  @override
-  String get localDatabaseNotes => 'Notes';
-  @override
-  String get localDatabaseAttachments => 'Attachments';
-  @override
-  String get localDatabaseReclaimable => 'Reclaimable';
-  @override
-  String get localDatabaseExplainer =>
-      "What the plugin's own storage occupies, separate from the files in "
-      'your vault. Notes are kept as editing history, which is what makes '
-      'conflict-free merging possible. Attachments are kept as a copy of the '
-      'file itself.';
-  @override
   String get notSyncedYet => 'Not synced yet.';
   @override
   String get files => 'Files';
@@ -1058,8 +1042,9 @@ class EnStrings extends AppStrings {
   String needsNewerClient(int n) => 'Needs a newer version ($n)';
   @override
   String get needsNewerClientHint =>
-      'Saved by a device running a newer Rhyolite. Left untouched — on disk '
-      'and on the server — until you update. Editing them here will not sync.';
+      'Saved by a device running a newer Rhyolite. Update the plugin to the '
+      'latest version and they will sync. Until then they are left untouched, '
+      'on disk and on the server, and editing them here will not sync.';
   @override
   String andMore(int n) => '…and $n more';
   @override

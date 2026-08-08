@@ -155,6 +155,24 @@ class RemoteApplier {
         // out instead of logging hundreds of identical "skipped" lines
         // and grinding through compute the engine should not be doing.
         if (_isFatalRejection(e)) rethrow;
+        // An envelope this build cannot open is not a corrupt row: the record
+        // was written by a NEWER client, every device on this version will
+        // skip it identically, and the answer is to update rather than to
+        // wait. Surfaced on the same list as an unreadable blob so it reads as
+        // a standing condition instead of a record that quietly never arrives.
+        //
+        // The path lives inside the payload we could not open, so it is only
+        // known if this device has seen the file before; a first sight has
+        // nothing to name and the log line carries the fileId instead.
+        if (e is UnsupportedCipherVersion) {
+          _log.error(
+            'Record fileId=${r.fileId} is sealed with $e — update this client',
+          );
+          final seenAs = store.get(fileId)?.path ?? '';
+          if (seenAs.isNotEmpty) {
+            _emit(SyncFileFormatUnsupported(path: seenAs));
+          }
+        }
         _log.warning(
           'Skipping unreadable record fileId=${r.fileId} '
           'hlc=${r.hlcPacked} seq=${r.serverSeq}: $e',

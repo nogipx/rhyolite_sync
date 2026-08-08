@@ -1,3 +1,30 @@
+## [3.13.1] - 2026-08-08
+
+The Local database card that 3.13.0 added to Storage overview is gone again.
+It reported what the plugin's file cache weighs, and that figure turned out
+not to be comparable to anything else on the screen: your plugin set counts
+in it but not in the vault size beside it, and a note appears in one as its
+text and in the other as the editing history that merges it. There was also
+nothing to do about the number — that storage is cleaned automatically. A
+figure nobody can read or act on is worse than no figure.
+
+What 3.13.0 actually changed about disk use is still in place: an attachment
+is no longer kept twice, once in your vault and once inside the plugin. Only
+the counter went away.
+
+### Bug Fixes
+
+- a file saved by a newer version of Rhyolite is now listed under "Needs a
+  newer version" instead of being retried silently on every sync, so a note
+  that never arrives says why (core)
+- that notice now says what to do about it, rather than leaving you to infer
+  it (obsidian)
+
+### Other
+
+- bump plugin to 3.13.1 (obsidian)
+
+
 ## [3.13.0] - 2026-08-07
 
 Choose which folders this device syncs. The only filter so far was by file

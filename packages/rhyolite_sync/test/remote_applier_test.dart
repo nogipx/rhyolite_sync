@@ -21,6 +21,24 @@ class _IdentityCipher implements IVaultCipher {
   Future<Uint8List> decrypt(Uint8List ciphertext) async => ciphertext;
 }
 
+/// Refuses an envelope whose leading tag is not one it knows, exactly as
+/// [VaultCipher] does — that refusal is the thing under test.
+class _TagCheckingCipher implements IVaultCipher {
+  static const _known = 0x01;
+
+  @override
+  Future<Uint8List> encrypt(Uint8List plaintext) async =>
+      Uint8List.fromList([_known, ...plaintext]);
+
+  @override
+  Future<Uint8List> decrypt(Uint8List ciphertext) async {
+    if (ciphertext.isEmpty || ciphertext[0] != _known) {
+      throw UnsupportedCipherVersion(ciphertext.isEmpty ? 0 : ciphertext[0]);
+    }
+    return Uint8List.sublistView(ciphertext, 1);
+  }
+}
+
 class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
@@ -152,7 +170,7 @@ typedef _Fx = ({
   String Function(String) fileIdFor,
 });
 
-Future<_Fx> _newApplier({PathScope? pathScope}) async {
+Future<_Fx> _newApplier({PathScope? pathScope, IVaultCipher? cipher}) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
 
@@ -190,7 +208,7 @@ Future<_Fx> _newApplier({PathScope? pathScope}) async {
     pathScope: pathScope == null ? null : () => pathScope,
   );
 
-  final codec = StateRecordCodec(cipher: _IdentityCipher());
+  final codec = StateRecordCodec(cipher: cipher ?? _IdentityCipher());
 
   final applier = RemoteApplier(
     store: store,
@@ -631,6 +649,65 @@ void main() {
 
       expect(utf8.decode(f.io.files['$_vaultPath/Work/plan.md']!),
           'peer content');
+    });
+  });
+
+  group('RemoteApplier - an envelope this build cannot open', () {
+    test('is surfaced as an unreadable file, not skipped in silence',
+        () async {
+      final f = await _newApplier(cipher: _TagCheckingCipher());
+      final fileId = f.fileIdFor('note.md');
+
+      // The device has seen this file before, so it can name it.
+      f.store.applyLocal(FileState(
+        fileId: fileId,
+        path: 'note.md',
+        blobRef: 'old',
+        sizeBytes: 3,
+        hlc: Hlc(500, 0, 'device-B'),
+      ));
+
+      // A record sealed by a newer client: tag 0x7f is no cipher we know.
+      final sealed = StateRecord(
+        fileId: fileId,
+        encryptedState: base64Encode(Uint8List.fromList([0x7f, 1, 2, 3])),
+        blobRef: 'newer',
+        hlcPacked: Hlc(1000, 0, 'device-A').pack(),
+        contextPacked: '',
+        serverSeq: 1,
+        tombstone: false,
+      );
+
+      await f.applier.apply(fileId, [sealed], _UnusedResolver());
+
+      expect(
+        f.events.whereType<SyncFileFormatUnsupported>().map((e) => e.path),
+        contains('note.md'),
+        reason: 'the user must be told to update, not left waiting for a '
+            'record that will never decode',
+      );
+    });
+
+    test('a first-sight file has no name to give, and says nothing', () async {
+      // The path is inside the payload we could not open. Inventing one would
+      // be worse than the log line that carries the fileId.
+      final f = await _newApplier(cipher: _TagCheckingCipher());
+      final sealed = StateRecord(
+        fileId: f.fileIdFor('never-seen.md'),
+        encryptedState: base64Encode(Uint8List.fromList([0x7f, 9])),
+        blobRef: 'x',
+        hlcPacked: Hlc(1000, 0, 'device-A').pack(),
+        contextPacked: '',
+        serverSeq: 1,
+        tombstone: false,
+      );
+
+      await f.applier
+          .apply(f.fileIdFor('never-seen.md'), [sealed], _UnusedResolver());
+
+      expect(f.events.whereType<SyncFileFormatUnsupported>(), isEmpty);
+      expect(f.events.whereType<SyncRecordSkipped>(), isNotEmpty,
+          reason: 'still recorded as skipped, as any unreadable record is');
     });
   });
 }

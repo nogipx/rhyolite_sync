@@ -235,22 +235,6 @@ class RuStrings extends AppStrings {
   @override
   String get contentThisDevice => 'Содержимое (это устройство)';
   @override
-  String get localDatabaseSection => 'Локальная база';
-  @override
-  String get localDatabaseTotal => 'Всего на этом устройстве';
-  @override
-  String get localDatabaseNotes => 'Заметки';
-  @override
-  String get localDatabaseAttachments => 'Вложения';
-  @override
-  String get localDatabaseReclaimable => 'Можно освободить';
-  @override
-  String get localDatabaseExplainer =>
-      'Сколько занимает собственное хранилище плагина — это отдельно от файлов '
-      'в вашем хранилище. Заметки хранятся вместе с историей правок, именно она '
-      'позволяет сливать изменения без конфликтов. Вложения хранятся копией '
-      'самого файла.';
-  @override
   String get notSyncedYet => 'Ещё не синхронизировано.';
   @override
   String get files => 'Файлов';
@@ -1078,8 +1062,9 @@ class RuStrings extends AppStrings {
   String needsNewerClient(int n) => 'Нужна свежая версия ($n)';
   @override
   String get needsNewerClientHint =>
-      'Сохранены устройством с более новым Rhyolite. Не трогаются ни на диске, '
-      'ни на сервере, пока вы не обновитесь. Правки здесь не синхронизируются.';
+      'Сохранены устройством с более новым Rhyolite. Обновите плагин до '
+      'последней версии — и они синхронизируются. До этого файлы не трогаются '
+      'ни на диске, ни на сервере, а правки здесь не синхронизируются.';
   @override
   String andMore(int n) => '…и ещё $n';
   @override

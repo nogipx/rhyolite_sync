@@ -305,6 +305,20 @@ class DiskReconciler {
                   ))
               : null,
         );
+      } on UnsupportedCipherVersion catch (e) {
+        // The blob is sealed in an envelope this build has no cipher for —
+        // written by a NEWER client. Identical in kind to an unknown blob tag,
+        // so it gets the same treatment: say so, leave the file alone, and do
+        // not advance the LCA, so an updated client materialises it later with
+        // no repair step.
+        //
+        // Without this the exception fell into the generic catch below, became
+        // "download failed", and the file retried forever with nothing to
+        // explain why.
+        _log.error(
+          'Refusing to write ${state.path}: $e — update this client',
+        );
+        _emit(SyncFileFormatUnsupported(path: state.path));
       } catch (e) {
         _log.warning('Chunked download failed for ${state.path}: $e');
       } finally {

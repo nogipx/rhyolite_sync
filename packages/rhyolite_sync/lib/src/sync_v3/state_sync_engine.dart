@@ -255,19 +255,6 @@ class StateSyncEngine implements ISyncEngine {
   }
 
   @override
-  Future<LocalCacheUsage?> localCacheUsage() async {
-    final store = _store;
-    if (store == null) return null;
-    return LocalCacheUsageUseCase(
-      store: store,
-      blobStore: blobStore,
-      vaultId: config.vaultId,
-      forcedBinaryExtensions: _forcedBinaryExtensions,
-      fileOnDisk: (relPath) => io.fileExists('$vaultPath/$relPath'),
-    )();
-  }
-
-  @override
   List<ConflictedFile> conflictSnapshot() {
     final store = _store;
     if (store == null) return const [];

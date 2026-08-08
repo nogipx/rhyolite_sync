@@ -113,7 +113,6 @@ export 'src/use_cases/conflict_list_use_case.dart';
 export 'src/use_cases/device_registry_use_case.dart';
 export 'src/use_cases/diff_text_use_case.dart';
 export 'src/use_cases/inspect_backup_use_case.dart';
-export 'src/use_cases/local_cache_usage_use_case.dart';
 export 'src/use_cases/repair_vault_use_case.dart';
 export 'src/use_cases/restore_backup_use_case.dart';
 export 'src/use_cases/vault_stats_use_case.dart';

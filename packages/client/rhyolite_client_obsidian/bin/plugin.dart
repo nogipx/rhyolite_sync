@@ -1197,6 +1197,17 @@ $kSyncPanelCss
                   ? null
                   : (count: o.count, bytes: o.totalBytes);
             },
+            // The user answers the vanished-files question; the engine only
+            // ever reported it.
+            onConfirmVanished: (fileIds) async {
+              if (engine is! StateSyncEngine) return;
+              try {
+                final n = await engine.confirmVanishedDeletes(fileIds);
+                if (n > 0) showNotice(S.vanishedDeleted(n));
+              } catch (e) {
+                showNotice(S.reclaimFailed(e));
+              }
+            },
             onStorageDetails: () => _showStorageOverview(
               plugin,
               engine,

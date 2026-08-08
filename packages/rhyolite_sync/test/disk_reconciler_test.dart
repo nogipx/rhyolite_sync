@@ -24,12 +24,21 @@ const _vaultId = '00000000-0000-4000-8000-000000000001';
 class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
+  /// Runs once, mid-upload — lets a test remove the file under the reconcile,
+  /// which is what a rename does on a backend slow enough to notice.
+  void Function()? onUpload;
+
   @override
   Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
       {for (final id in blobIds) if (store.containsKey(id)) id};
 
   @override
   Future<void> upload(List<(Uint8List, String)> blobs, {RpcContext? context}) async {
+    final hook = onUpload;
+    if (hook != null) {
+      onUpload = null;
+      hook();
+    }
     for (final (bytes, id) in blobs) {
       store[id] = bytes;
     }
@@ -988,6 +997,56 @@ void main() {
           reason: 'nothing may be written from bytes we could not open');
       expect(f.store.lastSyncedBlobRefFor(state.fileId), isNull,
           reason: 'the LCA must not advance, so an updated client heals it');
+    });
+  });
+
+  group('DiskReconciler - the file vanishes mid-reconcile', () {
+    test('a note renamed during its upload leaves no state for the old path',
+        () async {
+      // The bug this fixes, seen in the wild: create a note, name it, and a
+      // stray "Untitled.md" appears on every other device. Existence is
+      // checked at the top of the reconcile; reading, diffing and uploading
+      // then take seconds on a slow backend, and the rename lands inside that
+      // window. Committing afterwards publishes a state for a path that is
+      // gone, and nothing tombstones it — the delete half of the rename
+      // already ran and found no state to tombstone, because this one had not
+      // been committed yet.
+      final f = await _newFixture();
+      f.io.files['$_vaultPath/Untitled.md'] = _bytes('fresh note');
+
+      // Remove the file while the upload is in flight.
+      f.remote.onUpload = () {
+        f.io.files.remove('$_vaultPath/Untitled.md');
+      };
+
+      final changed = await f.reconciler.reconcileWithDisk('Untitled.md');
+
+      expect(changed, isFalse);
+      expect(f.store.get(f.fileIdFor('Untitled.md')), isNull,
+          reason: 'no state may be published for a path that no longer exists');
+    });
+
+    test('a binary that disappears during its upload is not published',
+        () async {
+      final f = await _newFixture();
+      f.io.files['$_vaultPath/att/photo.bin'] =
+          Uint8List.fromList(List.generate(64, (i) => i));
+      f.remote.onUpload = () {
+        f.io.files.remove('$_vaultPath/att/photo.bin');
+      };
+
+      final changed = await f.reconciler.reconcileWithDisk('att/photo.bin');
+
+      expect(changed, isFalse);
+      expect(f.store.get(f.fileIdFor('att/photo.bin')), isNull);
+    });
+
+    test('a file that stays put still syncs', () async {
+      final f = await _newFixture();
+      f.io.files['$_vaultPath/keeper.md'] = _bytes('still here');
+
+      expect(await f.reconciler.reconcileWithDisk('keeper.md'), isTrue);
+      expect(f.store.get(f.fileIdFor('keeper.md')), isNotNull);
     });
   });
 }

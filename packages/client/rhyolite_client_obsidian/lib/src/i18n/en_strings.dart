@@ -1033,6 +1033,20 @@ class EnStrings extends AppStrings {
   @override
   String blockedMeta(String size, String limit) => '$size · limit $limit';
   @override
+  String vanishedFiles(int n) => 'Gone since last run ($n)';
+  @override
+  String get vanishedFilesHint =>
+      'These were on this device and are not any more. Rhyolite was not '
+      'running when they went, so it cannot tell whether you deleted them or '
+      'the vault was simply unavailable — and it will not guess, because '
+      'guessing wrong removes them everywhere.';
+  @override
+  String get vanishedDelete => 'Delete on all devices';
+  @override
+  String get vanishedKeep => 'Keep them';
+  @override
+  String vanishedDeleted(int n) => 'Deleted $n file(s) on all devices.';
+  @override
   String needsNewerClient(int n) => 'Needs a newer version ($n)';
   @override
   String get needsNewerClientHint =>

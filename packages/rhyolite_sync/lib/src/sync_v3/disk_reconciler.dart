@@ -706,6 +706,25 @@ class DiskReconciler {
     // dirty-on-disk and the next reconcile picks it up.
     context?.cancellationToken?.throwIfCancelled();
 
+    // The file must STILL be there. Existence was checked at the top of this
+    // method, then reading, diffing and uploading spent real time — 2 s on a
+    // BYO WebDAV backend, longer on mobile — and a rename or delete can land
+    // inside that window. Committing now would publish a state for a path that
+    // no longer exists, and nothing would ever tombstone it: the delete half of
+    // the rename already ran, found no state (this one had not been committed
+    // yet) and correctly did nothing. The result is an orphan on every OTHER
+    // device — observed in the wild as a stray "Untitled.md" left behind by the
+    // ordinary create-then-name flow.
+    //
+    // Abandoning here loses nothing: the new path reconciles on its own, and a
+    // path the server never heard of needs no delete.
+    if (!await io.fileExists(absPath)) {
+      _log.info(
+        'Abandoning reconcile of $relPath: gone from disk during upload',
+      );
+      return false;
+    }
+
     final hlc = store.nextHlc();
     store.applyLocal(
       FileState(
@@ -901,6 +920,25 @@ class DiskReconciler {
         current.blobRef == upload.manifestHash &&
         !current.tombstone) {
       await _persistDocument(fileId, newSequence, newFm);
+      return false;
+    }
+
+    // The file must STILL be there. Existence was checked at the top of this
+    // method, then reading, diffing and uploading spent real time — 2 s on a
+    // BYO WebDAV backend, longer on mobile — and a rename or delete can land
+    // inside that window. Committing now would publish a state for a path that
+    // no longer exists, and nothing would ever tombstone it: the delete half of
+    // the rename already ran, found no state (this one had not been committed
+    // yet) and correctly did nothing. The result is an orphan on every OTHER
+    // device — observed in the wild as a stray "Untitled.md" left behind by the
+    // ordinary create-then-name flow.
+    //
+    // Abandoning here loses nothing: the new path reconciles on its own, and a
+    // path the server never heard of needs no delete.
+    if (!await io.fileExists(absPath)) {
+      _log.info(
+        'Abandoning reconcile of $relPath: gone from disk during upload',
+      );
       return false;
     }
 

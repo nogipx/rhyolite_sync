@@ -326,6 +326,7 @@ class SyncPanel {
     Future<int> Function()? onSettingsSize,
     Future<({int count, int bytes})?> Function()? onPluginStats,
     void Function()? onStorageDetails,
+    Future<void> Function(List<String> fileIds)? onConfirmVanished,
     LogScope? logger,
   }) : _plugin = plugin,
        _engine = engine,
@@ -342,6 +343,7 @@ class SyncPanel {
        _onSettingsSize = onSettingsSize,
        _onPluginStats = onPluginStats,
        _onStorageDetails = onStorageDetails,
+       _onConfirmVanished = onConfirmVanished,
        _log = logger;
 
   static const viewType = 'rhyolite-sync-panel';
@@ -361,6 +363,9 @@ class SyncPanel {
   final Future<int> Function()? _onSettingsSize;
   final Future<({int count, int bytes})?> Function()? _onPluginStats;
   final void Function()? _onStorageDetails;
+
+  /// Propagates the deletes the user approved from the vanished-files section.
+  final Future<void> Function(List<String> fileIds)? _onConfirmVanished;
   final LogScope? _log;
 
   /// Approx synced-settings footprint, fetched once per open (null until then
@@ -436,6 +441,11 @@ class SyncPanel {
   /// error this does not clear itself: it recurs on every reconcile and ends
   /// only when the user updates, so it lives in a list rather than a banner.
   final Set<String> _needsNewerClient = {};
+
+  /// Files this device held and no longer does, reported at startup. Keyed by
+  /// fileId because that is what the confirmation takes — the engine refuses
+  /// to re-derive the set, so the user acts on exactly the list they saw.
+  Map<String, String> _vanished = const {};
 
   /// Conflicts where a branch's bytes were unrecoverable — hard warnings.
   final List<SyncDataLoss> _dataLoss = [];
@@ -732,6 +742,8 @@ class SyncPanel {
         _blocked[event.path] = event;
       case SyncFileFormatUnsupported(:final path):
         _needsNewerClient.add(path);
+      case SyncFilesVanished(:final pathsByFileId):
+        _vanished = pathsByFileId;
       case SyncFileSizeUnblocked(:final path):
         _blocked.remove(path);
       case SyncFileDeleted(:final path):
@@ -1196,6 +1208,44 @@ class SyncPanel {
     }
 
     // ── Files this build cannot read ──
+    // ── Files gone since last run ──
+    // A question, not a notice. The engine deliberately refuses to decide
+    // this: a vault that failed to mount produces the same list as a folder
+    // the user emptied, and propagating the wrong answer deletes their notes
+    // everywhere. So both outcomes are spelled out and neither is default.
+    if (_vanished.isNotEmpty) {
+      final section = _section(
+        root,
+        icon: 'trash-2',
+        title: S.vanishedFiles(_vanished.length),
+        mod: 'mod-warn',
+      );
+      _el(section, 'div', cls: 'rh-hint', text: S.vanishedFilesHint);
+      final paths = _vanished.values.toList()..sort();
+      for (final p in paths.take(20)) {
+        final card = _el(section, 'div', cls: 'rh-card mod-warn');
+        _path(_el(card, 'div', cls: 'rh-card-title'), p);
+      }
+      if (paths.length > 20) {
+        _el(section, 'div', cls: 'rh-more', text: S.andMore(paths.length - 20));
+      }
+      final row = _el(section, 'div', cls: 'rh-links');
+      final confirm = _el(row, 'span', cls: 'rh-link', text: S.vanishedDelete);
+      _onClick(confirm, () async {
+        final ids = _vanished.keys.toList();
+        _vanished = const {};
+        _scheduleRender();
+        await _onConfirmVanished?.call(ids);
+      });
+      final keep = _el(row, 'span', cls: 'rh-link', text: S.vanishedKeep);
+      _onClick(keep, () async {
+        // Dismissed for this session only. Nothing is written: if they really
+        // are gone, the next start asks again, which is the right nagging.
+        _vanished = const {};
+        _scheduleRender();
+      });
+    }
+
     // Above the data-loss section on purpose: nothing was lost here, and the
     // fix is one the user can actually perform.
     if (_needsNewerClient.isNotEmpty) {

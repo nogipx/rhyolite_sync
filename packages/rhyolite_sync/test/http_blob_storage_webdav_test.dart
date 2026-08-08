@@ -106,16 +106,16 @@ void main() {
           reason: 'the failed chain must be retried, not trusted');
     });
 
-    test('an unconfirmed directory chain is retried on the NEXT upload too',
+    test('the chain runs once per session when uploads are not refused',
         () async {
-      // A WebDAV server that keeps erroring on MKCOL. Nothing ever confirmed
-      // the collection, so the latch must stay open — this is the regression
-      // where one blip disabled directory creation for the whole session.
+      // Latching only on a confirmed MKCOL response looked careful and cost
+      // two round trips before every upload batch on any server that answers
+      // it with something outside {201, 405, 301}. A 409 is what reopens it.
       var mkcols = 0;
       final client = MockClient((request) async {
         if (request.method == 'MKCOL') {
           mkcols++;
-          return http.Response('busy', 503);
+          return http.Response('unsupported', 503);
         }
         return http.Response('', 201);
       });
@@ -128,12 +128,11 @@ void main() {
       );
 
       await storage.upload([(_bytes('one'), 'blob-a')]);
-      final afterFirst = mkcols;
       await storage.upload([(_bytes('two'), 'blob-b')]);
+      await storage.upload([(_bytes('three'), 'blob-c')]);
 
-      expect(afterFirst, 2);
-      expect(mkcols, greaterThan(afterFirst),
-          reason: 'an unconfirmed directory must not be assumed to exist');
+      expect(mkcols, 2,
+          reason: 'one chain of two segments, not one per upload');
     });
 
     test('S3 is never sent MKCOL — it has no directories to create', () async {

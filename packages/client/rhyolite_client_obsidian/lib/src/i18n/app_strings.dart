@@ -440,6 +440,11 @@ abstract class AppStrings {
   String tooLargeToSync(int n);
   String get tooLargeHint;
   String blockedMeta(String size, String limit);
+  String vanishedFiles(int n);
+  String get vanishedFilesHint;
+  String get vanishedDelete;
+  String get vanishedKeep;
+  String vanishedDeleted(int n);
   String needsNewerClient(int n);
   String get needsNewerClientHint;
   String andMore(int n);

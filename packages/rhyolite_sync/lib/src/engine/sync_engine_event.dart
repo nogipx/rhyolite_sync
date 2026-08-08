@@ -88,6 +88,19 @@ class SyncFileTypeExcluded extends SyncEngineEvent {
   final String extension;
 }
 
+/// Files this device once held and no longer does, found at startup.
+///
+/// Deleted while nothing was watching — Obsidian closed, sync paused, the
+/// plugin off. NOT acted on: an unmounted vault produces exactly the same
+/// list, and no local signal tells the two apart, so propagating these
+/// deletes is the user's call. Keyed by fileId so the host can hand the
+/// approved subset back to `confirmVanishedDeletes`.
+class SyncFilesVanished extends SyncEngineEvent {
+  SyncFilesVanished(this.pathsByFileId);
+
+  final Map<String, String> pathsByFileId;
+}
+
 /// A file lies outside this device's [PathScope] — the user restricted sync to
 /// a set of folders and this path is not in them. Neither uploaded (local) nor
 /// materialised (remote), and a local delete of it is not propagated.

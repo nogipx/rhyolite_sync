@@ -1,3 +1,41 @@
+## [3.14.0] - 2026-08-08
+
+**Stray "Untitled" notes no longer appear on your other devices.** Creating a
+note and naming it is two steps — Obsidian makes it as "Untitled", you type
+the name — and if the first step reached your storage before the second, the
+throwaway name was left behind on every other device with no way to notice.
+The upload had to still be running when you renamed, so this hit hardest
+where uploads are slowest: your own S3 or WebDAV, mobile connections, large
+notes. Existing strays clear themselves the next time the name is reused.
+
+**Rhyolite now asks about files that disappeared while it was off.** Delete
+something with sync paused, or with Obsidian closed, and nothing was
+watching: the deletion never reached your other devices, and worse, it lay in
+wait — the moment another device edited that file, the two collided and the
+file came back. The sync panel now lists these and asks, with "Delete on all
+devices" and "Keep them".
+
+It asks rather than decides, and that is deliberate. A vault that failed to
+mount looks exactly like a folder you emptied, and there is no way to tell
+them apart from here — so the wrong guess would delete your notes everywhere.
+Only files this device actually held are listed; anything it simply never
+downloaded, or that your folder filter excludes, is not a candidate.
+
+**Faster uploads to your own storage.** A directory check meant for WebDAV was
+being repeated before every upload, and on a remote backend the round trip is
+most of the cost. Measured on a real vault, upload times stopped climbing —
+they had been growing edit over edit, up to nineteen seconds for a short note.
+
+### Bug Fixes
+
+- a file removed while its upload was still running is no longer published
+  under the old name (core)
+
+### Other
+
+- bump plugin to 3.14.0 (obsidian)
+
+
 ## [3.13.3] - 2026-08-08
 
 Fixes a way the copy kept of a losing version could be discarded too early.

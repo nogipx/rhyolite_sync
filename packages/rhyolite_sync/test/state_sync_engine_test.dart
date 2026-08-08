@@ -794,6 +794,95 @@ void main() {
           reason: "a note's blob is its Fugue tree, which disk does not hold");
     });
 
+    test('a file deleted while nothing was watching is reported, not deleted',
+        () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'note.bin')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.bin'] = Uint8List.fromList([1, 2, 3]);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.bin'));
+      await pushed;
+
+      // Stop, delete behind its back, start again — Obsidian closed, or sync
+      // paused. No watcher event is ever produced for this.
+      await h.engine.stop();
+      h.io.files.remove('$_vaultPath/note.bin');
+      final putsBefore = h.state.puts.length;
+      await h.engine.start();
+
+      final reported = h.events.whereType<SyncFilesVanished>().toList();
+      expect(reported, isNotEmpty,
+          reason: 'the user has to learn the delete never propagated');
+      expect(reported.last.pathsByFileId.values, contains('note.bin'));
+      expect(
+        h.state.puts
+            .skip(putsBefore)
+            .expand((p) => p.items)
+            .where((it) => it.tombstone),
+        isEmpty,
+        reason: 'reporting is not deleting — an unmounted vault looks the '
+            'same, so the engine must not decide this on its own',
+      );
+    });
+
+    test('confirming the report is what propagates the delete', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'note.bin')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.bin'] = Uint8List.fromList([1, 2, 3]);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.bin'));
+      await pushed;
+
+      await h.engine.stop();
+      h.io.files.remove('$_vaultPath/note.bin');
+      await h.engine.start();
+
+      final reported =
+          h.events.whereType<SyncFilesVanished>().last.pathsByFileId;
+      final n = await h.engine.confirmVanishedDeletes(reported.keys);
+
+      expect(n, 1);
+      final stats = h.engine.statsSnapshot()!;
+      expect(stats.tombstones, 1,
+          reason: 'the confirmed delete becomes a tombstone; getting it onto '
+              'the wire is the pusher\'s job and is covered where deletes '
+              'made with sync running are tested');
+    });
+
+    test('a file that came back is not deleted on confirmation', () async {
+      // The user approved a list they were shown; anything that changed since
+      // is outside that approval.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'note.bin')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.bin'] = Uint8List.fromList([1, 2, 3]);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.bin'));
+      await pushed;
+
+      await h.engine.stop();
+      h.io.files.remove('$_vaultPath/note.bin');
+      await h.engine.start();
+      final reported =
+          h.events.whereType<SyncFilesVanished>().last.pathsByFileId;
+
+      // It reappears before the user answers.
+      h.io.files['$_vaultPath/note.bin'] = Uint8List.fromList([1, 2, 3]);
+
+      expect(await h.engine.confirmVanishedDeletes(reported.keys), 0);
+    });
+
     test('a pushed file is not re-pushed on every notify-triggered pull '
         '(no push -> notify -> pull -> push storm)', () async {
       // Regression: the server echoes a device's own write back as a notify;

@@ -1053,6 +1053,20 @@ class RuStrings extends AppStrings {
   @override
   String blockedMeta(String size, String limit) => '$size · лимит $limit';
   @override
+  String vanishedFiles(int n) => 'Пропали с прошлого запуска ($n)';
+  @override
+  String get vanishedFilesHint =>
+      'Эти файлы были на этом устройстве и больше их нет. Rhyolite в тот '
+      'момент не работал и не может отличить, удалили вы их или хранилище '
+      'просто было недоступно, — и не станет угадывать: неверный ответ удалит '
+      'их везде.';
+  @override
+  String get vanishedDelete => 'Удалить на всех устройствах';
+  @override
+  String get vanishedKeep => 'Оставить';
+  @override
+  String vanishedDeleted(int n) => 'Удалено на всех устройствах: $n.';
+  @override
   String needsNewerClient(int n) => 'Нужна свежая версия ($n)';
   @override
   String get needsNewerClientHint =>

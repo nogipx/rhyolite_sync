@@ -349,7 +349,18 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
         allPresent = false;
       }
     }
-    _dirsCreated = allPresent;
+    // Latched whatever happened, and the 409 handler is what reopens it.
+    //
+    // Three designs were tried. Latching only on a confirmed 201/405/301 looks
+    // more careful and is worse: a server that answers MKCOL with anything
+    // else — and they vary — can never close the latch, so the chain re-runs
+    // before EVERY upload batch, two round trips each, on a backend where the
+    // round trip is the whole cost. Never retrying at all is worse still: one
+    // failed first attempt and the directory is never created again.
+    //
+    // Reacting to 409 gets both: one chain per session in the normal case, and
+    // a rebuild exactly when a PUT reports the collection missing.
+    _dirsCreated = true;
   }
 
   Uri _objectUri(String blobId) => baseUrl.resolve('$prefix$blobId');

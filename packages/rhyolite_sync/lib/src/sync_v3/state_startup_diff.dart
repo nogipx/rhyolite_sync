@@ -25,6 +25,13 @@ class StateStartupDiffResult {
   /// [PathScope]. The engine emits [SyncFileOutOfScope] for each.
   final List<String> outOfScope;
 
+  /// How many files the scan actually saw on disk.
+  ///
+  /// The one signal that separates "the user deleted things" from "the vault
+  /// did not mount". Both look identical through [missingFileIds] alone, and
+  /// acting on the second would broadcast a mass delete to every device.
+  final int diskFileCount;
+
   const StateStartupDiffResult({
     required this.newFiles,
     required this.modifiedFiles,
@@ -32,6 +39,7 @@ class StateStartupDiffResult {
     this.blocked = const [],
     this.excluded = const [],
     this.outOfScope = const [],
+    this.diskFileCount = 0,
   });
 }
 
@@ -562,6 +570,7 @@ class StateStartupDiff {
       blocked: blocked,
       excluded: excluded,
       outOfScope: outOfScope,
+      diskFileCount: diskRelPaths.length,
     );
   }
 

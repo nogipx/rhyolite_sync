@@ -549,6 +549,7 @@ class StateSyncEngine implements ISyncEngine {
         _emit(SyncFileOutOfScope(path: path));
       }
       await _backfillNewlyInScope(diff.missingFileIds);
+      _reportVanishedFiles(diff);
 
       final swStartupPush = Stopwatch()..start();
       await _push();
@@ -1457,6 +1458,92 @@ class StateSyncEngine implements ISyncEngine {
     } catch (_) {
       return true;
     }
+  }
+
+  /// Reports files this device demonstrably HAD and no longer has, so the
+  /// host can ask whether they were deleted. Deletes nothing.
+  ///
+  /// Deletions made while the engine was not listening — Obsidian closed, sync
+  /// paused, the plugin disabled — reach no watcher, so nothing tombstones
+  /// them. The state stays live and the file stays gone. Worse, it lies
+  /// latent: the next time a peer edits that file, the pre-join reconcile in
+  /// [RemoteApplier.apply] finally notices the absence and tombstones it right
+  /// then, concurrently with the peer's edit, so a delete made hours earlier
+  /// arrives as a delete-vs-edit conflict that add-wins resolves by bringing
+  /// the file back.
+  ///
+  /// Acting automatically is not on the table. "The user deleted these" and
+  /// "the vault did not mount" produce an identical set of missing files, and
+  /// no local signal separates them — only a guess would, and a guess guarding
+  /// a delete that propagates to every device is wrong on the day it is wrong.
+  /// So this reports; the user decides, through [confirmVanishedDeletes].
+  ///
+  /// What IS decidable is which files are even candidates. A stat signature is
+  /// written only when a reconcile actually read the file off THIS disk, so
+  /// its presence is evidence rather than inference — no signature means we
+  /// never had it, which is [_backfillNewlyInScope]'s case. Paths outside the
+  /// folder filter or of an excluded type are absent by instruction and are
+  /// not candidates either.
+  void _reportVanishedFiles(StateStartupDiffResult diff) {
+    final store = _store;
+    if (store == null || diff.missingFileIds.isEmpty) return;
+
+    final denylist = _excludedExtensions();
+    final scope = _pathScope();
+    final vanished = <String, String>{};
+    for (final fileId in diff.missingFileIds) {
+      final state = store.get(fileId);
+      if (state == null || state.tombstone || state.path.isEmpty) continue;
+      if (!scope.allows(state.path)) continue;
+      final ext = FileTypeDetector.extensionOf(state.path);
+      if (ext.isNotEmpty && denylist.contains(ext)) continue;
+      if (_sigStore?.get(fileId) == null) continue;
+      vanished[fileId] = state.path;
+    }
+    if (vanished.isEmpty) return;
+
+    _log.info(
+      'Vanished since last run: ${vanished.length} file(s) this device had '
+      'and no longer has — awaiting confirmation before propagating deletes',
+    );
+    _emit(SyncFilesVanished(Map.unmodifiable(vanished)));
+  }
+
+  /// Propagates the deletes the user confirmed from [SyncFilesVanished].
+  ///
+  /// Takes explicit ids rather than re-deriving the set: the user approved a
+  /// list they were shown, and anything that changed since is not covered by
+  /// that approval. A file that has reappeared is skipped.
+  Future<int> confirmVanishedDeletes(Iterable<String> fileIds) async {
+    final store = _store;
+    if (store == null) return 0;
+    var tombstoned = 0;
+    for (final fileId in fileIds) {
+      if (!_running) break;
+      final state = store.get(fileId);
+      if (state == null || state.tombstone || state.path.isEmpty) continue;
+      if (await io.fileExists('$vaultPath/${state.path}')) continue;
+      store.applyLocal(
+        state.copyWith(
+          hlc: store.nextHlc(),
+          tombstone: true,
+          blobRef: '',
+          sizeBytes: 0,
+        ),
+      );
+      await store.persistOne(fileId);
+      _sigStore?.remove(fileId);
+      await _fugueStore?.remove(fileId);
+      _markPending(fileId);
+      _emit(SyncFileDeleted(state.path));
+      tombstoned++;
+    }
+    if (tombstoned > 0) {
+      await store.persistMeta();
+      await _push();
+      _log.info('Confirmed $tombstoned vanished delete(s)');
+    }
+    return tombstoned;
   }
 
   /// Writes out files that are tracked in the store but have never existed on

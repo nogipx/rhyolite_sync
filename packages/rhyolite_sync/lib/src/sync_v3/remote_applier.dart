@@ -339,6 +339,25 @@ class RemoteApplier {
 
     // Multi-value register → real concurrent divergence. Resolver collapses
     // back to a single FileState and sets register cardinality to 1.
+    // Not every multi-value register is a disagreement. The commonest one by
+    // far is this device pulling back its OWN record: the pull goes out with a
+    // cursor from before the push was assigned its seq, the server hands the
+    // record straight back, and the join keeps both copies as concurrent
+    // because their causal contexts differ. Content-wise there is nothing to
+    // merge — every value says the same thing.
+    //
+    // It resolves correctly and cheaply (the join is idempotent, the re-upload
+    // dedups, and the pusher's _lastPushed guard suppresses the echo of the
+    // echo), so this is a LABEL, not a branch: the behaviour below is
+    // unchanged. What it buys is being able to read the logs. Every
+    // `result=text-conflict` used to be ambiguous, and a real divergence —
+    // the thing worth investigating — was indistinguishable from the noise
+    // every ordinary edit produces.
+    final first = joined.allValues.first;
+    final selfEcho = joined.allValues.every(
+      (v) => v.blobRef == first.blobRef && v.tombstone == first.tombstone,
+    );
+
     _emit(
       SyncConflictAppeared(fileId: fileId, valueCount: joined.values.length),
     );
@@ -363,7 +382,8 @@ class RemoteApplier {
         'preReconcile=${swPreReconcile.elapsedMilliseconds}ms '
         'applyRemote=${swApplyRemote.elapsedMilliseconds}ms '
         'resolveText=${swResolve.elapsedMilliseconds}ms '
-        'total=${swApply.elapsedMilliseconds}ms result=text-conflict',
+        'total=${swApply.elapsedMilliseconds}ms '
+        'result=${selfEcho ? 'self-echo' : 'text-conflict'}',
       );
       return;
     }

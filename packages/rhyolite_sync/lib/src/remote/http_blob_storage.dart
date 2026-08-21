@@ -334,19 +334,15 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
   Future<void> _createDirectories() async {
     final segments = prefix.split('/').where((s) => s.isNotEmpty).toList();
     var path = '';
-    var allPresent = true;
     for (final segment in segments) {
       path += '$segment/';
       final uri = baseUrl.resolve(path);
       try {
-        final response = await _request('MKCOL', uri);
-        if (response.statusCode != 201 &&
-            response.statusCode != 405 &&
-            response.statusCode != 301) {
-          allPresent = false;
-        }
+        // The status is deliberately not inspected — see the latch note below.
+        await _request('MKCOL', uri);
       } catch (_) {
-        allPresent = false;
+        // Nor is a thrown request fatal: the PUT that follows reports 409 if
+        // the collection really is missing, and that is what reopens the latch.
       }
     }
     // Latched whatever happened, and the 409 handler is what reopens it.

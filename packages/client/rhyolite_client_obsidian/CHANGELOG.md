@@ -1,3 +1,53 @@
+## [3.14.1] - 2026-08-21
+
+**Properties no longer come back scrambled.** Change the same property on two
+devices — a date, a status, anything Templater or the Linter rewrites on every
+save — and the two values could be merged letter by letter instead of one of
+them winning. `category` came back as `catgeory`, a timestamp as
+`2026-08-121T11:23:01`. It took one device's copy of the note being in an
+older form for this to happen, which is why it found the vaults that had
+already had trouble once.
+
+Properties now merge one key at a time whatever form the other device's copy
+is in, and "Repair sync state" no longer causes it — it used to strip the
+typed properties from every note in the vault as it went. Notes already
+scrambled stay that way; the version from before the merge is in the file's
+history.
+
+**A vault you already had on a new device is no longer replaced.** Install
+Rhyolite on a machine that already holds a copy of the vault, and any note
+whose content differed was overwritten by the server's version on the first
+sync, with nothing left to recover it from. Both versions are now kept and
+merged.
+
+**Settings and plugins sync faster.** Every settings file and every plugin
+used to go up on its own — one request each, and a plugin's files one after
+another — so the wait grew with how many things you had rather than with how
+much had actually changed. A scan now sends everything it found in a single
+request, and a plugin's files transfer together. The difference shows where it
+was worst: the first sync on a new device, turning plugin sync back on, and
+"Re-upload from this device".
+
+**An emptied list property keeps its type.** Clear a list — `aliases`,
+`tags`, `category` — and letting Obsidian rewrite the note turned the property
+from a list into plain text, so it stopped behaving like a list everywhere
+else.
+
+### Bug Fixes
+
+- properties merge per key even when the other device's copy carries no typed
+  frontmatter, instead of blending both values character by character (core)
+- "Repair sync state" keeps typed properties instead of stripping them from
+  every note (core)
+- a first sync no longer overwrites a note the device already had and had
+  never synced (core)
+- an emptied list property is no longer silently turned into text (core)
+
+### Other
+
+- bump plugin to 3.14.1 (obsidian)
+
+
 ## [3.14.0] - 2026-08-08
 
 **Stray "Untitled" notes no longer appear on your other devices.** Creating a

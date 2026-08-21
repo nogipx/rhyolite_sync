@@ -78,6 +78,7 @@ export 'src/engine/server_rejection_mapper.dart';
 export 'src/engine/sync_engine_event.dart';
 export 'src/engine/vault_config.dart';
 export 'src/sync_v3/blob_classifier.dart';
+export 'src/sync_v3/bounded_parallel.dart';
 export 'src/sync_v3/blob_janitor.dart';
 export 'src/sync_v3/byo_blob_janitor.dart';
 export 'src/sync_v3/chunked_blob_io.dart';

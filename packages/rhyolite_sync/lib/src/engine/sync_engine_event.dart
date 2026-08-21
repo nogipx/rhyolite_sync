@@ -492,6 +492,20 @@ class SyncDataLoss extends SyncEngineEvent {
   final String reason;
 }
 
+/// Emitted when a pull declined to overwrite a file that already held content
+/// this device had never synced — a vault copied onto a new machine, or edits
+/// made while the local database was missing.
+///
+/// Not an error and not a stall: the file is left alone precisely so the next
+/// pass can capture it as a concurrent value and merge it, rather than
+/// replacing it with the server's copy.
+class SyncFileKeptUnsynced extends SyncEngineEvent {
+  SyncFileKeptUnsynced({required this.fileId, required this.path});
+
+  final String fileId;
+  final String path;
+}
+
 /// Emitted when the engine refused to apply a pulled record because it
 /// failed to decode (bad cipher key, schema mismatch, corrupted row).
 /// The fileId continues syncing with the records that did decode.

@@ -5,12 +5,7 @@ import 'dart:typed_data';
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart'
-    show
-        ChunkedBlobIO,
-        PluginDirManifest,
-        PluginFileRef,
-        pluginCodeFileNames,
-        themeFileNames;
+    show ChunkedBlobIO, PluginDirManifest, PluginFileRef, boundedParallel;
 
 import 'obsidian_settings_registry.dart';
 import 'synced_dir_kind.dart';
@@ -238,7 +233,15 @@ class BlobDirSync {
     // the server itself handed us, so its blobs exist by construction.
     final known = {...?previous?.liveBlobIds};
     final files = <String, PluginFileRef>{};
-    for (final entry in sources.entries) {
+    // In parallel: a directory is at most three files, and uploading them one
+    // after another made a plugin cost three round trips instead of one. What
+    // this gives up is the chunk sharing a serial loop had — a later file could
+    // reuse the chunks an earlier one had just uploaded. Between a manifest, a
+    // bundled main.js and a stylesheet there is nothing to share, so the trade
+    // is a round trip against a dedup that does not happen. Chunks the PREVIOUS
+    // manifest put on the server are still skipped: `known` is seeded before
+    // the pool starts and is only read from inside it.
+    await boundedParallel(sources.entries.toList(), sources.length, (entry) async {
       final path = filePath(kind, id, entry.key);
       final total = entry.value.length;
       try {
@@ -252,15 +255,11 @@ class BlobDirSync {
           chunks: res.chunkHashes,
           size: total,
         );
-        // Later files in the same capture benefit from the earlier ones' chunks.
-        known
-          ..add(res.manifestHash)
-          ..addAll(res.chunkHashes);
       } finally {
         // Always closed, success or not, or the UI keeps a dead row forever.
         _report(path, true, total, total, true);
       }
-    }
+    });
 
     return PluginDirManifest(
       pluginId: id,
@@ -319,18 +318,25 @@ class BlobDirSync {
     // Fetch EVERYTHING before touching disk. A partial write would leave the
     // install torn across two releases, which is worse than not applying.
     final fetched = <String, Uint8List>{};
-    for (final entry in manifest.files.entries) {
+    final wanted = manifest.files.entries.where((entry) {
       // The parser accepts the union of every kind's file names, so a theme
       // record may carry `main.js`. Only what THIS kind declares reaches disk.
-      if (!kind.fileNames.contains(entry.key)) {
-        _log?.call('${kind.folder} $id: ignoring foreign file ${entry.key}');
-        continue;
-      }
-      final ref = entry.value;
-      if (ref.size > maxFileBytes) {
+      if (kind.fileNames.contains(entry.key)) return true;
+      _log?.call('${kind.folder} $id: ignoring foreign file ${entry.key}');
+      return false;
+    }).toList();
+    for (final entry in wanted) {
+      if (entry.value.size > maxFileBytes) {
         throw StateError('${kind.folder} file ${entry.key} of $id declares '
-            '${ref.size} B, over the $maxFileBytes B cap');
+            '${entry.value.size} B, over the $maxFileBytes B cap');
       }
+    }
+    // In parallel, for the same reason as the upload above. Still EVERYTHING
+    // before touching disk: `boundedParallel` rejects once a task throws, and
+    // the write loop below is not reached, so a failed fetch cannot leave the
+    // install torn across two releases.
+    await boundedParallel(wanted, wanted.length, (entry) async {
+      final ref = entry.value;
       final path = filePath(kind, id, entry.key);
       final Uint8List? bytes;
       try {
@@ -346,7 +352,7 @@ class BlobDirSync {
             'could not be fetched');
       }
       fetched[entry.key] = bytes;
-    }
+    });
 
     final dir = dirPath(kind, id);
     await _ensureDir(dir);

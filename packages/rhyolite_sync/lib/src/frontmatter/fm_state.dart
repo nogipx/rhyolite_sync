@@ -486,6 +486,66 @@ FmValueState _stateValue(FmValue value, FmValueState? prior, Hlc now) {
   }
 }
 
+/// Lifts a region that arrived WITHOUT a state into one, stamping every part
+/// of it with [at].
+///
+/// The case this exists for: a concurrent side whose blob carries no `\0fm1`
+/// tail. Its frontmatter is not missing — it is sitting in that side's TEXT —
+/// so the only thing absent is the typed view of it. Reading that view back
+/// out is what lets the merge treat every side alike, instead of falling back
+/// to a character join for the whole region because one side was quiet.
+///
+/// [at] MUST be the clock of the version the region came from — its
+/// `FileState.hlc` — not the local clock. The stamp decides who wins a
+/// per-key last-writer contest, so using "now" would let the side that merely
+/// happens to lack a tail beat every side that has one.
+///
+/// DETERMINISTIC, and it has to be: two devices lifting the same blob must
+/// produce equal states, or they disagree about the merged bytes and push at
+/// each other forever. Orders come from [fracIndexForPosition] — position, not
+/// a chained midpoint — so the result depends on nothing but (region, [at]).
+FmState liftFm(FmDocument doc, Hlc at) {
+  switch (doc) {
+    case FmRaw(:final text):
+      return FmRawState(tree: seedFugueText(text), fmHlc: at);
+    case FmMap(:final entries, :final trail):
+      return FmMapState(
+        entries: {
+          for (var i = 0; i < entries.length; i++)
+            entries[i].key: FmEntryState(
+              hlc: at,
+              value: _liftValue(entries[i].value, at),
+              order: fracIndexForPosition(i, entries.length),
+              orderHlc: at,
+              lead: entries[i].lead,
+              leadHlc: at,
+            ),
+        },
+        fmHlc: at,
+        trail: trail,
+        trailHlc: at,
+      );
+  }
+}
+
+FmValueState _liftValue(FmValue value, Hlc at) {
+  switch (value) {
+    case FmScalar(:final kind, :final text):
+      return FmScalarValue(kind, text);
+    case FmOpaque(:final raw):
+      return FmOpaqueValue(raw);
+    case FmList(:final items):
+      return FmListValue({
+        for (var i = 0; i < items.length; i++)
+          items[i]: FmItemState(
+            addHlc: at,
+            order: fracIndexForPosition(i, items.length),
+            orderHlc: at,
+          ),
+      });
+  }
+}
+
 /// Deterministic seed of a Fugue tree from text — same bytes, same tree, on
 /// any device.
 Fugue<String> seedFugueText(String text) {

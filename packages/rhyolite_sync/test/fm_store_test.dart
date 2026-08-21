@@ -10,7 +10,12 @@ import 'package:rhyolite_sync/src/frontmatter/frontmatter_render.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
 
-const _vaultId = '00000000-0000-4000-8000-0000000000fm';
+// Hex, not a mnemonic: `fm` reads nicely but is not a UUID, and a real vaultId
+// is a v4 that other layers feed to `uuid.v5` as a NAMESPACE (see
+// SettingsSync._fileIdFor, deterministicFileId). FmStore only uses it as a
+// collection-name prefix, so the bad value never surfaced here — it would have
+// thrown the moment this test grew to touch an id-deriving path.
+const _vaultId = '00000000-0000-4000-8000-0000000000fa';
 
 int _wall = 9000;
 Hlc at(String node) => Hlc(++_wall, 0, node);

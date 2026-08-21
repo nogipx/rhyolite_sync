@@ -438,6 +438,44 @@ class DiskReconciler {
       } catch (_) {
         swCompare.stop();
       }
+      // (2b) The file is on disk, holds something ELSE, and the engine has
+      // never taken custody of those bytes: no pull materialised them
+      // (`lastRef` is null) AND no reconcile ever read them (no stat
+      // signature). That combination means a vault copied onto a new machine,
+      // or edits made while the local database was gone. Writing now destroys
+      // them with nothing to recover from.
+      //
+      // BOTH halves are required. `lastRef` alone is not "we have never seen
+      // this file": a push deliberately never advances the synced LCA, so a
+      // note this device CREATED and published still has a null lastRef. On
+      // that alone the guard would refuse every peer edit to it, for ever — the
+      // file would simply stop updating here. The stat signature is what tells
+      // the two apart, and it survives a restart via [_sigStore].
+      //
+      // Refusing hands the file to the path that is meant to have it. The LCA
+      // stays unset, so the next pass still treats the file as unmaterialised;
+      // by then `store.get(fileId)` is non-null (the record was applied above
+      // us), which is exactly the condition that lets the applier's pre-join
+      // reconcile capture the disk content as a concurrent value. The register
+      // then goes multi-value and the ordinary text resolver merges both sides
+      // instead of one silently winning. StateStartupDiff does the same on a
+      // cold start — and once either has read the file, the signature exists
+      // and this guard steps out of the way.
+      //
+      // Costs nothing in the case the old behaviour was written for: after a
+      // local wipe the disk content EQUALS the remote, so (2) already returned.
+      final everRead = _statCache[state.path] != null ||
+          _sigStore?.get(_fileIdFor(state.path)) != null;
+      if (lastRef == null && !everRead) {
+        swWriteTotal.stop();
+        _log.warning(
+          'Not overwriting ${state.path}: it holds content this device never '
+          'synced (${bytes.length}B incoming). Kept on disk so the next pass '
+          'merges it instead of replacing it.',
+        );
+        _emit(SyncFileKeptUnsynced(fileId: state.fileId, path: state.path));
+        return false;
+      }
     }
     changeProvider.suppress(state.path);
     swWrite.start();
@@ -843,6 +881,7 @@ class DiskReconciler {
               // list and an empty string read back the same and the kind flips
               // between devices forever (§6.5).
               priorKinds: _priorKinds(base),
+              priorListKeys: _priorListKeys(base),
             );
       newFm = applyDiskFrontmatter(base, diskFm, store.nextHlc());
       fmChanged = materializeFm(newFm) != materializeFm(base);
@@ -992,6 +1031,17 @@ class DiskReconciler {
     if (fmStore == null) return;
     fmStore.set(fileId, fm);
     await fmStore.persistOne(fileId);
+  }
+
+  /// Keys the state currently holds as a LIST, for §6.5. Separate from
+  /// [_priorKinds] because a list has no [ScalarKind] to report, which is
+  /// precisely why an emptied one used to come back as a string.
+  Set<String> _priorListKeys(FmState state) {
+    if (state is! FmMapState) return const {};
+    return {
+      for (final e in state.entries.entries)
+        if (e.value.value is FmListValue) e.key,
+    };
   }
 
   /// The kind each key currently holds, for §6.5.

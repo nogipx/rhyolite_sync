@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_blob/rpc_blob.dart';
@@ -21,6 +22,7 @@ const _vaultId = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 const _vaultPath = '/vault';
 
 void main() {
+  _repairPullsFirst();
   group('StateSyncEngine seams', () {
     test('start() connects via the injected SyncConnection and pulls from '
         'cursor 0 on an empty vault', () async {
@@ -1558,4 +1560,62 @@ class _ManualChangeProvider implements IChangeProvider {
     if (!_changes.isClosed) await _changes.close();
     if (!_typing.isClosed) await _typing.close();
   }
+}
+
+void _repairPullsFirst() {
+  group('repair', () {
+    test('pulls before republishing, so a stale local copy cannot overwrite a '
+        "peer's newer edit", () async {
+      final remote = _MemRemote();
+
+      // A publishes the note.
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+      final pushedA = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      a.io.files['$_vaultPath/note.md'] =
+          Uint8List.fromList(utf8.encode('---\ntitle: one\n---\n\nX\n'));
+      a.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
+      await pushedA;
+      final recordsA = _recordsFromPuts(a.state);
+
+      // B adopts it, edits it, and publishes the newer version.
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? recordsA : const [];
+      b.state.getCursor = recordsA.last.serverSeq;
+      await b.engine.start();
+      final pushedB = b.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      b.io.files['$_vaultPath/note.md'] =
+          // Deliberately a different LENGTH: _InMemoryIO reports a constant
+          // mtime, so a same-length edit is invisible to the reconciler's stat
+          // short-circuit and would never push.
+          Uint8List.fromList(utf8.encode('---\ntitle: two\n---\n\nY the newer one\n'));
+      b.changes.emit(const FileModifiedEvent(relativePath: 'note.md'));
+      await pushedB;
+      final recordsB = _recordsFromPuts(b.state);
+      expect(recordsB, isNotEmpty);
+
+      // A never pulled: its disk still holds the old copy, and B's newer
+      // record is sitting on the server unread.
+      a.state.recordsFor = (since) => recordsB;
+      a.state.getCursor = recordsB.last.serverSeq;
+      expect(utf8.decode(a.io.files['$_vaultPath/note.md']!), contains('X'));
+
+      // Repair reseeds from disk under a dominating HLC. Without a pull first
+      // that republishes the stale copy over B's edit — not the resurrection
+      // that discarding history inherently risks, just plain loss.
+      await a.engine.triggerRepair();
+
+      expect(
+        utf8.decode(a.io.files['$_vaultPath/note.md']!),
+        contains('Y'),
+        reason: "repair must adopt the peer's newer version before rebuilding",
+      );
+    });
+  });
 }

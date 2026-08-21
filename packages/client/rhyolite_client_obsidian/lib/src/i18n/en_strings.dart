@@ -644,7 +644,10 @@ class EnStrings extends AppStrings {
   String get repairConfirmBody =>
       'Every note will be re-seeded from its current disk content and '
       're-uploaded. This can take a while for large vaults. File content on '
-      'disk is not changed.';
+      'disk is not changed.\n\n'
+      "This device's content becomes authoritative: edit history is discarded, "
+      'so if someone is editing the same notes on another device right now, '
+      'text deleted here can come back.';
   @override
   String get repairFinished => 'Vault repair finished — see logs for details.';
   @override

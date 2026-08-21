@@ -888,12 +888,25 @@ class StateSyncEngine implements ISyncEngine {
 
     _log.info('Repair: rebuilding text-file CRDT state from disk');
     try {
+      // Pull FIRST. Repair reseeds from whatever is on this disk and publishes
+      // it under a dominating HLC — so anything a peer pushed that this device
+      // has not materialised yet would be overwritten by a stale local copy.
+      // That is not the resurrection hazard inherent to discarding history; it
+      // is plain loss of a peer's newer edit, and one pull removes it.
+      //
+      // Deliberately NOT best-effort: repair exists to publish a clean state to
+      // the server, so it is useless without a connection anyway. Letting the
+      // failure reach the catch below means "could not pull" reads as "did not
+      // repair", instead of quietly republishing stale content.
+      await _pull();
+
       final result = await RepairVaultUseCase(
         io: io,
         vaultPath: vaultPath,
         vaultId: config.vaultId,
         store: store,
         fugueStore: fugueStore,
+        fmStore: _fmStore,
         uploadSequenceBlob: _reconciler!.uploadSequenceBlob,
         emit: _emit,
         logWarning: _log.warning,

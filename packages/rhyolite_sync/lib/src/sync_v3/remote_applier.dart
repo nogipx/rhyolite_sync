@@ -484,11 +484,15 @@ class RemoteApplier {
           kind == BlobKind.fugue ? reconciler.tryDecodeFugueBlob(bytes) : null;
       if (decoded != null) {
         sequences.add(decoded);
-        // The frontmatter of this side, when it carried one. Absent is the
-        // ordinary case for a peer that predates the feature, and it degrades
-        // to the text-level merge below rather than to nothing.
-        final fm = readFmTail(bytes);
-        if (fm != null) frontmatters.add(fm);
+        // The frontmatter of this side. A blob written before this feature —
+        // or by `repair`, or any raw-text push — carries no tail, but its
+        // frontmatter is not gone: it is in the text we just decoded. Lifting
+        // it back out under THIS version's own clock keeps every side
+        // comparable, so one quiet peer can no longer drop the whole region
+        // to a character join.
+        frontmatters.add(
+          readFmTail(bytes) ?? _liftFm(decoded.values.join(), state.hlc),
+        );
       } else if (kind == BlobKind.legacySequence ||
           kind == BlobKind.unknownTagged) {
         // A concurrent side we cannot read: either still in the old Sequence
@@ -507,9 +511,9 @@ class RemoteApplier {
         continue;
       } else {
         // Genuine plain-text blob — seed deterministically.
-        sequences.add(
-          FugueTextSync.seedFromText(utf8.decode(bytes, allowMalformed: true)),
-        );
+        final text = utf8.decode(bytes, allowMalformed: true);
+        sequences.add(FugueTextSync.seedFromText(text));
+        frontmatters.add(_liftFm(text, state.hlc));
       }
     }
 
@@ -581,21 +585,19 @@ class RemoteApplier {
       // duplicate-key file this work exists to eliminate. The frontmatter join
       // gives a valid region; the body keeps the union, which is the point of
       // this branch (nothing is dropped when there is no shared history).
-    // Rewriting the region from the joined state is only safe when EVERY side
-    // carried one. A peer without the feature contributes no tail, but its
-    // frontmatter edits are in its TEXT and the character join has already kept
-    // them — so rendering from a partial state would discard exactly the
-    // changes the merge just preserved. Worse than the duplicate key this
-    // exists to remove: that keeps both values, this drops one.
-    //
-    // Same reasoning as the deferral above: never collapse on a partial view.
-    final everySideCarriedFm = frontmatters.length == sequences.length;
+      // Every side now contributes a state — carried in its tail, or lifted
+      // from its own text just above — so there is no longer a partial view to
+      // guard against. The old guard skipped the rewrite whenever one peer was
+      // quiet, and that is exactly how a region reached disk character-blended.
       FmState? unionFm;
-      if (everySideCarriedFm) {
-        for (final fm in frontmatters) {
-          unionFm = unionFm == null ? fm : joinFm(unionFm, fm);
-        }
+      for (final fm in frontmatters) {
+        unionFm = unionFm == null ? fm : joinFm(unionFm, fm);
       }
+      // A region we could not model stays with the character union: its state
+      // is a Fugue tree seeded from fixed `fm-seed` dots, so joining two of
+      // them silently keeps one side whole. The union already merged that text
+      // losslessly — rewriting from the raw state could only lose a version.
+      if (unionFm is FmRawState) unionFm = null;
       if (unionFm != null) {
         union = renderNote(materializeFm(unionFm), splitFrontmatter(union).body);
       }
@@ -626,16 +628,15 @@ class RemoteApplier {
     // the typed states instead gives one key with both items, and the region
     // in the text is then rewritten from it.
     FmState? mergedFm;
-    if (frontmatters.length == sequences.length) {
-      for (final fm in frontmatters) {
-        mergedFm = mergedFm == null ? fm : joinFm(mergedFm, fm);
-      }
-    } else if (frontmatters.isNotEmpty) {
-      _log.info(
-        'Text merge for $fileId keeps the character union: '
-        '${frontmatters.length}/${sequences.length} sides carried frontmatter '
-        'state, and a partial one would drop the rest',
-      );
+    for (final fm in frontmatters) {
+      mergedFm = mergedFm == null ? fm : joinFm(mergedFm, fm);
+    }
+    // See the union branch: a raw region has no typed merge, and its state
+    // cannot be joined without dropping a side. The character join stands.
+    if (mergedFm is FmRawState) {
+      _log.info('Text merge for $fileId keeps the character union: '
+          'the region is not a mapping this build can place');
+      mergedFm = null;
     }
     if (mergedFm != null) {
       final text = merged.values.join();
@@ -695,6 +696,19 @@ class RemoteApplier {
         strategy: 'fugue-join',
         winnerBlobRef: upload.manifestHash,
       ),
+    );
+  }
+
+  /// The typed frontmatter of a side that shipped none, read back out of that
+  /// side's own text and stamped with the clock of the version it came from.
+  ///
+  /// A note with no region at all lifts to an empty map, which joins as the
+  /// identity — so a vault of plain notes is unaffected.
+  static FmState _liftFm(String text, Hlc at) {
+    final region = splitFrontmatter(text).region;
+    return liftFm(
+      region == null ? const FmMap([]) : parseFrontmatterRegion(region),
+      at,
     );
   }
 

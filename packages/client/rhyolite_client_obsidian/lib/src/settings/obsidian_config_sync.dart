@@ -282,7 +282,14 @@ class ObsidianConfigSync {
 
   // -- local -> remote ------------------------------------------------------
 
-  Future<void> _scanAndPush() async {
+  /// One scan, one push.
+  ///
+  /// Everything inside runs with pushes deferred, so N changed resources cost
+  /// one `putStates` instead of N. That includes the removal detection at the
+  /// end, which publishes tombstones through the same path.
+  Future<void> _scanAndPush() => _sync.batched(_scanAndPushInner);
+
+  Future<void> _scanAndPushInner() async {
     final candidates = await _enumerate();
     // Plugin-code sync is the one category whose absence from a scan is
     // invisible otherwise — every other resource shows up as a processed file.

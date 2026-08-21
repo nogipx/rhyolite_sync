@@ -77,6 +77,7 @@ FmScalar parseBareScalar(String bare) {
 FmDocument parseFrontmatterRegion(
   String region, {
   Map<String, ScalarKind> priorKinds = const {},
+  Set<String> priorListKeys = const {},
 }) {
   if (region.isEmpty) return const FmMap([]);
 
@@ -125,6 +126,7 @@ FmDocument parseFrontmatterRegion(
       keyLineIndex: i,
       valueStartOffset: line.start + valueStart,
       priorKind: priorKinds[key.key],
+      priorIsList: priorListKeys.contains(key.key),
     );
     if (parsed == null) return FmRaw(region);
 
@@ -300,6 +302,7 @@ _ParsedValue? _parseValue({
   required int keyLineIndex,
   required int valueStartOffset,
   required ScalarKind? priorKind,
+  required bool priorIsList,
 }) {
   final keyLine = lines[keyLineIndex];
   final afterColon = region.substring(valueStartOffset, keyLine.start + keyLine.text.length);
@@ -351,6 +354,12 @@ _ParsedValue? _parseValue({
     if (end == keyLineIndex + 1) {
       // Nothing indented follows: an empty value. Keeping the previous kind is
       // what stops an emptied list and an emptied string from flip-flopping.
+      //
+      // The list case is the one that bites in practice: our renderer writes an
+      // empty sequence as `key: []`, Obsidian's Properties panel rewrites it as
+      // a bare `key:`, and reading that back as an empty STRING silently
+      // changes the property's type — `aliases` stops being a list.
+      if (priorIsList) return _ParsedValue(const FmList([]), end);
       return _ParsedValue(
         FmScalar(priorKind ?? ScalarKind.text, ''),
         end,

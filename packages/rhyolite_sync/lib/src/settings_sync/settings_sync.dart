@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:convergent/convergent.dart';
+import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
 
 import '../contract/state_sync_contract.dart';
@@ -67,6 +68,21 @@ class SettingsSync {
   /// resourceId -> decoded convergent state.
   final Map<String, Object> _state = {};
   bool _started = false;
+
+  /// Resources changed inside a [batched] section, waiting for one push.
+  final Set<String> _pending = {};
+  bool _batching = false;
+
+  /// resourceId -> digest of the exact payload the server refused.
+  ///
+  /// Without it a record over the server's cap is re-encrypted and re-sent on
+  /// every scan, forever, and refused every time — the storm the signature
+  /// guard elsewhere exists to prevent. Keyed on the payload, not the resource,
+  /// so the moment the user edits the file it is tried again.
+  final Map<String, String> _rejected = {};
+
+  static String _digestOf(String encryptedState) =>
+      sha256.convert(utf8.encode(encryptedState)).toString();
 
   static const _uuid = Uuid();
 
@@ -223,6 +239,29 @@ class SettingsSync {
     return codec.renderState(_stateOf(resourceId, codec));
   }
 
+  /// Runs [body] with every push it causes deferred, then sends the lot as one
+  /// `putStates` instead of one per resource.
+  ///
+  /// A scan that touches N resources used to cost N round trips — the single
+  /// largest part of a first sync, a re-upload, or re-enabling a category. The
+  /// notes path has always batched this way ([StatePusher] collects every dirty
+  /// file into one request); settings did not, purely because
+  /// [applyLocalChange] was written to push its own resource.
+  ///
+  /// The flush is in a `finally`, so a resource that changed before something
+  /// threw is still published — deferring must never be able to lose a write.
+  /// Nesting is safe: only the outermost section flushes.
+  Future<T> batched<T>(Future<T> Function() body) async {
+    if (_batching) return body();
+    _batching = true;
+    try {
+      return await body();
+    } finally {
+      _batching = false;
+      await _flushPending();
+    }
+  }
+
   /// A fresh local file snapshot was observed; diff it into the CRDT and push.
   /// [sourceSig] is the platform's opaque signature for this file version; it is
   /// recorded even when the snapshot yields no CRDT change, so the next scan can
@@ -243,7 +282,33 @@ class SettingsSync {
     }
     _state[resourceId] = next;
     await _persist(resourceId, sig: sourceSig);
+    if (_batching) {
+      _pending.add(resourceId);
+      return;
+    }
     await _push([resourceId]);
+  }
+
+  Future<void> _flushPending() async {
+    if (_pending.isEmpty) return;
+    final ids = _pending.toList(growable: false);
+    _pending.clear();
+    try {
+      await _push(ids);
+    } catch (_) {
+      // The push never landed — a dropped connection, a timeout. These
+      // resources are still owed, and nothing else will notice: their source
+      // signature was recorded when the file was read, so the next scan skips
+      // them. Dropping them here is how a settings change ends up on disk,
+      // marked as scanned, and owed to nobody.
+      //
+      // Everything goes back, including any that a partially-completed _push
+      // did get through. Re-sending an accepted resource is idempotent — a
+      // fresh HLC over the same content — and costs one item in one request,
+      // which is the cheaper mistake by far.
+      _pending.addAll(ids);
+      rethrow;
+    }
   }
 
   /// Pull remote records, fold via convergent join, and write back a
@@ -339,8 +404,70 @@ class SettingsSync {
     return pull();
   }
 
+  /// Accumulated encrypted payload at which a batch is sent and a new one
+  /// started.
+  ///
+  /// The server's cap (`recordSizeLimit`) is per RECORD, so batching cannot
+  /// breach it — this bounds the REQUEST, which nothing else does. Settings
+  /// records are kilobytes, so an ordinary vault still goes in one call; the
+  /// cap only bites on a vault carrying several outsized states at once, which
+  /// is exactly when an unbounded request would hurt.
+  static const _maxBatchBytes = 1 << 20; // 1 MiB
+  static const _maxBatchItems = 64;
+
   Future<void> _push(List<String> resourceIds) async {
-    final items = <StatePutItem>[];
+    var items = <StatePutItem>[];
+    // fileId -> what to commit locally once the SERVER has accepted it.
+    var owed = <String, ({String resourceId, Hlc hlc})>{};
+    var batchBytes = 0;
+
+    Future<void> flush() async {
+      if (items.isEmpty) return;
+      final sending = items;
+      final sentOwed = owed;
+      items = <StatePutItem>[];
+      owed = {};
+      batchBytes = 0;
+      // Cursor is intentionally NOT advanced here — the next pull re-reads our
+      // own write idempotently and advances the cursor then. [clientId] lets
+      // the server-echoed notify be recognised as our own (skipped, not
+      // pulled).
+      final resp = await _remote.putStates(
+        StatePutRequest(
+          vaultId: vaultId,
+          items: sending,
+          sourceClientId: clientId,
+        ),
+      );
+
+      // Only NOW is the write ours to claim. Advancing `seen` before the server
+      // answered meant a record the server REFUSED was recorded as published:
+      // the change never reached a peer and this device stopped owing it, which
+      // is a settings change silently lost. The notes path has always read
+      // these per-item results; this one discarded the whole response.
+      final byId = {for (final r in resp.results) r.fileId: r};
+      for (final e in sentOwed.entries) {
+        final result = byId[e.key];
+        final resourceId = e.value.resourceId;
+        if (result != null && result.rejected) {
+          final r = result.rejection!;
+          _rejected[resourceId] = _digestOf(
+            sending.firstWhere((i) => i.fileId == e.key).encryptedState,
+          );
+          _log?.call('settings: server refused $resourceId '
+              '(${r.code} ${r.current} > ${r.limit}) — NOT synced; it is '
+              'retried when the file changes');
+          continue;
+        }
+        _rejected.remove(resourceId);
+        _store.setSeen(
+          resourceId,
+          _store.seenOf(resourceId).advance(e.value.hlc),
+        );
+        await _persist(resourceId);
+      }
+    }
+
     for (final resourceId in resourceIds) {
       final kind = _kindOf(resourceId);
       final state = _state[resourceId];
@@ -355,12 +482,38 @@ class SettingsSync {
         's': codec.encodeState(state),
       }));
       final enc = await _cipher.encrypt(Uint8List.fromList(payload));
+      // What actually travels is the base64, which is a third larger than the
+      // ciphertext — measuring `enc` would undercount the request by that much.
+      final encoded = base64Encode(enc);
+
+      // Already refused, and nothing about it has changed. Sending it again
+      // would be refused again. The digest is computed only for a resource
+      // that is actually blocked, so the ordinary path pays nothing.
+      final blocked = _rejected[resourceId];
+      if (blocked != null) {
+        if (blocked == _digestOf(encoded)) continue;
+        _rejected.remove(resourceId);
+      }
+
+      // Flush BEFORE adding, not after. Checking afterwards lets one oversized
+      // state ride on top of a batch that was already near the cap, so the
+      // bound becomes "cap PLUS the largest item" instead of the cap. A single
+      // item bigger than the cap still goes alone — it has to, and that is what
+      // it cost before any of this batched.
+      if (items.isNotEmpty &&
+          (batchBytes + encoded.length > _maxBatchBytes ||
+              items.length >= _maxBatchItems)) {
+        await flush();
+      }
+
       final outHlc = _store.nextHlc();
       final seen = _store.seenOf(resourceId);
+      final fileId = _fileIdFor(resourceId);
+      owed[fileId] = (resourceId: resourceId, hlc: outHlc);
       items.add(
         StatePutItem(
-          fileId: _fileIdFor(resourceId),
-          encryptedState: base64Encode(enc),
+          fileId: fileId,
+          encryptedState: encoded,
           blobRef: '',
           hlcPacked: outHlc.pack(),
           tombstone: false,
@@ -373,17 +526,9 @@ class SettingsSync {
           chunks: codec.liveBlobIds(state),
         ),
       );
-      // Our own write now belongs to what we've seen.
-      _store.setSeen(resourceId, seen.advance(outHlc));
-      await _persist(resourceId);
+      batchBytes += encoded.length;
     }
-    if (items.isEmpty) return;
-    // Cursor is intentionally NOT advanced here — the next pull re-reads our
-    // own write idempotently and advances the cursor then. [clientId] lets the
-    // server-echoed notify be recognised as our own (skipped, not pulled).
-    await _remote.putStates(
-      StatePutRequest(vaultId: vaultId, items: items, sourceClientId: clientId),
-    );
+    await flush();
   }
 
   Future<void> _persist(String resourceId, {String? sig}) async {

@@ -6,6 +6,10 @@ import 'package:convergent/fugue.dart';
 
 import '../chunking/file_type_detector.dart';
 import '../engine/sync_engine_event.dart';
+import '../frontmatter/fm_state.dart';
+import '../frontmatter/fm_store.dart';
+import '../frontmatter/frontmatter_parser.dart';
+import '../frontmatter/frontmatter_split.dart';
 import '../platform/i_platform_io.dart';
 import '../sync_v3/file_state.dart';
 import '../sync_v3/file_state_store.dart';
@@ -60,6 +64,7 @@ class RepairVaultUseCase {
     required this.vaultId,
     required this.store,
     required this.fugueStore,
+    this.fmStore,
     required this.uploadSequenceBlob,
     required this.emit,
     required this.logWarning,
@@ -79,6 +84,13 @@ class RepairVaultUseCase {
   final FileStateStore store;
   final FugueStore fugueStore;
 
+  /// Repair rewrites every text blob in the vault. Without this the rewrite
+  /// drops the `\0fm1` tail from all of them, and the next concurrent edit
+  /// falls back to a character-level merge of the frontmatter region — the
+  /// blended-properties bug. Optional only so existing callers keep compiling;
+  /// the engine always supplies it.
+  final FmStore? fmStore;
+
   /// Snapshot of the vault-global force-binary extension policy, so a
   /// user-forced-binary file is NOT rebuilt as a Fugue text tree here.
   final Set<String> forcedBinaryExtensions;
@@ -93,7 +105,7 @@ class RepairVaultUseCase {
   /// stays free of those concerns. Returns null when no remote storage
   /// is configured (offline-only); the repair aborts in that case.
   final Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
-      Function(Fugue<String> seq) uploadSequenceBlob;
+      Function(Fugue<String> seq, {FmState? fm}) uploadSequenceBlob;
 
   /// Caller-supplied event sink — emits the repair lifecycle events so
   /// the UI can show progress and a final summary.
@@ -170,8 +182,18 @@ class RepairVaultUseCase {
     fugueStore.set(fileId, seq);
     await fugueStore.persistOne(fileId);
 
+    // The frontmatter half of the same reseed. Lifted from the very bytes the
+    // tree was seeded from, so the two halves agree by construction, and
+    // stamped with a fresh clock because this repaired state is a new
+    // dominating write — exactly like the FileState below.
+    final fm = _liftFrontmatter(text);
+    if (fm != null) {
+      fmStore?.set(fileId, fm);
+      await fmStore?.persistOne(fileId);
+    }
+
     // 4: upload the freshly-seeded Sequence as a new blob.
-    final upload = await uploadSequenceBlob(seq);
+    final upload = await uploadSequenceBlob(seq, fm: fm);
     if (upload == null) {
       throw StateError(
         'No remote storage configured — cannot push repaired state',
@@ -195,6 +217,15 @@ class RepairVaultUseCase {
       ),
     );
     await store.persistOne(fileId);
+  }
+
+  /// The typed frontmatter of [text], or null when the note has none worth
+  /// carrying (which is every note that never had a property).
+  FmState? _liftFrontmatter(String text) {
+    final region = splitFrontmatter(text).region;
+    if (region == null) return null;
+    final lifted = liftFm(parseFrontmatterRegion(region), store.nextHlc());
+    return fmStateIsWorthStoring(lifted) ? lifted : null;
   }
 
   static bool _isHidden(String relPath) =>

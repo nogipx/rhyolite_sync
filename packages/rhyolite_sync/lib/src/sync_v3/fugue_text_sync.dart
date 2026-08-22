@@ -141,6 +141,7 @@ class FugueTextSync {
     );
     await Future<void>.delayed(Duration.zero);
     cleanupSemantic(diffs);
+    alignDiffsToRunes(diffs);
 
     // Translate the diff into a single Fugue.applyOps batch. Applying the
     // whole batch mints consecutive counters, so a forward-typed run
@@ -170,4 +171,90 @@ class FugueTextSync {
     next.applyOps(ops, clock);
     return next;
   }
+}
+
+bool _isHigh(int u) => u >= 0xD800 && u <= 0xDBFF;
+bool _isLow(int u) => u >= 0xDC00 && u <= 0xDFFF;
+
+/// Moves diff boundaries off the middle of a surrogate pair, in place.
+///
+/// The tree indexes by RUNE — [FugueTextSync.seedFromText] makes one element
+/// per code point, so an emoji is one element. `diff_match_patch` indexes by
+/// UTF-16 CODE UNIT and will happily cut a pair in half: `🇦` is D83C DDE6 and
+/// `🇧` is D83C DDE7, so their common prefix ends between the two units.
+///
+/// Feeding that straight to the op builder mixes the two systems. The trailing
+/// lone D83C counts as one rune, so the cursor lands one past the emoji instead
+/// of on it; the delete then removes the character AFTER it, and the insert
+/// puts half a pair into the tree. On a note that is exactly
+/// `priority: <emoji>` followed by another key, the newline is what gets
+/// deleted — which is why the reported damage always appeared AT an emoji, with
+/// the next line glued on and an unrenderable glyph left behind.
+///
+/// The repair is local. Where an EQUAL run ends on a lone high surrogate, that
+/// unit belongs to the character being replaced, so it moves out of the EQUAL
+/// and onto the front of both the DELETE and the INSERT beside it. The mirror
+/// case — an EQUAL run that STARTS with a lone low surrogate — moves it onto
+/// the back of the change before it. Either way old and new still reconstruct
+/// exactly; only the boundary moves.
+void alignDiffsToRunes(List<Diff> diffs) {
+  // Overwhelmingly the common case, and worth not walking twice for.
+  var suspect = false;
+  for (final d in diffs) {
+    if (d.text.isEmpty) continue;
+    if (_isHigh(d.text.codeUnitAt(d.text.length - 1)) ||
+        _isLow(d.text.codeUnitAt(0))) {
+      suspect = true;
+      break;
+    }
+  }
+  if (!suspect) return;
+
+  /// The chunk of [op] inside the change run starting at [from], creating an
+  /// empty one if the run has none — a replacement always needs both sides once
+  /// a straddling character has been pulled into it.
+  Diff sideOf(int from, int op) {
+    var i = from;
+    while (i < diffs.length && diffs[i].operation != DIFF_EQUAL) {
+      if (diffs[i].operation == op) return diffs[i];
+      i++;
+    }
+    final created = Diff(op, '');
+    diffs.insert(i, created);
+    return created;
+  }
+
+  for (var i = 0; i < diffs.length; i++) {
+    final d = diffs[i];
+    if (d.operation != DIFF_EQUAL || d.text.isEmpty) continue;
+
+    // EQUAL ending mid-pair: hand the high surrogate to the change after it.
+    final last = d.text.codeUnitAt(d.text.length - 1);
+    if (_isHigh(last) && i + 1 < diffs.length) {
+      final unit = d.text.substring(d.text.length - 1);
+      d.text = d.text.substring(0, d.text.length - 1);
+      // Both sides resolved BEFORE either is written: `sideOf` may insert a
+      // chunk, which shifts the indices the other lookup would have used.
+      final del = sideOf(i + 1, DIFF_DELETE);
+      final ins = sideOf(i + 1, DIFF_INSERT);
+      del.text = unit + del.text;
+      ins.text = unit + ins.text;
+    }
+
+    // EQUAL starting mid-pair: hand the low surrogate to the change before it.
+    if (d.text.isNotEmpty && _isLow(d.text.codeUnitAt(0)) && i > 0) {
+      final unit = d.text.substring(0, 1);
+      d.text = d.text.substring(1);
+      var j = i - 1;
+      while (j >= 0 && diffs[j].operation != DIFF_EQUAL) {
+        j--;
+      }
+      final del = sideOf(j + 1, DIFF_DELETE);
+      final ins = sideOf(j + 1, DIFF_INSERT);
+      del.text += unit;
+      ins.text += unit;
+    }
+  }
+
+  diffs.removeWhere((d) => d.text.isEmpty);
 }

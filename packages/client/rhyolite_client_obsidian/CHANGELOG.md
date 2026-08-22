@@ -1,3 +1,39 @@
+## [3.14.2] - 2026-08-22
+
+**Properties with an emoji stopped breaking.** A note whose `status` or
+`priority` holds an emoji could come back with the following line glued onto
+it and an unrenderable box where the emoji had been:
+
+```
+priority: 🇦?category:
+  - "[[work]]"
+```
+
+3.14.1 fixed one cause of scrambled properties. This was a second, separate
+one, which is why it could still happen after updating — and it is the reason
+the damage always landed on an emoji rather than anywhere else.
+
+Editing text stores the change by position. Emoji are counted as one character
+almost everywhere, but as two in the format the comparison step works in, and
+two emoji that look unrelated often share their first half — the coloured
+squares do, the letter symbols do. When a change fell exactly there, the
+position came out one off: the newline after the emoji was removed instead of
+the emoji itself, and half a character was stored in its place.
+
+Nothing needs to be done differently; edits at emoji are now counted the way
+the rest of the note is. Notes already damaged stay as they are, and the
+version from before the damage is in the file's history.
+
+### Bug Fixes
+
+- an edit next to an emoji no longer removes the following line break and
+  stores a broken character (core)
+
+### Other
+
+- bump plugin to 3.14.2 (obsidian)
+
+
 ## [3.14.1] - 2026-08-21
 
 **Properties no longer come back scrambled.** Change the same property on two

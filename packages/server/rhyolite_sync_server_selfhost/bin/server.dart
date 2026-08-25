@@ -40,7 +40,7 @@ Future<void> main() async {
 
   await RpcApp.server(
     modules: [
-      PostgresModule(),
+      PostgresModule(logger: logController.scope('rhyolite.sync.selfhost')),
       // Single process, single tenant: notify only fans out to this process's
       // own connected devices, so an in-memory bus is sufficient (and has no
       // network leg to go stale). Do not scale self-host past one replica.

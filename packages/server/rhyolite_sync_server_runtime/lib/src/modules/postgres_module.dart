@@ -9,8 +9,12 @@ import 'package:rpc_data_postgres/rpc_data_postgres.dart';
 /// ([InMemoryNotifyModule] in self-host; a Redis-backed module in the managed
 /// edition) so the notify backend is swappable independently of data storage.
 class PostgresModule extends RpcModule {
+  PostgresModule({LogScope? logger}) : _log = logger ?? LogScope.noop;
+
   @override
   String get name => 'PostgresModule';
+
+  final LogScope _log;
 
   late Endpoint _endpoint;
   late String _schema;
@@ -66,6 +70,10 @@ class PostgresModule extends RpcModule {
       _pool!,
       schema: _schema,
       enableChangeJournal: false,
+      // Damage to one collection's metadata no longer refuses the boot, so
+      // this is the only place it surfaces. A vault reading as empty and
+      // nothing in the log would be the worse outcome of the two.
+      onIntegrityIssue: (message) => _log.warning('postgres: $message'),
     );
     container.registerSingleton<IDataClient>(
       IDataClient.repository(

@@ -1,6 +1,8 @@
 import 'package:rhyolite_sync/rhyolite_sync.dart'
     show pluginCodeFileNames, themeFileNames;
 
+import 'obsidian_settings_registry.dart';
+
 /// What kind of `.obsidian` directory a blob-backed resource is.
 ///
 /// Plugins and themes are the same problem — a small fixed set of files, at
@@ -13,6 +15,7 @@ class SyncedDirKind {
     required this.fileNames,
     required this.entryFile,
     required this.reloadable,
+    required this.category,
   });
 
   /// Community plugin: `manifest.json` + `main.js` + optional `styles.css`.
@@ -21,6 +24,7 @@ class SyncedDirKind {
     fileNames: pluginCodeFileNames,
     entryFile: 'main.js',
     reloadable: true,
+    category: SettingsCategory.communityPluginCode,
   );
 
   /// Theme: `manifest.json` + `theme.css`. Obsidian watches theme files and
@@ -30,10 +34,17 @@ class SyncedDirKind {
     fileNames: themeFileNames,
     entryFile: 'theme.css',
     reloadable: false,
+    category: SettingsCategory.themesSnippets,
   );
 
   final String folder;
   final List<String> fileNames;
+
+  /// The selective-sync category this kind belongs to — the same one
+  /// [ObsidianSettingsRegistry.classify] assigns to its resource ids. Kept here
+  /// so callers holding only a kind (removal detection) can answer questions
+  /// about the category without inventing a resource id to classify.
+  final SettingsCategory category;
 
   /// The file whose absence means the directory is not a usable install — a
   /// leftover, or a download still in flight. Capturing one would propagate the

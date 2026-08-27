@@ -182,6 +182,30 @@ void _cancelSelfHeal() {
 /// per-file size gate. Null in self-host / before the first fetch → no limit.
 PlanCapabilities? _capabilities;
 
+/// Records fresh capabilities and remembers them for the next session.
+///
+/// Every consumer of [_capabilities] treats null as "no answer", and the only
+/// way to get one is a network call made while a sync session starts — so it
+/// fails at exactly the times sessions are hardest to start. Persisting the
+/// last real answer turns a failed lookup into "what the server said last
+/// time", which is right far more often than "nothing is allowed".
+///
+/// A null [caps] is the server omitting the field, which is that same "no
+/// answer" and not a denial, so it leaves the cached value standing. A real
+/// downgrade arrives as capabilities that say so, and overwrites it.
+Future<void> _rememberCapabilities(
+  PlanCapabilities? caps,
+  ObsidianConfigStorage storage,
+) async {
+  if (caps == null || _capabilities == caps) return;
+  _capabilities = caps;
+  try {
+    await storage.saveCapabilities(caps);
+  } catch (e) {
+    _log.debug('capabilities cache write failed: $e');
+  }
+}
+
 /// Whether this session talks to a self-hosted server. Held here because the
 /// settings-sync launcher runs from several call sites that no longer have the
 /// boot block's locals in scope, and the plugin-code storage gate needs it.
@@ -382,24 +406,31 @@ Future<void> _launchConfigSync({
   );
   // Plugin *code* is the one category whose bytes are measured in hundreds of
   // megabytes, so it is gated on the storage backing this vault as well as on
-  // the user's own toggle. Dropping the category here (rather than only hiding
-  // the toggle) means a vault whose plan changed stops capturing immediately.
+  // the user's own toggle.
+  //
+  // The gate suppresses UPLOADS and nothing else. It used to drop the category
+  // from the set below, which is also the sync scope — so a `getSubscription`
+  // that merely timed out (`unknownQuota`) purged every plugin record from the
+  // local store and reset the pull cursor, and the next successful lookup paid
+  // for it with a full re-download of the plugin set. Availability is a
+  // statement about spending managed storage; it must not be able to rewrite
+  // what this device is subscribed to.
   final gate = pluginCodeAvailability(
     selfHost: _selfHostActive,
     externalStorage: engine.config.externalStorageKind != null,
     managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
   );
-  final pluginCodeOn = prefs.categories.contains(
-        SettingsCategory.communityPluginCode,
-      ) &&
-      gate == PluginCodeAvailability.allowed;
-  final categories = pluginCodeOn
-      ? prefs.categories
-      : (Set<SettingsCategory>.of(prefs.categories)
-        ..remove(SettingsCategory.communityPluginCode));
-  if (prefs.categories.contains(SettingsCategory.communityPluginCode) &&
-      !pluginCodeOn) {
-    _log.info('Plugin code sync unavailable: ${gate.name}');
+  final categories = prefs.categories;
+  final pluginCodeWanted = categories.contains(
+    SettingsCategory.communityPluginCode,
+  );
+  final pullOnly = pluginCodePullOnly(
+    enabled: categories,
+    availability: gate,
+  );
+  if (pullOnly.isNotEmpty) {
+    _log.info('Plugin code upload paused: ${gate.name} '
+        '(existing plugin records still sync down)');
   }
 
   final pluginCode = BlobDirSync(
@@ -449,6 +480,10 @@ Future<void> _launchConfigSync({
     // Which categories are on IS the scope: a pull drops records for a category
     // that is off, so the cursor it leaves behind is only valid while the set
     // stays the same. Sorted so the token depends on membership, not order.
+    //
+    // `categories` is the user's own toggle set, never the storage gate — see
+    // the gate comment above. A token that a failed network call can flip makes
+    // the cursor worthless.
     scope: (categories.map((c) => c.name).toList()..sort()).join(','),
     log: _log.info,
   );
@@ -456,10 +491,15 @@ Future<void> _launchConfigSync({
     adapter: plugin.app.vault.adapter,
     sync: sync,
     enabledCategories: categories,
+    // The storage gate, expressed where it belongs: no capture, no removal
+    // detection, everything else untouched.
+    pullOnlyCategories: pullOnly,
     // Needed by BOTH blob-backed categories. Themes are on by default while
     // plugin code is opt-in, so gating this on plugin code alone would have
-    // silently stopped themes from syncing at all.
-    pluginCode: (pluginCodeOn ||
+    // silently stopped themes from syncing at all. Keyed on what the user
+    // enabled, not on the gate: a pull-only category still has to be able to
+    // write what it receives to disk.
+    pluginCode: (pluginCodeWanted ||
             categories.contains(SettingsCategory.themesSnippets))
         ? pluginCode
         : null,
@@ -707,6 +747,12 @@ $kSyncPanelCss
       await runZonedGuarded(
         () async {
           final configStorage = ObsidianConfigStorage(plugin);
+
+          // Before anything that reads the plan. The size gate and the
+          // plugin-code storage gate both run during boot, and both would
+          // otherwise spend the whole session on "no answer" whenever the
+          // subscription lookup below is slow or fails.
+          _capabilities = await configStorage.loadCapabilities();
 
           // -----------------------------------------------------------------------
           // Self-host mode: point the plugin at a self-hosted sync server with a
@@ -1139,8 +1185,14 @@ $kSyncPanelCss
               final sub = await accountClient.getSubscription().timeout(
                 const Duration(seconds: 5),
               );
-              _capabilities = sub.capabilities;
-            } catch (_) {}
+              await _rememberCapabilities(sub.capabilities, configStorage);
+            } catch (e) {
+              // Keep whatever we already know — the cached answer loaded at
+              // boot, or a fresher one from earlier this session. Overwriting
+              // it with null is what made a slow network look like a downgrade.
+              _log.info('Subscription lookup failed, using last known plan '
+                  '(${_capabilities?.toString() ?? "none cached"}): $e');
+            }
             await _scheduleBoot((token) => _guardedStart(engine, token));
             await relaunchConfigSync();
             await _adoptDeviceId(engine, configStorage);
@@ -2445,6 +2497,7 @@ $kSyncPanelCss
       plugin: plugin,
       engine: engine,
       accountClient: accountClient,
+      configStorage: configStorage,
       onDone: refreshSettings,
     ),
     onResetVault: () async {
@@ -2560,6 +2613,7 @@ Future<void> _waitForSubscriptionAndStart({
   required PluginHandle plugin,
   required ISyncEngine engine,
   required RpcAccountClient accountClient,
+  required ObsidianConfigStorage configStorage,
   void Function()? onDone,
 }) async {
   const interval = Duration(seconds: 10);
@@ -2600,7 +2654,7 @@ Future<void> _waitForSubscriptionAndStart({
 
     try {
       final subscription = await accountClient.getSubscription();
-      _capabilities = subscription.capabilities;
+      await _rememberCapabilities(subscription.capabilities, configStorage);
       if (subscription.isActive) {
         confirmed = true;
         break;

@@ -253,6 +253,33 @@ class ObsidianConfigStorage {
       _data.update((m) => m['syncPaused'] = paused);
 
   // ---------------------------------------------------------------------------
+  // Last known plan capabilities.
+  //
+  // `getSubscription` is a network call on a 5s budget at the top of every sync
+  // session, and it fails whenever the network is slow — which is exactly when
+  // a session starts. The value it produces gates the per-file size limit and
+  // plugin-code uploads, so "the lookup timed out" used to read as "this plan
+  // allows nothing". Cached here so a failed lookup falls back to the last
+  // answer the server actually gave instead of to null. Plaintext: caps are not
+  // secret, and the server enforces them regardless of what this says.
+  // ---------------------------------------------------------------------------
+
+  static const _capabilitiesKey = 'planCapabilities';
+
+  Future<PlanCapabilities?> loadCapabilities() async {
+    final raw = (await _data.read())[_capabilitiesKey];
+    if (raw is! Map) return null;
+    try {
+      return PlanCapabilities.fromJson(Map<String, dynamic>.from(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveCapabilities(PlanCapabilities caps) =>
+      _data.update((m) => m[_capabilitiesKey] = caps.toJson());
+
+  // ---------------------------------------------------------------------------
   // Remember passphrase
   // ---------------------------------------------------------------------------
 

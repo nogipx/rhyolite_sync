@@ -1,3 +1,22 @@
+## [3.15.2] - 2026-08-28
+
+**Plugin sync only transfers what you don't already have.**
+Plugins installed on your device are recognised as current before anything is
+fetched, so only genuine updates come down. Restoring settings from the server
+on an up-to-date vault now takes about a second.
+
+Plugin sync also holds steady on a slow connection: your plan is remembered
+between sessions, so a momentary lookup failure no longer interrupts it.
+
+### Bug Fixes
+
+- a plugin already on disk is verified, not downloaded again (core)
+- a plan lookup that times out no longer re-downloads every plugin (obsidian)
+
+### Other
+
+- bump plugin to 3.15.2 (obsidian)
+
 ## [3.15.1] - 2026-08-27
 
 **Resume no longer takes a minute, and no longer looks like it did nothing.**

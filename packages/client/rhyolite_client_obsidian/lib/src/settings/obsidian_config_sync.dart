@@ -48,6 +48,7 @@ class ObsidianConfigSync {
     required AdapterHandle adapter,
     required SettingsSync sync,
     required Set<SettingsCategory> enabledCategories,
+    Set<SettingsCategory> pullOnlyCategories = const {},
     Duration initialScanDelay = const Duration(seconds: 4),
     BlobDirSync? pluginCode,
     Future<int?> Function(List<String> blobIds)? releaseBlobs,
@@ -63,6 +64,7 @@ class ObsidianConfigSync {
   })  : _adapter = adapter,
         _sync = sync,
         _enabled = enabledCategories,
+        _pullOnly = pullOnlyCategories,
         _initialScanDelay = initialScanDelay,
         _blobDirs = pluginCode,
         _releaseBlobs = releaseBlobs,
@@ -89,13 +91,33 @@ class ObsidianConfigSync {
   final AdapterHandle _adapter;
   final SettingsSync _sync;
   final Set<SettingsCategory> _enabled;
+
+  /// Categories this device syncs DOWN but must not push up.
+  ///
+  /// The one producer is the plugin-code storage gate: a quota that is too
+  /// small, or not known yet because the subscription lookup failed. Both mean
+  /// "do not spend managed storage from here", which is a statement about
+  /// uploads only — the bytes a pull brings down are already stored, and cost
+  /// the quota nothing.
+  ///
+  /// Deliberately NOT expressed by dropping the category from [_enabled] or
+  /// from the classifier the way it once was. That set is the sync scope: it
+  /// decides which records the store keeps and is hashed into the cursor's
+  /// scope token, so narrowing it purges the local CRDT state for those
+  /// resources and invalidates the cursor. A transient `getSubscription`
+  /// timeout then cost a full re-download of every plugin the moment the
+  /// lookup succeeded again (measured: 21 plugins, 154 s). Scope follows the
+  /// user's own toggles and nothing else; the gate lives here instead.
+  final Set<SettingsCategory> _pullOnly;
+
   final Duration _initialScanDelay;
 
   /// Moves blob-backed directories — plugin code and themes — between disk and
-  /// the vault's blob bucket. Null when neither of their categories is on (or
-  /// plugin code is gated off by the storage tier and themes are off too);
+  /// the vault's blob bucket. Null only when neither of their categories is on;
   /// those directories are then not enumerated at all. Which of the two kinds
-  /// actually syncs is decided per resource by the enabled-category check.
+  /// actually syncs is decided per resource by the enabled-category check, and
+  /// which may be uploaded by [_pullOnly]. The storage gate does NOT null this:
+  /// applying what the vault already holds must keep working.
   final BlobDirSync? _blobDirs;
 
   /// Asks the server to reclaim blobs a plugin update superseded. Returns how
@@ -336,10 +358,15 @@ class ObsidianConfigSync {
     final candidates = await _enumerate();
     // Plugin-code sync is the one category whose absence from a scan is
     // invisible otherwise — every other resource shows up as a processed file.
+    // Which is why the pause is named: a scan with no plugin dirs in it reads
+    // identically to the feature being off, and the two need telling apart
+    // from a log alone.
     if (_blobDirs != null) {
       final dirs = candidates.keys.where(_isPluginDir).length;
+      final paused = _pullOnly.map((c) => c.name).join(',');
       _log?.call('config scan: $dirs plugin dir(s) of '
-          '${candidates.length} candidates');
+          '${candidates.length} candidates'
+          '${paused.isEmpty ? '' : ' (upload paused: $paused)'}');
     }
     var processed = 0;
     final sw = Stopwatch()..start();
@@ -429,6 +456,10 @@ class ObsidianConfigSync {
   }
 
   Future<void> _detectRemovalsOf(SyncedDirKind kind) async {
+    // A removal is a push like any other. A device barred from sending this
+    // category's code is the last one that should be telling the vault the code
+    // is gone — from here the directories look absent either way.
+    if (_pullOnly.contains(kind.category)) return;
     final listed = await _safeList('$_configDir/${kind.folder}');
 
     final live = <String>[];
@@ -882,6 +913,9 @@ class ObsidianConfigSync {
       return;
     }
     if (!_enabled.contains(cls.category)) return;
+    // Enumeration feeds the push path only, so leaving a pull-only category out
+    // of it is exactly "keep receiving this, never send it".
+    if (_pullOnly.contains(cls.category)) return;
     final kind = SyncedDirKind.forResource(resourceId);
     final dirId = kind?.idOf(resourceId);
     if (kind == null || dirId == null) {
@@ -908,6 +942,7 @@ class ObsidianConfigSync {
     final resourceId = _toResourceId(adapterPath);
     final cls = ObsidianSettingsRegistry.classify(resourceId);
     if (cls == null || !_enabled.contains(cls.category)) return;
+    if (_pullOnly.contains(cls.category)) return;
     try {
       final st = await _adapter.stat(adapterPath);
       if (st == null) return;

@@ -189,6 +189,17 @@ class ChunkedBlobIO {
     );
   }
 
+  /// The blob id [bytes] would be stored under, computed locally.
+  ///
+  /// The content address is a pure function of the bytes and the vault's blob
+  /// key, so this answers "is the copy I already have the one this ref names?"
+  /// without a download. That question is what keeps a lost bookkeeping row
+  /// from costing a transfer: state can be rebuilt from disk and verified
+  /// against it, instead of the disk being overwritten on the assumption that
+  /// an absent record means absent content.
+  Future<String> blobRefOf(Uint8List bytes) async =>
+      (await _build(bytes)).manifestHash;
+
   /// Every blob (chunks + manifest) that [bytes] would produce, keyed by id.
   ///
   /// Lets a caller regenerate blobs it no longer holds from the file still on

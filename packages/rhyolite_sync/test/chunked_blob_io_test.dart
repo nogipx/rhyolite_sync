@@ -277,6 +277,47 @@ void main() {
     });
   });
 
+  group('blobRefOf', () {
+    test('answers the id upload would store these bytes under', () async {
+      // What lets a caller check a copy it already holds against a ref instead
+      // of downloading to find out. If this drifted from upload's id, every
+      // check would say "different" and the transfer it exists to avoid would
+      // happen anyway — silently, and only ever as a slowdown.
+      final original = _bytes('a' * 700 + 'b' * 700);
+      final uploaded = await io.upload(original, {});
+
+      expect(await io.blobRefOf(original), uploaded.manifestHash);
+    });
+
+    test('a single changed byte is a different id', () async {
+      final uploaded = await io.upload(_bytes('c' * 900), {});
+      final edited = _bytes('c' * 899 + 'd');
+
+      expect(await io.blobRefOf(edited), isNot(uploaded.manifestHash));
+    });
+
+    test('same length, different content still differs', () async {
+      // The size check that runs before this one passes here, so this is the
+      // comparison actually deciding it. A ref match on length alone would let
+      // an in-place edit of a plugin file pass for the vault's version.
+      final a = await io.blobRefOf(_bytes('e' * 512));
+      final b = await io.blobRefOf(_bytes('f' * 512));
+
+      expect(a, isNot(b));
+    });
+
+    test('uploads nothing and caches nothing', () async {
+      // It runs against files the vault may not hold, on every apply that has
+      // to check. Touching the network or the cache would make verification
+      // cost more than the download it replaces.
+      final before = remote.store.length;
+      await io.blobRefOf(_bytes('quiet'));
+
+      expect(remote.store.length, before);
+      expect(await local.listBlobIds(vaultId: _v), isEmpty);
+    });
+  });
+
   group('recompute', () {
     test('reproduces exactly the ids upload produced', () async {
       // The load-bearing claim behind healing from disk and behind dropping a

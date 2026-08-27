@@ -315,8 +315,6 @@ class BlobDirSync {
       return false;
     }
 
-    // Fetch EVERYTHING before touching disk. A partial write would leave the
-    // install torn across two releases, which is worse than not applying.
     final fetched = <String, Uint8List>{};
     final wanted = manifest.files.entries.where((entry) {
       // The parser accepts the union of every kind's file names, so a theme
@@ -331,11 +329,41 @@ class BlobDirSync {
             '${entry.value.size} B, over the $maxFileBytes B cap');
       }
     }
-    // In parallel, for the same reason as the upload above. Still EVERYTHING
-    // before touching disk: `boundedParallel` rejects once a task throws, and
-    // the write loop below is not reached, so a failed fetch cannot leave the
-    // install torn across two releases.
-    await boundedParallel(wanted, wanted.length, (entry) async {
+
+    // What is already correct on disk is not downloaded again.
+    //
+    // A blob id is a pure function of the plain bytes and the vault key, so a
+    // local copy can be checked against a ref without fetching anything. That
+    // turns the disk into evidence instead of a thing to be overwritten: this
+    // path is reached whenever the merged manifest differs from what the
+    // settings store remembers, and "the store no longer remembers" is not the
+    // same claim as "the content is not here". A purged row, a rebuilt local
+    // database, a re-enabled category and a restore-from-server all produce
+    // the first without the second, and each of them used to re-download an
+    // intact plugin set — minutes of transfer to arrive at the bytes already
+    // sitting there.
+    //
+    // Verification failure of any shape falls through to fetching. This may
+    // never conclude "present" about content it has not hashed.
+    final stale = <MapEntry<String, PluginFileRef>>[];
+    for (final entry in wanted) {
+      if (await _matchesOnDisk(io, kind, id, entry.key, entry.value)) continue;
+      stale.add(entry);
+    }
+    if (stale.length < wanted.length) {
+      _log?.call('${kind.folder} $id: ${wanted.length - stale.length} of '
+          '${wanted.length} file(s) already current on disk');
+    }
+
+    // Fetch everything MISSING before touching disk. A partial write would
+    // leave the install torn across two releases, which is worse than not
+    // applying — and the files skipped above are already at the target
+    // version, so writing only these still lands the directory whole.
+    //
+    // In parallel, for the same reason as the upload above: `boundedParallel`
+    // rejects once a task throws, and the write loop below is not reached, so
+    // a failed fetch cannot leave the install torn.
+    await boundedParallel(stale, stale.length, (entry) async {
       final ref = entry.value;
       final path = filePath(kind, id, entry.key);
       final Uint8List? bytes;
@@ -396,6 +424,40 @@ class BlobDirSync {
         '($wrote written, $removed removed)');
     if (kind.reloadable) _reload(id);
     return true;
+  }
+
+  /// Whether the file already on disk IS the one [ref] names.
+  ///
+  /// Answers only from content: the bytes are read and hashed under the same
+  /// scheme that produced [ref], so a stale mtime, a lost database row or a
+  /// file some other tool rewrote cannot make this say yes. Anything it cannot
+  /// establish — absent file, unreadable, hashing threw — is a no, and the
+  /// caller downloads.
+  Future<bool> _matchesOnDisk(
+    ChunkedBlobIO io,
+    SyncedDirKind kind,
+    String id,
+    String name,
+    PluginFileRef ref,
+  ) async {
+    final path = filePath(kind, id, name);
+    // Size first: it comes free with the stat, and a release that changed a
+    // file almost always changed its length. Saves reading and chunking a
+    // multi-MB bundle to learn what one number already said.
+    final st = await _statOrNull(path);
+    if (st == null) return false;
+    final size = st.size;
+    if (size != null && size != ref.size) return false;
+
+    final bytes = await _readOrNull(path);
+    if (bytes == null || bytes.length != ref.size) return false;
+    try {
+      return await io.blobRefOf(bytes) == ref.blobRef;
+    } catch (e) {
+      _log?.call('${kind.folder} $id: verify failed for $name, '
+          'will download: $e');
+      return false;
+    }
   }
 
   /// Uninstalls a directory whose vault record says it is gone: stop it (if it

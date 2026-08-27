@@ -1,3 +1,4 @@
+import 'package:rhyolite_client_obsidian/src/settings/obsidian_settings_registry.dart';
 import 'package:rhyolite_client_obsidian/src/settings/plugin_code_gate.dart';
 import 'package:test/test.dart';
 
@@ -53,5 +54,69 @@ void main() {
   test('the threshold sits between the free and paid quotas', () {
     expect(kMinManagedQuotaForPluginCode, greaterThan(50 * 1024 * 1024));
     expect(kMinManagedQuotaForPluginCode, lessThan(1024 * 1024 * 1024));
+  });
+
+  group('applying the gate to a category selection', () {
+    const optedIn = <SettingsCategory>{
+      SettingsCategory.appSettings,
+      SettingsCategory.themesSnippets,
+      SettingsCategory.communityPluginCode,
+    };
+
+    Set<SettingsCategory> pullOnly(
+      PluginCodeAvailability availability, {
+      Set<SettingsCategory> enabled = optedIn,
+    }) =>
+        pluginCodePullOnly(enabled: enabled, availability: availability);
+
+    test('a verdict never removes a category the user chose', () {
+      // The regression this whole split exists for. The selection is the sync
+      // scope: if the gate could edit it, a getSubscription that timed out
+      // would purge every plugin record and reset the pull cursor, and the next
+      // successful lookup would pay for it with a full re-download.
+      for (final availability in PluginCodeAvailability.values) {
+        expect(
+          pullOnly(availability).difference(optedIn),
+          isEmpty,
+          reason: '$availability must only ever mark categories read-only',
+        );
+      }
+    });
+
+    test('allowed means upload as usual', () {
+      expect(pullOnly(PluginCodeAvailability.allowed), isEmpty);
+    });
+
+    test('a quota too small pauses uploads, not the category', () {
+      expect(
+        pullOnly(PluginCodeAvailability.quotaTooSmall),
+        {SettingsCategory.communityPluginCode},
+      );
+    });
+
+    test('an unknown quota pauses uploads too, and only uploads', () {
+      // Fail closed on spending storage, fail OPEN on receiving it: what the
+      // vault already holds costs the quota nothing to download.
+      expect(
+        pullOnly(PluginCodeAvailability.unknownQuota),
+        {SettingsCategory.communityPluginCode},
+      );
+    });
+
+    test('nothing to pause when the user never opted in', () {
+      const off = <SettingsCategory>{SettingsCategory.appSettings};
+      for (final availability in PluginCodeAvailability.values) {
+        expect(pullOnly(availability, enabled: off), isEmpty);
+      }
+    });
+
+    test('other categories are never gated on plugin-code storage', () {
+      for (final availability in PluginCodeAvailability.values) {
+        expect(
+          pullOnly(availability),
+          isNot(contains(SettingsCategory.themesSnippets)),
+        );
+      }
+    });
   });
 }

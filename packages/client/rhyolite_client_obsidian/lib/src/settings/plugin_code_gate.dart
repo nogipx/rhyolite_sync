@@ -1,3 +1,5 @@
+import 'obsidian_settings_registry.dart';
+
 /// Why plugin-code sync is or is not available for this session.
 enum PluginCodeAvailability {
   /// The storage backing this vault can hold a plugin set.
@@ -43,4 +45,28 @@ PluginCodeAvailability pluginCodeAvailability({
     return PluginCodeAvailability.quotaTooSmall;
   }
   return PluginCodeAvailability.allowed;
+}
+
+/// Categories this session may sync down but must not push up, given the user's
+/// selection [enabled] and the storage gate's verdict.
+///
+/// The gate answers one question — may this device spend managed storage — and
+/// it is expressed HERE, not by editing [enabled]. That set is also the sync
+/// scope: it decides which records the settings store keeps, and it is hashed
+/// into the pull cursor's scope token. Narrowing it purges the local CRDT state
+/// for the dropped resources and invalidates the cursor, so an `unknownQuota`
+/// from a subscription lookup that merely timed out cost a full re-download of
+/// the plugin set the moment the lookup succeeded again. Scope follows the
+/// user's toggles; availability follows the plan; the two never trade places.
+///
+/// Downloads stay on under every verdict: the bytes a pull brings down are
+/// already stored on the server and cost the quota nothing, and a device that
+/// cannot deliver its own plugins can still receive the vault's.
+Set<SettingsCategory> pluginCodePullOnly({
+  required Set<SettingsCategory> enabled,
+  required PluginCodeAvailability availability,
+}) {
+  if (!enabled.contains(SettingsCategory.communityPluginCode)) return const {};
+  if (availability == PluginCodeAvailability.allowed) return const {};
+  return const {SettingsCategory.communityPluginCode};
 }

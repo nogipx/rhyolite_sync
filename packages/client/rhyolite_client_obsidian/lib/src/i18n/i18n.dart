@@ -5,7 +5,9 @@ import 'dart:js_util' as jsu;
 
 import 'app_strings.dart';
 import 'en_strings.dart';
-import 'ru_strings.dart';
+import 'language_tag.dart';
+
+export 'language_tag.dart' show normalizeLanguageTag, stringsFor;
 
 AppStrings _current = const EnStrings();
 
@@ -18,20 +20,47 @@ void initLocale() {
   _current = stringsFor(obsidianLanguage());
 }
 
-/// Maps a language code to its strings; unshipped languages fall back to English.
-AppStrings stringsFor(String lang) => switch (lang) {
-  'ru' => const RuStrings(),
-  _ => const EnStrings(),
-};
-
-/// Obsidian stores the UI language code in `localStorage['language']`
-/// (empty/absent = English) — the standard community-plugin detection.
+/// Obsidian's UI language, or empty when nothing can be determined.
+///
+/// Three sources in decreasing order of authority. The first was once the whole
+/// implementation, which is why a phone could show an English plugin inside a
+/// Russian Obsidian: `localStorage['language']` is written when the language is
+/// picked EXPLICITLY in settings, and someone whose device is already Russian
+/// never picks anything — Obsidian follows the system and the key stays absent.
 String obsidianLanguage() {
-  try {
+  // 1. An explicit choice in Obsidian's settings. It outranks every guess: a
+  //    user running English Obsidian on a Russian system means it.
+  final chosen = _readLanguage(() {
     final ls = jsu.getProperty<JSObject?>(jsu.globalThis, 'localStorage');
-    if (ls == null) return '';
-    final v = jsu.callMethod<Object?>(ls, 'getItem', ['language']);
-    return (v is String ? v : '').toLowerCase();
+    if (ls == null) return null;
+    return jsu.callMethod<Object?>(ls, 'getItem', ['language']);
+  });
+  if (chosen.isNotEmpty) return chosen;
+
+  // 2. Obsidian bundles moment and sets its locale to the language it actually
+  //    rendered — whether that came from the setting or from the system.
+  final moment = _readLanguage(() {
+    final m = jsu.getProperty<JSObject?>(jsu.globalThis, 'moment');
+    if (m == null) return null;
+    return jsu.callMethod<Object?>(m, 'locale', const []);
+  });
+  if (moment.isNotEmpty) return moment;
+
+  // 3. The system language — what Obsidian follows when the setting was never
+  //    touched, which is the normal state on a phone.
+  return _readLanguage(() {
+    final nav = jsu.getProperty<JSObject?>(jsu.globalThis, 'navigator');
+    if (nav == null) return null;
+    return jsu.getProperty<Object?>(nav, 'language');
+  });
+}
+
+/// Runs one probe, normalised, swallowing anything it throws: a source that is
+/// absent or hostile must fall through to the next, never abort detection.
+String _readLanguage(Object? Function() probe) {
+  try {
+    final v = probe();
+    return v is String ? normalizeLanguageTag(v) : '';
   } catch (_) {
     return '';
   }

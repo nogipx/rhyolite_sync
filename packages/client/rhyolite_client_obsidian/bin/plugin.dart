@@ -80,6 +80,16 @@ Future<void> _guardedStart(ISyncEngine engine) async {
   await engine.start();
 }
 
+/// Short, user-facing reason for a [SyncStartBlock] — the middle of the boot
+/// notice. The panel spells the same condition out at length; this only has to
+/// be enough to tell an outage apart from a plugin waiting on the user.
+String _startBlockReason(SyncStartBlock block) => switch (block) {
+  SyncStartBlock.signedOut => S.blockedSignedOut,
+  SyncStartBlock.noVault => S.blockedNoVault,
+  SyncStartBlock.locked => S.blockedLocked,
+  SyncStartBlock.noServer => S.blockedNoServer,
+};
+
 /// Best-effort OS label for [DeviceInfo] on the log collector: `desktop`, or
 /// `iOS`/`Android` sniffed from the user agent on mobile (Obsidian doesn't
 /// expose the OS directly). The bug this diagnostics feature exists to debug is
@@ -649,6 +659,13 @@ $kSyncPanelCss
       // Pick UI strings from Obsidian's language before any UI is built.
       initLocale();
 
+      // Before the first await, always. Obsidian restores the workspace layout
+      // once the plugin-load phase is done, and a leaf whose view type isn't
+      // registered by then is replaced with "this plugin no longer exists" for
+      // the rest of the session. Everything the panel actually displays is
+      // bound later (see SyncPanel.register); this only claims the type.
+      registerSyncPanelView(plugin, logger: _logController.scope('plugin'));
+
       String dbFileName = '';
       String dbName = '';
       bool handlingCorruption = false;
@@ -738,7 +755,15 @@ $kSyncPanelCss
                 // normal cold-start path) — refresh it.
                 try {
                   accountClient.useSession(savedSession);
-                  await accountClient.refreshSession();
+                  // Bounded: onLoad must never hang on the network. A timeout
+                  // is not a verdict, and the catch below treats every
+                  // non-refusal as inconclusive — the session is kept and the
+                  // token provider refreshes again on first use. Without this
+                  // an unreachable account service held the whole plugin load
+                  // open for the HTTP stack's own timeout.
+                  await accountClient.refreshSession().timeout(
+                    const Duration(seconds: 8),
+                  );
                   final newSession = accountClient.session;
                   if (newSession != null) {
                     await configStorage.saveAuthSession(newSession);
@@ -756,10 +781,19 @@ $kSyncPanelCss
                     await configStorage.clearAuthSession();
                   } else {
                     // Offline at boot, or an answer we never got. Keep the
-                    // session: the provider refreshes again on first use.
+                    // session: the provider refreshes again on first use, and
+                    // on a timeout the very same refresh is still in flight —
+                    // `ensureValidToken` joins it rather than starting a second
+                    // one against a single-use token.
+                    //
+                    // Deliberately NOT re-applying `savedSession` here. It was
+                    // already applied above, before the attempt, so the only
+                    // thing a second `useSession` can do is overwrite a NEWER
+                    // session that the in-flight refresh has meanwhile stored —
+                    // leaving the client holding a refresh token the server has
+                    // already revoked, i.e. a forced logout on the next call.
                     _log.warning('Boot refresh inconclusive — keeping the '
                         'stored session: $e');
-                    accountClient.useSession(savedSession);
                     restoredClient = accountClient;
                   }
                 }
@@ -809,41 +843,28 @@ $kSyncPanelCss
           }
           VaultCipher? cipher;
 
-          if (auth.directory != null) {
-            final dir = auth.directory!;
-            if (config == null) {
-              final result = await withModalLock(
-                () => showVaultPickerModal(plugin, dir, configStorage),
-              );
-              if (result != null) {
-                config = result.$1;
-                cipher = result.$2;
-              }
-            } else if (config.verificationToken == null ||
-                config.verificationToken!.isEmpty) {
-              final result = await withModalLock(
-                () => showVaultPickerModal(plugin, dir, configStorage),
-              );
-              if (result != null) {
-                config = result.$1;
-                cipher = result.$2;
-              }
-            } else {
-              final snapshot = config;
-              cipher =
-                  await configStorage.tryUnlockFromStorage(
-                    snapshot.vaultId,
-                    snapshot.verificationToken!,
-                  ) ??
-                  await withModalLock(
-                    () => showPassphraseModal(
-                      plugin,
-                      configStorage,
-                      vaultId: snapshot.vaultId,
-                      verificationToken: snapshot.verificationToken!,
-                    ),
-                  );
-            }
+          // Boot never blocks on the user.
+          //
+          // The vault picker and the passphrase prompt used to run right here,
+          // and Obsidian awaits `onload`: while either modal waited for a click
+          // NOTHING else in this plugin got registered — no panel view, no
+          // settings tab, no commands. A sidebar leaf restored from the last
+          // session then found no such view type and fell back to Obsidian's
+          // "plugin no longer active" placeholder, and the settings tab was
+          // simply absent.
+          //
+          // Only the silent path survives: a key the local store already holds.
+          // Both interactive paths are now named panel states with a button
+          // behind them ([SyncStartBlock.noVault], [SyncStartBlock.locked]),
+          // which the user opens when they choose to rather than being
+          // ambushed by a modal while Obsidian is still starting.
+          final booted = config;
+          final bootedToken = booted?.verificationToken;
+          if (booted != null && bootedToken != null && bootedToken.isNotEmpty) {
+            cipher = await configStorage.tryUnlockFromStorage(
+              booted.vaultId,
+              bootedToken,
+            );
           }
 
           final cfg = config ?? const VaultConfig(vaultId: '', vaultName: '');
@@ -1088,6 +1109,10 @@ $kSyncPanelCss
               await _guardedStart(engine);
             });
             await relaunchConfigSync();
+            // A sign-in that can't start the engine yet (no vault picked) emits
+            // no engine events, so the panel would keep showing "not signed in"
+            // until its 30s tick.
+            _syncPanel?.refresh();
           }
 
           // Starts a full sync session: cache plan caps (the size gate needs
@@ -1130,6 +1155,122 @@ $kSyncPanelCss
           // makes those triggers no-ops (the engine isn't up yet anyway).
           Future<void> Function({required bool requireVisible})? recover;
 
+          // Assigned once the settings tab is registered further down — the
+          // browser sign-in flow (state nonce + protocol handler) belongs to
+          // that registrar, but the panel is built before it and needs the same
+          // one action. Null-guarded, so a click before assignment is a no-op.
+          void Function()? beginSignIn;
+
+          // Same late-binding as [beginSignIn]: the picker wants the
+          // delete-vault callback declared further down, and the panel is
+          // built before it.
+          Future<void> Function()? connectVault;
+
+          // The server refused a refresh token it had not already rotated —
+          // the one verdict that proves this session is dead. Fired from the
+          // account client's single refresh funnel, whichever operation
+          // happened to need the token.
+          //
+          // Before this hook every consumer logged its own failure and carried
+          // on ("External blob config check failed", "forced-binary policy load
+          // failed", an unhandled zone error), so nothing ever concluded the
+          // account was signed out: the engine kept restarting against an
+          // account it could not authenticate with, and the panel sat on
+          // "Connecting…" indefinitely. Fail closed instead, once, and let the
+          // panel offer the sign-in it now has.
+          accountClient.onSessionRefused = (reason) {
+            if (auth.client == null) return; // already handled
+            _log.warning('Session refused by the server — signing out: $reason');
+            auth.bindAccount(null);
+            _setEngineAuth(engine, auth);
+            unawaited(
+              configStorage.clearAuthSession().catchError(
+                (Object e) => _log.warning('Clearing session failed: $e'),
+              ),
+            );
+            // Stop rather than let the reconnect ladder grind: nothing it can
+            // do will authenticate, and every retry costs a full refresh
+            // round-trip before failing.
+            _cancelSelfHeal();
+            _stopConfigSync();
+            unawaited(_scheduleBoot(() => engine.stop()));
+            // The settings tab rebuilds on every open and reads auth live, so
+            // it needs no nudge — the panel is the one holding a stale render.
+            _syncPanel?.refresh();
+            showNotice(
+              S.syncNotStartedNotice(S.blockedSignedOut),
+              timeoutMs: 12000,
+            );
+          };
+
+          // Why the engine cannot start, or null when nothing is missing.
+          //
+          // Every one of these used to surface as the same grey "sync stopped /
+          // not connected": the panel's `stopped` state means only "no
+          // SyncStarted event was ever seen", which is equally true of a signed
+          // out plugin and of a dead server. Naming the precondition is the
+          // difference between a dead end and a button.
+          //
+          // Read live (engine + auth, not boot-time locals) so signing in or
+          // unlocking clears it without a plugin reload.
+          SyncStartBlock? currentStartBlock() {
+            // No address to sync with, whichever edition this is.
+            if (syncServerUrl.isEmpty) return SyncStartBlock.noServer;
+            if (selfHostActive) {
+              // Self-host has no account: a URL and a token are all it needs.
+              if (selfHostToken.isEmpty) return SyncStartBlock.noServer;
+            } else if (selfHost.enabled) {
+              // Self-host switched on but not usable (missing URL or token) —
+              // it never fell back to managed, so say what's actually wrong.
+              return SyncStartBlock.noServer;
+            } else if (!authConfig.isConfigured) {
+              return SyncStartBlock.noServer;
+            } else if (auth.client?.session == null) {
+              // A session that exists but whose access token expired is NOT
+              // signed out — that is the normal cold-start state, and every
+              // call refreshes on demand. Only the absence of a session (never
+              // signed in, or one the server refused) is the user's problem.
+              return SyncStartBlock.signedOut;
+            }
+            if (engine.config.vaultId.isEmpty) return SyncStartBlock.noVault;
+            // A vault id without a verification token is a half-finished
+            // registration: there is nothing to check a passphrase against, so
+            // Unlock could not work and the fix is to pick the vault again.
+            final token = config?.verificationToken;
+            if (token == null || token.isEmpty) return SyncStartBlock.noVault;
+            if (engine.cipher == null) return SyncStartBlock.locked;
+            return null;
+          }
+
+          // Obtains the vault key when it's missing: the passphrase prompt, or
+          // whatever the OS keychain/local store already holds. Returns whether
+          // the engine ended up with a cipher. Shared by the panel's Unlock
+          // button and the "Resume sync" command so both take one path.
+          Future<bool> ensureVaultKey() async {
+            if (engine.cipher != null) return true;
+            final verificationToken = config?.verificationToken;
+            if (verificationToken == null || verificationToken.isEmpty) {
+              return false;
+            }
+            final unlocked =
+                await configStorage.tryUnlockFromStorage(
+                  cfg.vaultId,
+                  verificationToken,
+                ) ??
+                await withModalLock(
+                  () => showPassphraseModal(
+                    plugin,
+                    configStorage,
+                    vaultId: cfg.vaultId,
+                    verificationToken: verificationToken,
+                  ),
+                );
+            if (unlocked == null) return false;
+            cipher = unlocked;
+            engine.cipher = unlocked;
+            return true;
+          }
+
           // Backend/tier labels for the panel — stable at construction, so
           // derived from the connection mode rather than (later-fetched) caps.
           //
@@ -1167,6 +1308,12 @@ $kSyncPanelCss
             backendLabel: backendLabel,
             planLabel: planLabel,
             logger: _logController.scope('plugin'),
+            // Site FAQ. Most "is this broken?" questions turn out to be
+            // questions about what this sync does differently from the plugin
+            // the user came from — empty notes, conflict copies, deletions.
+            onOpenFaq: kEnv.siteUrl.isEmpty
+                ? null
+                : () => _openExternalUrl('${kEnv.siteUrl}/faq'),
             onOpenSettings: () {
               final setting = jsu.getProperty<Object?>(
                 plugin.app.raw,
@@ -1179,6 +1326,14 @@ $kSyncPanelCss
             onBrowseVersions: () => showFileVersionModal(plugin, engine),
             isPaused: () => _syncPaused,
             onSetPaused: setSyncPaused,
+            // Turns "sync stopped / not connected" into the actual missing
+            // step, with the button that performs it.
+            startBlock: currentStartBlock,
+            onSignIn: () async => beginSignIn?.call(),
+            onConnectVault: () async => connectVault?.call(),
+            onUnlock: () async {
+              if (await ensureVaultKey()) await startSyncSession();
+            },
             // Shown as a button only while sync looks stuck; runs the same
             // recovery path as the indicator tap and the command.
             onReconnect: () =>
@@ -1361,8 +1516,38 @@ $kSyncPanelCss
             _log.info('Vault deleted: $vaultId');
           }
 
-          late final void Function() refreshSettings;
-          refreshSettings = _registerSettings(
+          // The panel's "no vault connected" button. The picker persists the
+          // config itself, so all that is left is to get the session rebuilt
+          // around it.
+          //
+          // Reload rather than restart in place: the SQLite file is named after
+          // the vault this session booted with (`rhyolite-<vaultId>`), and it
+          // was opened long before this click. Restarting the engine would sync
+          // the newly-picked vault into the previous session's file and find it
+          // empty on the next launch — a full re-download of the whole vault.
+          connectVault = () async {
+            final dir = auth.directory;
+            if (dir == null) return;
+            final picked = await withModalLock(
+              () => showVaultPickerModal(
+                plugin,
+                dir,
+                configStorage,
+                onDeleteVault: deleteVaultClosure,
+                maxVaultCount: selfHostActive
+                    ? null
+                    : _capabilities?.maxVaultCount,
+              ),
+            );
+            if (picked == null) return;
+            _log.info('Vault connected: ${picked.$1.vaultId} — reloading');
+            reloadPlugin(plugin);
+          };
+
+          late final ({void Function() refresh, void Function() beginSignIn})
+          settingsHandle;
+          void refreshSettings() => settingsHandle.refresh();
+          settingsHandle = _registerSettings(
             plugin: plugin,
             configStorage: configStorage,
             config: cfg,
@@ -1431,6 +1616,11 @@ $kSyncPanelCss
             },
           );
 
+          // The panel's sign-in button routes here: the browser-auth nonce and
+          // the protocol handler that redeems it live in the settings
+          // registrar, and there must be exactly one of each.
+          beginSignIn = settingsHandle.beginSignIn;
+
           // Resume/Pause commands mirror the panel buttons — same persisted
           // pause flag, same code path (setSyncPaused). "Resume" first ensures
           // a vault key, then clears the pause and starts the session.
@@ -1438,21 +1628,7 @@ $kSyncPanelCss
             id: 'rhyolite-sync-start',
             name: S.resumeSync,
             callback: () async {
-              if (cipher == null) {
-                final verificationToken = config?.verificationToken;
-                if (verificationToken != null && verificationToken.isNotEmpty) {
-                  cipher = await withModalLock(
-                    () => showPassphraseModal(
-                      plugin,
-                      configStorage,
-                      vaultId: cfg.vaultId,
-                      verificationToken: verificationToken,
-                    ),
-                  );
-                }
-                if (cipher == null) return;
-                engine.cipher = cipher;
-              }
+              if (!await ensureVaultKey()) return;
               await setSyncPaused(false);
             },
           );
@@ -1571,25 +1747,50 @@ $kSyncPanelCss
             },
           );
 
-          if (cipher == null) {
-            _log.info(
-              'No vault key — sync disabled. Sign in and connect a vault.',
-            );
-          } else if (syncServerUrl.isEmpty) {
-            _log.info('Server URL not set — sync disabled.');
-          } else if (_syncPaused) {
+          if (_syncPaused) {
             _log.info(
               'Sync paused by user — skipping start. Resume from the '
               'sync panel.',
             );
           } else {
-            // Defer start so plugin onload returns immediately and Obsidian
-            // UI stays responsive while sync warms up. If start blocks the
-            // event loop later, the user can still reach Stop Sync / Disable.
+            // Everything from here on may prompt or touch the network, and
+            // Obsidian awaits onLoad — so it runs AFTER onLoad returns, with
+            // the view type, settings tab and commands already registered.
+            //
+            // Deferring also keeps the UI responsive while sync warms up: if
+            // start later blocks the event loop, Pause / Disable are reachable.
             // Caps are cached BEFORE start() inside startSyncSession — the
             // startup size gate needs the tier before StartupDiff runs.
             Future<void>.delayed(Duration.zero, () async {
               try {
+                // The two prompts that used to run inside onLoad: the vault
+                // picker on a fresh install, the passphrase on a locked vault.
+                // Same moment from the user's point of view, but nothing is
+                // waiting on them any more — and dismissing one now leaves a
+                // panel that explains itself instead of a dead sidebar.
+                var block = currentStartBlock();
+                if (block == SyncStartBlock.noVault && auth.directory != null) {
+                  // Reloads the plugin on success, so a return here means the
+                  // user cancelled.
+                  await connectVault?.call();
+                } else if (block == SyncStartBlock.locked) {
+                  await ensureVaultKey();
+                }
+
+                block = currentStartBlock();
+                if (block != null) {
+                  // Sync cannot run and only the user can change that. Logging
+                  // it was never enough: nothing on screen distinguished this
+                  // from a server that happens to be down, so a signed-out
+                  // plugin looked exactly like an outage.
+                  _log.warning('Sync cannot start: ${block.name}');
+                  showNotice(
+                    S.syncNotStartedNotice(_startBlockReason(block)),
+                    timeoutMs: 12000,
+                  );
+                  _syncPanel?.refresh();
+                  return;
+                }
                 await startSyncSession();
               } catch (e, st) {
                 _log.error('Engine start failed', error: e, stackTrace: st);
@@ -1625,6 +1826,13 @@ $kSyncPanelCss
               required bool requireVisible,
             }) async {
               if (recoverInFlight || _syncPaused) return;
+              // Nothing to recover TO. Restarting the engine against a missing
+              // session or a locked vault cannot succeed, and each attempt
+              // costs a full refresh round-trip (~15s with the retry ladder)
+              // before failing — which is what turned a dead session into an
+              // endless "Connecting…" and a plugin that felt slow to start.
+              // The panel names the missing piece instead.
+              if (currentStartBlock() != null) return;
               if (requireVisible && documentJs != null) {
                 final visible =
                     jsu.getProperty<String?>(documentJs, 'visibilityState') ==
@@ -2101,10 +2309,11 @@ $kSyncPanelCss
   );
 }
 
-// Returns the `refreshSettings` callback so the caller can re-render the
-// settings tab in response to events that update vault config from
-// outside the tab itself (notably ExternalBlobConfigDiscovered).
-void Function() _registerSettings({
+// Returns the `refresh` callback so the caller can re-render the settings tab
+// in response to events that update vault config from outside the tab itself
+// (notably ExternalBlobConfigDiscovered), plus `beginSignIn` so the sync panel
+// can offer the same browser sign-in the tab does.
+({void Function() refresh, void Function() beginSignIn}) _registerSettings({
   required PluginHandle plugin,
   required ObsidianConfigStorage configStorage,
   required VaultConfig config,
@@ -2129,13 +2338,14 @@ void Function() _registerSettings({
   required bool selfHostEnabled,
   required String selfHostUrl,
 }) {
-  late final void Function() refreshSettings;
-  refreshSettings = registerSettingsTab(
+  late final ({void Function() refresh, void Function() beginSignIn}) settings;
+  void refreshSettings() => settings.refresh();
+  settings = registerSettingsTab(
     plugin: plugin,
     configStorage: configStorage,
     config: config,
     authConfig: authConfig,
-    authClient: auth.client,
+    authClient: () => auth.client,
     accountClient: accountClient,
     // Evaluated per call, not once at wiring: a vault can be marked BYO after
     // this closure is built (the credentials arrive from the server during
@@ -2194,13 +2404,23 @@ void Function() _registerSettings({
       _log.info('Vault disconnected (local state wiped)');
     },
     onVaultChanged: (newConfig, newCipher) async {
-      engine.config = buildConfig(newConfig);
-      engine.cipher = newCipher;
-      await _scheduleBoot(() async {
-        await engine.stop();
-        await _guardedStart(engine);
-      });
-      _log.info('Switched to vault ${newConfig.vaultId}');
+      // Reload rather than restart in place — same reason the panel's
+      // connect-vault button does.
+      //
+      // The SQLite file is named after the vault this session booted with
+      // (`rhyolite-<vaultId>`, empty id when none was connected) and was
+      // opened long before this call. The stores key their rows by vaultId,
+      // so a restart in place syncs the newly-connected vault into the
+      // PREVIOUS session's file: it works, right up until the next launch
+      // opens `rhyolite-<newVaultId>` and finds it empty. Since a deviceId
+      // was adopted for the new vault in the meantime, the engine then reads
+      // that emptiness as a LOST database — the user gets the "your local
+      // sync state is gone" notice and a full re-download of the vault.
+      //
+      // The picker has already persisted the config, so a clean boot picks
+      // everything up.
+      _log.info('Vault connected: ${newConfig.vaultId} — reloading');
+      reloadPlugin(plugin);
     },
     onDeleteVault: onDeleteVault,
     onSubscribed: () => _waitForSubscriptionAndStart(
@@ -2313,7 +2533,7 @@ void Function() _registerSettings({
     selfHostUrl: selfHostUrl,
     selfHostDirectory: selfHostEnabled ? auth.directory : null,
   );
-  return refreshSettings;
+  return settings;
 }
 
 /// Polls the account service's getSubscription endpoint every 10 seconds for up to 5 minutes.

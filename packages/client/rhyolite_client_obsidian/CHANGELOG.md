@@ -1,3 +1,78 @@
+## [3.15.0] - 2026-08-27
+
+**Sync now tells you why it is not running.** Signed out, no vault chosen, a
+passphrase never entered, a server address left blank — all four used to read
+the same way: a grey "Sync stopped / Not connected", which looks exactly like
+the service being down. There was nothing to press and nothing to go on.
+
+Each of them now says what is missing and carries the button that fixes it:
+Sign in, Connect vault, Unlock, Settings. Signing in from the panel is the
+same one-click browser login the settings tab offers. If sync cannot start
+when Obsidian opens, you get one notice saying so; the panel opens only when
+you ask it to.
+
+**The sync panel stopped disappearing after a restart.** If the panel was open
+when Obsidian closed, reopening it often showed "This plugin is no longer
+active" — and the plugin was missing from Settings for the first seconds too.
+Obsidian rebuilds your layout as soon as plugins finish loading, and this one
+was still waiting: on your click in a vault or passphrase dialog, or on a slow
+network. It now claims its place in the sidebar before any of that, and both
+dialogs open after startup instead of holding it up.
+
+**A restart is no longer mistaken for a logout.** Settings could greet a
+signed-in user with a Sign in button, and Connect vault would then do nothing
+at all. Access passes are short-lived and get renewed in the background; the
+plugin was reading "the pass expired a minute ago" as "this person is signed
+out".
+
+When a session really has ended, that is now acted on once, plainly: you are
+signed out and asked to sign in. Previously nothing drew that conclusion, so
+sync retried an account it could never reach — a panel stuck on "Connecting…",
+and a startup that felt slow because every retry waited on the same doomed
+renewal.
+
+**Connecting a vault no longer re-downloads it on the next launch.** A vault
+connected from Settings was stored under the previous session's name, so the
+following start found nothing and pulled the entire vault down again. Nothing
+was ever lost, and vaults connected before this update are unaffected.
+
+**The plugin speaks your language on a phone.** A Russian Obsidian on iPhone
+showed an English plugin. The language was only ever read from an explicit
+choice in Obsidian's settings — and someone whose phone is already Russian
+never makes that choice, because Obsidian follows the system. It now follows
+the system too. Picking a language by hand still wins over everything.
+
+**Version history opens for any file, not just the one in front of you.**
+History is kept per path, so renaming a note starts a new history under the
+new name — and the versions written under the old name had no way to be
+opened at all, the same as for a note you deleted. There is now a list of
+every path with history, with a filter and a marker on the ones that are gone.
+
+**Questions and answers, one click away.** A help button in the sync panel and
+at the top of Settings, open whether or not you are signed in. It opens a new
+page covering what this sync does differently — empty notes, conflicts,
+deletions, renames — since most "is it broken?" moments turn out to be
+habits from another plugin.
+
+### Features
+
+- say why sync isn't running, and put the sign-in button in the panel (obsidian)
+- open the history of any path, not just the open note (obsidian)
+- reach the questions-and-answers page from the panel and settings (obsidian)
+
+### Bug Fixes
+
+- stop the sidebar panel from vanishing after an Obsidian restart (obsidian)
+- a cold start is not a logout (obsidian)
+- a refused refresh token now signs you out instead of retrying forever (obsidian)
+- connecting a vault from settings no longer costs a full re-download (obsidian)
+- follow Obsidian's language on a phone, not only an explicit choice (obsidian)
+
+### Other
+
+- bump plugin to 3.15.0 (obsidian)
+
+
 ## [3.14.2] - 2026-08-22
 
 **Properties with an emoji stopped breaking.** A note whose `status` or

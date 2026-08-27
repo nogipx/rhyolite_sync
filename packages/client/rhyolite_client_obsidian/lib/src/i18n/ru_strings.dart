@@ -510,6 +510,27 @@ class RuStrings extends AppStrings {
   String noHistoryFor(String path) => 'Истории для $path нет';
   @override
   String get versionHistoryTitle => 'История версий';
+
+  @override
+  String get historyPickFile => 'Выбор файла';
+  @override
+  String historyPickHint(int paths, int events) =>
+      'путей с историей: $paths (из последних $events записей). Удалённые и '
+      'переименованные файлы тоже здесь — их версии лежат под тем именем, '
+      'которое у них было.';
+  @override
+  String get historyFilterPlaceholder => 'Фильтр по пути';
+  @override
+  String historyPathMeta(int versions, String when) =>
+      'записей: $versions  ·  $when';
+  @override
+  String get historyGoneMark => 'удалён';
+  @override
+  String get historyOtherFile => 'Другой файл…';
+  @override
+  String get historyEmpty => 'В истории пока пусто.';
+  @override
+  String get historyNothingMatches => 'Ничего не найдено.';
   @override
   String versionsCountHint(int n) =>
       'версий: $n, свежие сверху. Выберите одну для просмотра и восстановления.';
@@ -1013,6 +1034,18 @@ class RuStrings extends AppStrings {
 
   // ── Sync panel ──
   @override
+  String get panelStarting => 'Rhyolite Sync запускается...';
+
+  @override
+  String get faqButton => 'Вопросы и ответы';
+  @override
+  String get faqSettingName => 'Вопросы и ответы';
+  @override
+  String get faqSettingDescription =>
+      'Как ведёт себя синхронизация, что она делает с конфликтами и что '
+      'делать, если что-то выглядит не так. Откроется в браузере.';
+
+  @override
   String get endToEndEncrypted => 'Сквозное шифрование';
   @override
   String syncedAgo(String ago) => 'синхр. $ago';
@@ -1109,6 +1142,29 @@ class RuStrings extends AppStrings {
   String get subscriptionRequiredStatus => 'Требуется подписка';
   @override
   String get pausedStatus => 'На паузе';
+
+  @override
+  String get blockedSignedOut => 'Вход не выполнен';
+  @override
+  String get blockedSignedOutHint =>
+      'Войдите в аккаунт Rhyolite, чтобы включить синхронизацию.';
+  @override
+  String get blockedNoVault => 'Хранилище не подключено';
+  @override
+  String get blockedNoVaultHint =>
+      'Выберите удалённое хранилище для этого устройства.';
+  @override
+  String get blockedLocked => 'Хранилище заблокировано';
+  @override
+  String get blockedLockedHint =>
+      'Введите парольную фразу — без ключа синхронизация невозможна.';
+  @override
+  String get blockedNoServer => 'Сервер не настроен';
+  @override
+  String get blockedNoServerHint => 'Укажите адрес сервера и токен доступа.';
+  @override
+  String syncNotStartedNotice(String reason) =>
+      'Rhyolite: синхронизация не запущена — $reason. Откройте панель синхронизации.';
 
   // ── Self-host modal ──
   @override

@@ -35,9 +35,13 @@ const kSyncPanelCss = r'''
 .rh-panel.is-sub        { --rh-status: rgb(240, 150, 48); }
 .rh-panel.is-error      { --rh-status: rgb(220, 56, 56); }
 .rh-panel.is-stopped    { --rh-status: rgb(128, 128, 128); }
+.rh-panel.is-blocked    { --rh-status: rgb(240, 150, 48); }
 .rh-panel.is-paused     { --rh-status: rgb(150, 150, 150); }
 
 .rh-hidden { display: none !important; }
+
+/* Shown while the plugin is still booting and the panel has nothing yet */
+.rh-booting { color: var(--text-muted); font-size: var(--font-ui-smaller, 11px); }
 
 /* Header ─ vault identity */
 .rh-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -294,6 +298,83 @@ const kSyncPanelCss = r'''
 }
 ''';
 
+/// `globalThis` slot holding the panel view that is currently open, or null
+/// when the panel is closed. Written by both the boot placeholder and the live
+/// [SyncPanel] so whichever takes over next can adopt an already-open leaf
+/// instead of waiting for the user to close and reopen it.
+const _kOpenViewSlot = '__rhyolitePanelOpenView';
+
+/// Registers the panel's view type. MUST run before the first `await` in the
+/// plugin's `onLoad`.
+///
+/// Obsidian restores the workspace layout as soon as the plugin-load phase
+/// finishes, and a leaf whose view type is not registered by then is replaced
+/// with Obsidian's "plugin no longer active" placeholder for the rest of the
+/// session. Registration therefore cannot wait for the session the panel
+/// eventually displays (auth, database, engine) — which is why the view's
+/// `onOpen`/`onClose` go through `globalThis` slots: this function installs a
+/// placeholder into them, and [SyncPanel.register] re-points them at the real
+/// panel once boot has something to show.
+void registerSyncPanelView(PluginHandle plugin, {LogScope? logger}) {
+  final ctor = jsu.getProperty<JSObject?>(
+    jsu.globalThis,
+    '__rhyoliteSyncPanelViewCtor',
+  );
+  if (ctor == null) {
+    logger?.warning('sync panel: view ctor missing — build shim not injected');
+    return;
+  }
+
+  // The slot lives on globalThis and therefore outlives a disable/enable
+  // cycle. Layout restore happens after this runs, so nothing of ours can be
+  // open yet: anything still in there is a detached view from the previous
+  // load, and adopting it would render into a dead DOM node.
+  jsu.setProperty(jsu.globalThis, _kOpenViewSlot, null);
+
+  jsu.setProperty(
+    jsu.globalThis,
+    '__rhyolitePanelOnOpen',
+    jsu.allowInterop((JSObject view) {
+      jsu.setProperty(jsu.globalThis, _kOpenViewSlot, view);
+      _renderBootPlaceholder(view);
+    }),
+  );
+  jsu.setProperty(
+    jsu.globalThis,
+    '__rhyolitePanelOnClose',
+    jsu.allowInterop((JSObject _) {
+      jsu.setProperty(jsu.globalThis, _kOpenViewSlot, null);
+    }),
+  );
+
+  // registerView must run exactly once per plugin load — Obsidian throws on a
+  // duplicate view type, and a soft restart re-runs boot with the SAME plugin
+  // object. The flag lives on the plugin (torn down on unload, fresh on
+  // re-enable), so registration tracks the plugin lifecycle.
+  final already =
+      jsu.getProperty<bool?>(plugin.raw, '__rhyolitePanelRegistered') ?? false;
+  if (already) return;
+  jsu.callMethod<void>(plugin.raw, 'registerView', [
+    SyncPanel.viewType,
+    jsu.allowInterop(
+      (JSObject leaf) => jsu.callConstructor<JSObject>(ctor, [leaf]),
+    ),
+  ]);
+  jsu.setProperty(plugin.raw, '__rhyolitePanelRegistered', true);
+}
+
+/// What an open leaf shows between layout restore and the panel being ready.
+/// Deliberately a single line: it exists so the sidebar isn't blank or, worse,
+/// claiming the plugin is gone — not to preview a panel that has no data yet.
+void _renderBootPlaceholder(JSObject view) {
+  final contentEl = jsu.getProperty<JSObject?>(view, 'contentEl');
+  if (contentEl == null) return;
+  jsu.callMethod<void>(contentEl, 'empty', []);
+  final el = jsu.callMethod<JSObject>(contentEl, 'createEl', ['div']);
+  jsu.setProperty(el, 'className', 'rh-panel rh-booting');
+  jsu.setProperty(el, 'textContent', S.panelStarting);
+}
+
 /// Docked right-side panel surfacing live sync state and the actions/warnings
 /// that don't fit the status-bar dot. Deliberately leads with what a
 /// managed-sync competitor *can't* show — end-to-end encryption, conflict-free
@@ -318,9 +399,14 @@ class SyncPanel {
     required String backendLabel,
     required String planLabel,
     required void Function() onOpenSettings,
+    void Function()? onOpenFaq,
     required Future<void> Function() onBrowseVersions,
     required bool Function() isPaused,
     required Future<void> Function(bool paused) onSetPaused,
+    SyncStartBlock? Function()? startBlock,
+    Future<void> Function()? onSignIn,
+    Future<void> Function()? onConnectVault,
+    Future<void> Function()? onUnlock,
     Future<void> Function()? onReconnect,
     Future<({int usedBytes, int quotaBytes})?> Function()? onFetchUsage,
     Future<int> Function()? onSettingsSize,
@@ -335,9 +421,14 @@ class SyncPanel {
        _backendLabel = backendLabel,
        _planLabel = planLabel,
        _onOpenSettings = onOpenSettings,
+       _onOpenFaq = onOpenFaq,
        _onBrowseVersions = onBrowseVersions,
        _isPaused = isPaused,
        _onSetPaused = onSetPaused,
+       _startBlock = startBlock,
+       _onSignIn = onSignIn,
+       _onConnectVault = onConnectVault,
+       _onUnlock = onUnlock,
        _onReconnect = onReconnect,
        _onFetchUsage = onFetchUsage,
        _onSettingsSize = onSettingsSize,
@@ -355,9 +446,20 @@ class SyncPanel {
   final String _backendLabel;
   final String _planLabel;
   final void Function() _onOpenSettings;
+
+  /// Opens the public FAQ. Optional: a build with no site URL simply has no
+  /// help button rather than one that leads nowhere.
+  final void Function()? _onOpenFaq;
   final Future<void> Function() _onBrowseVersions;
   final bool Function() _isPaused;
   final Future<void> Function(bool paused) _onSetPaused;
+
+  /// Live answer to "can the engine start at all?" — re-read on every render
+  /// rather than captured, so a sign-in mid-session clears the banner.
+  final SyncStartBlock? Function()? _startBlock;
+  final Future<void> Function()? _onSignIn;
+  final Future<void> Function()? _onConnectVault;
+  final Future<void> Function()? _onUnlock;
   final Future<void> Function()? _onReconnect;
   final Future<({int usedBytes, int quotaBytes})?> Function()? _onFetchUsage;
   final Future<int> Function()? _onSettingsSize;
@@ -462,16 +564,8 @@ class SyncPanel {
   // ---------------------------------------------------------------------------
 
   void register() {
-    final ctor = jsu.getProperty<JSObject?>(
-      jsu.globalThis,
-      '__rhyoliteSyncPanelViewCtor',
-    );
-    if (ctor == null) {
-      _log?.warning('sync panel: view ctor missing — build shim not injected');
-      return;
-    }
-
-    // Re-point the JS view's callbacks at THIS instance every boot.
+    // Re-point the JS view's callbacks at THIS instance every boot, replacing
+    // the placeholder [registerSyncPanelView] installed.
     jsu.setProperty(
       jsu.globalThis,
       '__rhyolitePanelOnOpen',
@@ -483,25 +577,24 @@ class SyncPanel {
       jsu.allowInterop((JSObject _) => _onViewClose()),
     );
 
-    // registerView must run exactly once per plugin load — Obsidian throws on
-    // a duplicate view type, and a soft engine restart re-runs boot with the
-    // SAME plugin object. The flag lives on the plugin (torn down on unload,
-    // fresh on re-enable), so registration tracks the plugin lifecycle.
-    final already =
-        jsu.getProperty<bool?>(_plugin.raw, '__rhyolitePanelRegistered') ??
-        false;
-    if (!already) {
-      jsu.callMethod<void>(_plugin.raw, 'registerView', [
-        viewType,
-        jsu.allowInterop(
-          (JSObject leaf) => jsu.callConstructor<JSObject>(ctor, [leaf]),
-        ),
-      ]);
-      jsu.setProperty(_plugin.raw, '__rhyolitePanelRegistered', true);
-    }
+    // The view type is registered before boot starts, so a leaf restored with
+    // the workspace can already be open by the time we get here — showing the
+    // placeholder. Adopt it instead of waiting for the user to close and
+    // reopen the panel.
+    final pending = jsu.getProperty<JSObject?>(
+      jsu.globalThis,
+      _kOpenViewSlot,
+    );
+    if (pending != null) _onViewOpen(pending);
 
     _sub = _engine.events.listen(_onEvent);
   }
+
+  /// Re-renders from the outside. The panel is otherwise event-driven, and the
+  /// conditions behind [SyncStartBlock] produce no engine events — a sign-in
+  /// while the engine is down would sit behind a stale banner until the 30s
+  /// tick. No-op when no view is open.
+  void refresh() => _scheduleRender();
 
   void dispose() {
     _sub?.cancel();
@@ -550,6 +643,9 @@ class SyncPanel {
   // ---------------------------------------------------------------------------
 
   void _onViewOpen(JSObject view) {
+    // Kept current for the same reason the placeholder writes it: a boot that
+    // re-runs (soft restart) builds a new panel, which adopts this leaf.
+    jsu.setProperty(jsu.globalThis, _kOpenViewSlot, view);
     _contentEl = jsu.getProperty<JSObject>(view, 'contentEl');
     _dropSkeleton();
     _render();
@@ -650,6 +746,7 @@ class SyncPanel {
   }
 
   void _onViewClose() {
+    jsu.setProperty(jsu.globalThis, _kOpenViewSlot, null);
     _contentEl = null;
     _tickTimer?.cancel();
     _tickTimer = null;
@@ -973,6 +1070,18 @@ class SyncPanel {
     _setIcon(history, 'history');
     _onClick(history, _onBrowseVersions);
 
+    // Most "is it broken?" questions are really questions about what this
+    // sync does differently — people arrive carrying habits from plugins that
+    // behave otherwise. The answers live on the site; the panel is where the
+    // doubt occurs, so it gets the shortest path to them.
+    final faq = _onOpenFaq;
+    if (faq != null) {
+      final help = _el(actions, 'button', cls: 'rh-iconbtn');
+      _attr(help, 'aria-label', S.faqButton);
+      _setIcon(help, 'help-circle');
+      _onClick(help, faq);
+    }
+
     // ── Trust footer ──
     final footer = _el(panel, 'div', cls: 'rh-footer');
     _icon(footer, 'git-merge');
@@ -1006,11 +1115,26 @@ class SyncPanel {
     // freshly-connected vault with nothing to transfer has no last-sync time
     // yet, and saying "not connected" under "Up to date" contradicts the dot.
     // In that case the sub-line simply stays out of the way.
+    //
+    // A missing precondition takes the sub-line outright, even when this vault
+    // synced before: "synced 3h ago" under "Not signed in" reads as reassurance
+    // when the whole point is that nothing is syncing now.
     final syncedAt = _lastSyncedAt;
     final offline = status == _Status.offline || status == _Status.stopped;
-    final sub = syncedAt != null
-        ? S.syncedAgo(_ago(syncedAt))
-        : (offline ? S.notConnected : '');
+    final String sub;
+    if (status == _Status.blocked) {
+      sub = switch (_currentBlock()) {
+        SyncStartBlock.signedOut => S.blockedSignedOutHint,
+        SyncStartBlock.noVault => S.blockedNoVaultHint,
+        SyncStartBlock.locked => S.blockedLockedHint,
+        SyncStartBlock.noServer => S.blockedNoServerHint,
+        null => '',
+      };
+    } else {
+      sub = syncedAt != null
+          ? S.syncedAgo(_ago(syncedAt))
+          : (offline ? S.notConnected : '');
+    }
     _setText(_subEl!, sub);
     _setHidden(_subEl!, sub.isEmpty);
 
@@ -1123,6 +1247,18 @@ class SyncPanel {
     // server, and the user's intent there is "get me back online". Otherwise
     // the primary control is the Pause/Resume toggle (Resume highlighted so a
     // paused vault is obviously actionable).
+    //
+    // A missing precondition overrides both: neither pausing nor reconnecting
+    // means anything until the user signs in / picks a vault / unlocks, so the
+    // button becomes that step and says so.
+    final block = status == _Status.blocked ? _currentBlock() : null;
+    if (block != null) {
+      jsu.setProperty(_primaryBtnEl!, 'className', 'rh-primary mod-cta');
+      _setIcon(_primaryIconEl!, _blockIcon(block));
+      _setText(_primaryLabelEl!, _blockAction(block));
+      return;
+    }
+
     final reconnect = _isReconnectAction(status);
     final paused = _isPaused();
     final label = reconnect
@@ -1294,10 +1430,32 @@ class SyncPanel {
   // Actions
   // ---------------------------------------------------------------------------
 
+  /// Label of the step that unblocks [block].
+  static String _blockAction(SyncStartBlock block) => switch (block) {
+    SyncStartBlock.signedOut => S.signInButton,
+    SyncStartBlock.noVault => S.connectVaultButton,
+    SyncStartBlock.locked => S.unlock,
+    SyncStartBlock.noServer => S.settingsButton,
+  };
+
+  static String _blockIcon(SyncStartBlock block) => switch (block) {
+    SyncStartBlock.signedOut => 'log-in',
+    SyncStartBlock.noVault => 'database',
+    SyncStartBlock.locked => 'key',
+    SyncStartBlock.noServer => 'settings',
+  };
+
   /// The primary button is one element whose meaning follows the status, so the
   /// handler re-derives that meaning at click time.
   Future<void> _handlePrimaryAction() async {
-    final reconnect = _isReconnectAction(_effective());
+    final status = _effective();
+    final block = status == _Status.blocked ? _currentBlock() : null;
+    if (block != null) {
+      await _handleBlockAction(block);
+      return;
+    }
+
+    final reconnect = _isReconnectAction(status);
     if (reconnect) {
       final onReconnect = _onReconnect;
       if (onReconnect == null) return;
@@ -1317,6 +1475,28 @@ class SyncPanel {
       (status == _Status.offline ||
           status == _Status.error ||
           status == _Status.authExpired);
+
+  /// Runs the step that clears [block]. Every branch falls back to opening
+  /// settings, which is where all four are also fixable — a button that does
+  /// nothing would be worse than the grey banner this replaces.
+  Future<void> _handleBlockAction(SyncStartBlock block) async {
+    final direct = switch (block) {
+      SyncStartBlock.signedOut => _onSignIn,
+      SyncStartBlock.noVault => _onConnectVault,
+      SyncStartBlock.locked => _onUnlock,
+      SyncStartBlock.noServer => null,
+    };
+    if (direct == null) {
+      _onOpenSettings();
+      return;
+    }
+    try {
+      await direct();
+    } catch (e) {
+      _log?.warning('sync panel: unblock action failed: $e');
+    }
+    _render();
+  }
 
   Future<void> _handleTogglePause() async {
     final next = !_isPaused();
@@ -1494,10 +1674,15 @@ class SyncPanel {
   // ---------------------------------------------------------------------------
 
   /// Derives the shown status from the connection/activity/blocker flags.
-  /// Priority: paused > hard blocker > live activity > connection state.
-  /// Green ("ready") is reserved for a genuine connected-and-idle state.
+  /// Priority: paused > missing precondition > hard blocker > live activity >
+  /// connection state. Green ("ready") is reserved for a genuine
+  /// connected-and-idle state.
   _Status _effective() {
     if (_isPaused()) return _Status.paused;
+    // A missing precondition outranks everything below: the engine is not
+    // merely disconnected, it was never able to run, and no amount of
+    // reconnecting will change that.
+    if (_currentBlock() != null) return _Status.blocked;
     switch (_blocker) {
       case _Blocker.auth:
         return _Status.authExpired;
@@ -1515,8 +1700,28 @@ class SyncPanel {
     return _Status.stopped;
   }
 
+  /// The host's live verdict, or null when nothing is missing. Guarded because
+  /// the callback reads engine/auth state that a teardown may have dropped.
+  SyncStartBlock? _currentBlock() {
+    final probe = _startBlock;
+    if (probe == null) return null;
+    try {
+      return probe();
+    } catch (e) {
+      _log?.warning('sync panel: start-block probe failed: $e');
+      return null;
+    }
+  }
+
   String _statusLabel(_Status status) => switch (status) {
     _Status.stopped => S.syncStopped,
+    _Status.blocked => switch (_currentBlock()) {
+      SyncStartBlock.signedOut => S.blockedSignedOut,
+      SyncStartBlock.noVault => S.blockedNoVault,
+      SyncStartBlock.locked => S.blockedLocked,
+      SyncStartBlock.noServer => S.blockedNoServer,
+      null => S.syncStopped,
+    },
     _Status.connecting => _connectAttempt <= 2 ? S.connecting : S.reconnecting,
     _Status.offline => S.offlineCantReach,
     _Status.ready => S.upToDate,
@@ -1534,6 +1739,7 @@ class SyncPanel {
   /// Status → panel modifier class. The actual colours live in
   /// [kSyncPanelCss] and mirror the status-bar indicator's palette.
   static String _statusClass(_Status status) => switch (status) {
+    _Status.blocked => 'is-blocked',
     _Status.ready => 'is-ready',
     _Status.pending => 'is-pending',
     _Status.connecting => 'is-connecting',
@@ -1570,6 +1776,7 @@ class SyncPanel {
 
 enum _Status {
   stopped,
+  blocked,
   connecting,
   offline,
   ready,
@@ -1584,3 +1791,30 @@ enum _Status {
 /// Sticky sync-blocking condition, cleared when a live connection is
 /// (re)established (error) or the underlying state is fixed (auth/sub).
 enum _Blocker { none, error, auth, sub }
+
+/// A precondition the engine needs before it can start AT ALL — as opposed to
+/// a connection it had and lost.
+///
+/// The distinction matters because it decides what the panel may say. Without
+/// it every one of these ended up as the same grey "sync stopped / not
+/// connected", which names a symptom the user cannot act on and hides the one
+/// thing they can: a plugin that is simply signed out looked identical to a
+/// server outage.
+///
+/// Resolved live by the host (see `plugin.dart`), not latched at construction:
+/// signing in or unlocking clears it without rebuilding the panel.
+enum SyncStartBlock {
+  /// Managed edition with no account session — the plugin is signed out.
+  signedOut,
+
+  /// Signed in (or self-host) but no remote vault is connected yet.
+  noVault,
+
+  /// A vault is configured but its key is absent: the passphrase prompt was
+  /// dismissed, so nothing can be encrypted or decrypted.
+  locked,
+
+  /// Self-host without a usable server URL/token, or a build with no account
+  /// service compiled in.
+  noServer,
+}

@@ -499,6 +499,27 @@ class EnStrings extends AppStrings {
   String noHistoryFor(String path) => 'No history for $path';
   @override
   String get versionHistoryTitle => 'Version history';
+
+  @override
+  String get historyPickFile => 'Pick a file';
+  @override
+  String historyPickHint(int paths, int events) =>
+      'paths with history: $paths (from the $events most recent entries). '
+      'Files that were deleted or renamed away are here too — their versions '
+      'live under the name they had.';
+  @override
+  String get historyFilterPlaceholder => 'Filter by path';
+  @override
+  String historyPathMeta(int versions, String when) =>
+      'entries: $versions  ·  $when';
+  @override
+  String get historyGoneMark => 'deleted';
+  @override
+  String get historyOtherFile => 'Another file...';
+  @override
+  String get historyEmpty => 'Nothing in the history yet.';
+  @override
+  String get historyNothingMatches => 'Nothing matches.';
   @override
   String versionsCountHint(int n) =>
       '$n version(s), newest first. Select one to preview and restore.';
@@ -993,6 +1014,18 @@ class EnStrings extends AppStrings {
 
   // ── Sync panel ──
   @override
+  String get panelStarting => 'Rhyolite Sync is starting...';
+
+  @override
+  String get faqButton => 'Questions and answers';
+  @override
+  String get faqSettingName => 'Questions and answers';
+  @override
+  String get faqSettingDescription =>
+      'How sync behaves, what it does with conflicts, and what to do when '
+      'something looks wrong. Opens in your browser.';
+
+  @override
   String get endToEndEncrypted => 'End-to-end encrypted';
   @override
   String syncedAgo(String ago) => 'synced $ago';
@@ -1089,6 +1122,29 @@ class EnStrings extends AppStrings {
   String get subscriptionRequiredStatus => 'Subscription required';
   @override
   String get pausedStatus => 'Paused';
+
+  @override
+  String get blockedSignedOut => 'Not signed in';
+  @override
+  String get blockedSignedOutHint =>
+      'Sign in to your Rhyolite account to start syncing.';
+  @override
+  String get blockedNoVault => 'No vault connected';
+  @override
+  String get blockedNoVaultHint =>
+      'Pick the remote vault this device should sync with.';
+  @override
+  String get blockedLocked => 'Vault locked';
+  @override
+  String get blockedLockedHint =>
+      'Enter the passphrase — without the key nothing can be synced.';
+  @override
+  String get blockedNoServer => 'Server not configured';
+  @override
+  String get blockedNoServerHint => 'Set the server address and access token.';
+  @override
+  String syncNotStartedNotice(String reason) =>
+      'Rhyolite: sync is not running — $reason. Open the sync panel.';
 
   // ── Self-host modal ──
   @override

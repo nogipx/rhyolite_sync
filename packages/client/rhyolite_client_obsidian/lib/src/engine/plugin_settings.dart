@@ -26,14 +26,24 @@ import 'self_host_modal.dart';
 /// Registers the settings tab. The tab rebuilds its UI on every open so that
 /// auth and vault state are always up to date.
 ///
-/// Returns a [refresh] function — call it to immediately re-render the tab
-/// (e.g. right after sign-in/sign-out without waiting for the user to reopen).
-void Function() registerSettingsTab({
+/// Returns:
+///  * `refresh` — re-render the tab immediately (e.g. right after
+///    sign-in/sign-out, without waiting for the user to reopen it);
+///  * `beginSignIn` — start the browser sign-in flow. Handed out because the
+///    state nonce and the `obsidian://rhyolite-auth` handler that redeems it
+///    live in here, and the sync panel needs to offer the same one-click
+///    sign-in without sending the user to the settings tab to find it.
+({void Function() refresh, void Function() beginSignIn}) registerSettingsTab({
   required PluginHandle plugin,
   required ObsidianConfigStorage configStorage,
   required VaultConfig config,
   required AuthConfig authConfig,
-  required RpcAccountClient? authClient,
+  // Read LIVE, never snapshotted. The account client is replaced on every
+  // sign-in and on every token refresh the recovery handler performs, and a
+  // by-value copy here is precisely the bug [AuthSessionState] exists to
+  // prevent: the tab kept reporting the session it was registered with and
+  // offered "Sign in" to a user who already was.
+  required RpcAccountClient? Function() authClient,
   required RpcAccountClient accountClient,
   required Future<({int usedBytes, int quotaBytes})?> Function() onFetchUsage,
   required void Function(String url) openUrl,
@@ -95,7 +105,7 @@ void Function() registerSettingsTab({
   // Mutable state captured by the builder closure — updated via callbacks.
   var currentConfig = config;
   var currentAuthConfig = authConfig;
-  var currentAuthClient = authClient;
+  RpcAccountClient? currentAuthClient() => authClient();
   DateTime? subscriptionEnd; // cached per tab open, refreshed on display
   ({int usedBytes, int quotaBytes})? vaultUsage;
   // External (BYO) storage: always available on self-host (own server — lean
@@ -133,7 +143,8 @@ void Function() registerSettingsTab({
     if (session != null) {
       await configStorage.saveAuthSession(session);
     }
-    currentAuthClient = accountClient;
+    // onAuthChanged rebinds the shared AuthSessionState, which is what
+    // currentAuthClient() reads — no local copy to keep in step.
     onAuthChanged(currentAuthConfig, accountClient);
     tab.show();
   }
@@ -143,7 +154,7 @@ void Function() registerSettingsTab({
   // lands on /account. Subscription purchase + management live on the site's
   // proven flow, so the plugin just does this handoff.
   Future<void> openAccountOnSite() async {
-    final client = currentAuthClient;
+    final client = currentAuthClient();
     if (client == null) return;
     try {
       final code = await client.issueSessionLoginCode();
@@ -162,11 +173,11 @@ void Function() registerSettingsTab({
       description: S.signedInAs(userEmail),
       buttonText: S.signOut,
       onClick: () async {
-        await currentAuthClient?.signOut();
+        await currentAuthClient()?.signOut();
         await configStorage.clearAuthSession();
         await configStorage.disconnectVault();
-        currentAuthClient = null;
         currentConfig = const VaultConfig(vaultId: '', vaultName: '');
+        // Unbinds the shared state, so currentAuthClient() reads null below.
         onSignOut();
         tab.show();
       },
@@ -261,8 +272,11 @@ void Function() registerSettingsTab({
         if (selfHostEnabled) {
           dir = selfHostDirectory;
         } else {
-          final client = currentAuthClient;
-          dir = (client != null && client.isSignedIn)
+          // Session present is enough — the directory's first call refreshes
+          // an expired access token by itself. Requiring a fresh one made this
+          // button silently do nothing for the first seconds after a restart.
+          final client = currentAuthClient();
+          dir = (client != null && client.session != null)
               ? ManagedVaultDirectory(client)
               : null;
         }
@@ -353,7 +367,7 @@ void Function() registerSettingsTab({
           description: S.alreadyPaidDescription,
           buttonText: S.restoreSubscription,
           onClick: () async {
-            final client = currentAuthClient;
+            final client = currentAuthClient();
             if (client == null) return;
             await _showRestoreSubscriptionModal(
               plugin,
@@ -493,8 +507,28 @@ void Function() registerSettingsTab({
       );
     }
 
-    final isSignedIn = currentAuthClient?.isSignedIn ?? false;
-    final userEmail = currentAuthClient?.email ?? '';
+    // "Signed in" here means a session EXISTS — not that its access token is
+    // fresh right now. Access tokens live 15 minutes, so `isSignedIn` (which
+    // also requires an unexpired one) is false on essentially every cold start
+    // until the boot refresh lands, and this tab would greet a perfectly
+    // signed-in user with a Sign in button. The refresh token is what decides
+    // whether the account is still ours, and every call refreshes on demand
+    // through `ensureValidToken`.
+    final isSignedIn = currentAuthClient()?.session != null;
+    final userEmail = currentAuthClient()?.email ?? '';
+
+    // Answers to what this sync does differently — the questions people bring
+    // from other plugins, which is where most "is it broken?" reports start.
+    //
+    // First row, above every section and outside every condition: someone who
+    // is not signed in, or whose vault will not connect, is exactly who needs
+    // it, and that is the state in which most of this tab is hidden.
+    t.addButton(
+      name: S.faqSettingName,
+      description: S.faqSettingDescription,
+      buttonText: S.faqButton,
+      onClick: () async => openUrl('$authWebUrl/faq'),
+    );
 
     addSelfHostSection(t);
 
@@ -628,12 +662,13 @@ void Function() registerSettingsTab({
   }
 
   Future<void> buildAsync(PluginSettingsTab t) async {
-    final client = currentAuthClient;
+    final client = currentAuthClient();
     DateTime? fetched;
     // Self-host always allows BYO; on managed it's gated on the plan caps.
     var fetchedExternalAllowed = selfHostEnabled;
     int? fetchedMaxVaultCount;
-    if (client != null && client.isSignedIn) {
+    // Session present, not token-fresh — getSubscription refreshes on demand.
+    if (client != null && client.session != null) {
       // One getSubscription call yields both the period end and the plan
       // capabilities.
       try {
@@ -714,7 +749,7 @@ void Function() registerSettingsTab({
     ]);
   }
 
-  return tab.show; // caller can trigger a refresh
+  return (refresh: tab.show, beginSignIn: beginBrowserAuth);
 }
 
 /// A section heading plus a muted note under it.

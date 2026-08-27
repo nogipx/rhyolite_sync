@@ -224,4 +224,98 @@ void main() {
     await expectLater(client.refreshSession(), throwsA(isA<StateError>()));
     expect(responder.presented, isEmpty);
   });
+
+  // A refused refresh is the only proof a session is dead, and it surfaces to
+  // callers as whatever operation happened to need a token — each of which
+  // logs its own failure and carries on. Without this notification nothing
+  // concluded "signed out": the host kept retrying an account it could never
+  // authenticate with, and told the user nothing.
+  group('onSessionRefused', () {
+    test('fires once, only for a refusal, and never for an ambiguous or '
+        'transient failure', () async {
+      for (final scripted in [
+        (
+          name: 'ambiguous',
+          script: <Object>[
+            RpcException('internal: upstream reset'),
+            RpcException('unauthenticated: invalid refresh token'),
+          ],
+        ),
+        (
+          name: 'transient',
+          script: <Object>[
+            RpcException('unavailable: connection closed'),
+            RpcException('unavailable: connection closed'),
+            RpcException('unavailable: connection closed'),
+          ],
+        ),
+      ]) {
+        final (client, _) = _connect(scripted.script);
+        client.useSession(_session('a', expired: true));
+        var fired = 0;
+        client.onSessionRefused = (_) => fired++;
+
+        await expectLater(client.refreshSession(), throwsA(isA<Object>()));
+        expect(fired, 0, reason: '${scripted.name} is not evidence');
+      }
+
+      final (client, _) = _connect([
+        RpcException('unauthenticated: invalid refresh token'),
+        RpcException('unauthenticated: invalid refresh token'),
+      ]);
+      client.useSession(_session('a', expired: true));
+      final reasons = <RefreshFailedException>[];
+      client.onSessionRefused = reasons.add;
+
+      await expectLater(
+        client.refreshSession(),
+        throwsA(isA<RefreshFailedException>()),
+      );
+      expect(reasons, hasLength(1));
+      expect(reasons.single.sessionIsDead, isTrue);
+    });
+
+    test('a burst of callers produces one notification, and every caller '
+        'still gets the error', () async {
+      final (client, responder) = _connect([
+        RpcException('unauthenticated: invalid refresh token'),
+        RpcException('unauthenticated: invalid refresh token'),
+      ]);
+      client.useSession(_session('a', expired: true));
+      var fired = 0;
+      client.onSessionRefused = (_) => fired++;
+
+      // ensureValidToken joins the in-flight refresh rather than starting a
+      // second one against a single-use token.
+      final calls = [
+        client.refreshSession(),
+        client.ensureValidToken(),
+        client.ensureValidToken(),
+      ];
+      for (final c in calls) {
+        await expectLater(c, throwsA(isA<RefreshFailedException>()));
+      }
+
+      expect(fired, 1);
+      expect(responder.presented, hasLength(2), reason: 'one retry sequence');
+    });
+
+    test('a throwing handler does not replace the error the caller awaits',
+        () async {
+      final (client, _) = _connect([
+        RpcException('unauthenticated: invalid refresh token'),
+        RpcException('unauthenticated: invalid refresh token'),
+      ]);
+      client.useSession(_session('a', expired: true));
+      client.onSessionRefused = (_) => throw StateError('host blew up');
+
+      await expectLater(
+        client.refreshSession(),
+        throwsA(
+          isA<RefreshFailedException>()
+              .having((e) => e.sessionIsDead, 'sessionIsDead', isTrue),
+        ),
+      );
+    });
+  });
 }

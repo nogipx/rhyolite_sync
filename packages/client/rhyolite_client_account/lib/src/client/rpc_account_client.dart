@@ -74,6 +74,22 @@ class RpcAccountClient {
   /// so the next cold start fails with `token revoked` and forces a re-login.
   FutureOr<void> Function(AuthSession session)? onSessionPersist;
 
+  /// Invoked once when the server REFUSES a refresh token it had not already
+  /// rotated away — the single case that proves the session is dead.
+  ///
+  /// The counterpart to [onSessionPersist], and it exists because the verdict
+  /// is reachable nowhere else. A refused refresh surfaces to callers as
+  /// whatever operation happened to need a token — a blob-config check, a
+  /// policy load, a background poll — each of which quite reasonably logs its
+  /// own failure and carries on. Nothing then concluded "this account is
+  /// signed out", so the host kept a session it could never use, retried
+  /// forever, and told the user nothing.
+  ///
+  /// The session is left in place: only the host knows whether to clear
+  /// storage, prompt, or both. Fired at most once per refusal, from the single
+  /// in-flight refresh, so a burst of callers produces one notification.
+  void Function(RefreshFailedException reason)? onSessionRefused;
+
   /// Replace the live session with a server-issued one and persist it.
   /// Persistence is best-effort: a failed write leaves the in-memory session
   /// valid, only risking a re-login on the next cold start.
@@ -181,6 +197,15 @@ class RpcAccountClient {
       // the app's error zone / systemd restart-loops the bot). THIS caller still
       // gets the error via rethrow.
       completer.future.ignore();
+      // One refusal, one notification — this is the only place every refresh
+      // path converges, so the host hears about a dead session no matter which
+      // operation happened to trigger the refresh. Never let a host callback
+      // replace the error the caller is waiting for.
+      if (e is RefreshFailedException && e.sessionIsDead) {
+        try {
+          onSessionRefused?.call(e);
+        } catch (_) {}
+      }
       rethrow;
     } finally {
       _refreshInFlight = null;

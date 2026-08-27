@@ -50,7 +50,9 @@ Future<void> main(List<String> args) async {
   // dart2js cannot subclass a JS class, so the side-panel view (an
   // Obsidian `ItemView` subclass) is authored here in JS and exposed to
   // the Dart side via a global constructor. onOpen/onClose delegate to
-  // Dart callbacks installed by SyncPanel.register(). `require` is made
+  // Dart callbacks in globalThis slots: registerSyncPanelView() installs a
+  // placeholder into them before boot, and SyncPanel.register() re-points them
+  // at the live panel once there is something to show. `require` is made
   // global by the plugin wrapper (build_common.dart), so `require('obsidian')`
   // resolves here too.
   const panelShim = '''

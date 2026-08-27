@@ -219,6 +219,14 @@ abstract class AppStrings {
   String failedToLoadHistory(String path, Object error);
   String noHistoryFor(String path);
   String get versionHistoryTitle;
+  String get historyPickFile;
+  String historyPickHint(int paths, int events);
+  String get historyFilterPlaceholder;
+  String historyPathMeta(int versions, String when);
+  String get historyGoneMark;
+  String get historyOtherFile;
+  String get historyEmpty;
+  String get historyNothingMatches;
   String versionsCountHint(int n);
   String get versionPreviewTitle;
   String versionPreviewSubtitle(String path, String when);
@@ -422,6 +430,10 @@ abstract class AppStrings {
 
   // ── Sync panel ───────────────────────────────────────────────────────────
   String get endToEndEncrypted;
+  String get panelStarting;
+  String get faqButton;
+  String get faqSettingName;
+  String get faqSettingDescription;
   String syncedAgo(String ago);
   String get notConnected;
   String get panelStorageLabel;
@@ -463,6 +475,19 @@ abstract class AppStrings {
   String get sessionExpiredStatus;
   String get subscriptionRequiredStatus;
   String get pausedStatus;
+
+  // ── Sync cannot start (missing precondition, not a lost connection) ──────
+  String get blockedSignedOut;
+  String get blockedSignedOutHint;
+  String get blockedNoVault;
+  String get blockedNoVaultHint;
+  String get blockedLocked;
+  String get blockedLockedHint;
+  String get blockedNoServer;
+  String get blockedNoServerHint;
+
+  /// Boot-time notice, shown once when sync could not start at all.
+  String syncNotStartedNotice(String reason);
 
   // ── Self-host modal ──────────────────────────────────────────────────────
   String get selfHostModalTitle;

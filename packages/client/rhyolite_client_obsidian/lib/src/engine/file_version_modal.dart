@@ -20,20 +20,25 @@ Future<void> showFileVersionModal(
   PluginHandle plugin,
   ISyncEngine engine,
 ) async {
-  final activeFile = plugin.app.workspace.getActiveFile();
-  if (activeFile == null) {
-    showNotice(S.noFileOpen);
-    return;
-  }
-  final relPath = activeFile.path;
-
   final viewer = engine is StateSyncEngine
       ? engine.createFileVersionViewer()
       : null;
-  if (viewer == null) {
+  final browser = engine is StateSyncEngine
+      ? engine.createHistoryBrowser()
+      : null;
+  if (viewer == null || browser == null) {
     showNotice(S.versionHistoryUnavailable);
     return;
   }
+
+  // No note open, or the open one has nothing recorded: offer the whole
+  // history rather than a dead end. Both used to be a notice.
+  final activeFile = plugin.app.workspace.getActiveFile();
+  if (activeFile == null) {
+    await showHistoryPathPicker(plugin, viewer, browser);
+    return;
+  }
+  final relPath = activeFile.path;
 
   final List<HistoryEntry> versions;
   try {
@@ -45,15 +50,200 @@ Future<void> showFileVersionModal(
 
   if (versions.isEmpty) {
     showNotice(S.noHistoryFor(relPath));
+    await showHistoryPathPicker(plugin, viewer, browser);
     return;
   }
 
-  await _showVersionList(plugin, viewer, relPath, versions);
+  await _showVersionList(plugin, viewer, browser, relPath, versions);
+}
+
+/// Every path the history knows, newest activity first — including paths that
+/// no longer exist.
+///
+/// This is the only way to reach the versions of a note that was renamed or
+/// deleted. History is keyed by PATH: renaming a note starts a fresh history
+/// under the new name and leaves the old one behind, and since the version
+/// browser opens the ACTIVE note's history, nothing that is no longer on disk
+/// could be opened at all.
+///
+/// The list is built from the most recent [_kPathScanLimit] events because the
+/// history endpoint takes a limit and no cursor. The hint says so rather than
+/// implying the list is exhaustive; picking a path re-queries that path alone,
+/// so the versions shown for it are complete.
+Future<void> showHistoryPathPicker(
+  PluginHandle plugin,
+  FileVersionViewer viewer,
+  HistoryBrowser browser,
+) async {
+  final List<HistoryEntry> all;
+  try {
+    all = await browser.list(limit: _kPathScanLimit);
+  } catch (e) {
+    showNotice(S.failedToLoadHistory('', e));
+    return;
+  }
+
+  if (all.isEmpty) {
+    showNotice(S.historyEmpty);
+    return;
+  }
+
+  // Group by path, keeping the newest entry per path for the meta line. The
+  // list arrives newest-first, so the first entry seen for a path is its
+  // latest — and whether THAT one is a deletion is what decides the marker.
+  final byPath = <String, ({int count, HistoryEntry newest})>{};
+  for (final e in all) {
+    if (e.path.isEmpty) continue;
+    final seen = byPath[e.path];
+    byPath[e.path] = seen == null
+        ? (count: 1, newest: e)
+        : (count: seen.count + 1, newest: seen.newest);
+  }
+
+  final paths = byPath.entries.toList()
+    ..sort((a, b) => b.value.newest.createdAt.compareTo(
+          a.value.newest.createdAt,
+        ));
+
+  await _showPathList(plugin, viewer, browser, paths, all.length);
+}
+
+/// How many history events the path list is built from. The endpoint has no
+/// cursor, so this is a ceiling, not a page size.
+const int _kPathScanLimit = 3000;
+
+Future<void> _showPathList(
+  PluginHandle plugin,
+  FileVersionViewer viewer,
+  HistoryBrowser browser,
+  List<MapEntry<String, ({int count, HistoryEntry newest})>> paths,
+  int scannedEvents,
+) {
+  return showModalWith<void>(
+    plugin,
+    build: (ctx) {
+      ctx.h3(S.historyPickFile);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.historyPickHint(paths.length, scannedEvents),
+      );
+      ctx.spaceVertical(px: 8);
+
+      final filter = ctx.createEl('input', cls: 'rhyolite-history-filter');
+      jsu.setProperty(filter, 'type', 'text');
+      jsu.setProperty(filter, 'placeholder', S.historyFilterPlaceholder);
+      _css(filter, {'width': '100%'});
+      ctx.spaceVertical(px: 8);
+
+      final list = ctx.createEl('div');
+      _css(list, {
+        'display': 'flex',
+        'flexDirection': 'column',
+        'gap': '6px',
+        'maxHeight': '55vh',
+        'overflowY': 'auto',
+        'paddingRight': '4px',
+      });
+      final doc = jsu.getProperty<JSObject>(list, 'ownerDocument');
+
+      final empty = _el(doc, list, 'p', text: S.historyNothingMatches);
+      _css(empty, {'display': 'none', 'opacity': '0.7'});
+
+      final rows = <(String, JSObject)>[];
+      for (final entry in paths) {
+        final path = entry.key;
+        final info = entry.value;
+        final gone = info.newest.operation == HistoryOperation.delete;
+
+        final btn = _el(doc, list, 'button');
+        _css(btn, {
+          'width': '100%',
+          'textAlign': 'left',
+          'flex': '0 0 auto',
+          'display': 'flex',
+          'flexDirection': 'column',
+          'alignItems': 'flex-start',
+          'gap': '2px',
+          'height': 'auto',
+          'padding': '8px 10px',
+        });
+
+        final title = _el(doc, btn, 'span', text: path);
+        _css(title, {
+          'width': '100%',
+          'overflow': 'hidden',
+          'textOverflow': 'ellipsis',
+          'whiteSpace': 'nowrap',
+        });
+        if (gone) _css(title, {'opacity': '0.75'});
+
+        final meta = _el(
+          doc,
+          btn,
+          'span',
+          text: gone
+              ? '${S.historyGoneMark}  ·  '
+                  '${S.historyPathMeta(info.count, _fmt(info.newest.createdAt))}'
+              : S.historyPathMeta(info.count, _fmt(info.newest.createdAt)),
+        );
+        _css(meta, {'fontSize': '11px', 'opacity': '0.7'});
+
+        _onClick(btn, () async {
+          ctx.close(null);
+          await _openPath(plugin, viewer, browser, path);
+        });
+        rows.add((path.toLowerCase(), btn));
+      }
+
+      jsu.callMethod<void>(filter, 'addEventListener', [
+        'input',
+        jsu.allowInterop((JSAny? _) {
+          final q =
+              (jsu.getProperty<String?>(filter, 'value') ?? '').toLowerCase();
+          var shown = 0;
+          for (final (haystack, el) in rows) {
+            final match = q.isEmpty || haystack.contains(q);
+            if (match) shown++;
+            _css(el, {'display': match ? 'flex' : 'none'});
+          }
+          _css(empty, {'display': shown == 0 ? 'block' : 'none'});
+        }),
+      ]);
+
+      ctx.spaceVertical(px: 12);
+      ctx.buttonRow([ButtonSpec(S.cancel, () => ctx.close(null))]);
+      ctx.onEscape(() => ctx.close(null));
+    },
+  );
+}
+
+/// Re-queries one path so its version list is complete, rather than reusing
+/// the slice that fitted in the scan window.
+Future<void> _openPath(
+  PluginHandle plugin,
+  FileVersionViewer viewer,
+  HistoryBrowser browser,
+  String path,
+) async {
+  final List<HistoryEntry> versions;
+  try {
+    versions = await viewer.versionsOf(path);
+  } catch (e) {
+    showNotice(S.failedToLoadHistory(path, e));
+    return;
+  }
+  if (versions.isEmpty) {
+    showNotice(S.noHistoryFor(path));
+    return;
+  }
+  await _showVersionList(plugin, viewer, browser, path, versions);
 }
 
 Future<void> _showVersionList(
   PluginHandle plugin,
   FileVersionViewer viewer,
+  HistoryBrowser browser,
   String relPath,
   List<HistoryEntry> versions,
 ) {
@@ -98,12 +288,28 @@ Future<void> _showVersionList(
         });
         _onClick(btn, () async {
           ctx.close(null);
-          await _showVersionPreview(plugin, viewer, entry, relPath, versions);
+          await _showVersionPreview(
+            plugin,
+            viewer,
+            browser,
+            entry,
+            relPath,
+            versions,
+          );
         });
       }
 
       ctx.spaceVertical(px: 12);
-      ctx.buttonRow([ButtonSpec(S.cancel, () => ctx.close(null))]);
+      // Reachable from here, not only from an empty editor: the file whose
+      // history you want is often not the one you have open — above all when
+      // it no longer exists.
+      ctx.buttonRow([
+        ButtonSpec(S.historyOtherFile, () async {
+          ctx.close(null);
+          await showHistoryPathPicker(plugin, viewer, browser);
+        }),
+        ButtonSpec(S.cancel, () => ctx.close(null)),
+      ]);
       ctx.onEscape(() => ctx.close(null));
     },
   );
@@ -117,6 +323,7 @@ bool _looksBinary(Uint8List bytes) {
 Future<void> _showVersionPreview(
   PluginHandle plugin,
   FileVersionViewer viewer,
+  HistoryBrowser browser,
   HistoryEntry entry,
   String relPath,
   List<HistoryEntry> versions,
@@ -127,7 +334,8 @@ Future<void> _showVersionPreview(
   final current = await viewer.currentContent(entry.path);
 
   // Closes this preview and returns to the version list (no re-fetch).
-  Future<void> back() => _showVersionList(plugin, viewer, relPath, versions);
+  Future<void> back() =>
+      _showVersionList(plugin, viewer, browser, relPath, versions);
 
   return showModalWith<void>(
     plugin,

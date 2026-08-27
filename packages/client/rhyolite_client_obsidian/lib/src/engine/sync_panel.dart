@@ -518,6 +518,17 @@ class SyncPanel {
   // no work pending. The engine emits no "sync finished" event, so activity is
   // a transient overlay cleared by an idle-debounce timer.
   bool _everStarted = false;
+
+  /// A resume the user asked for, still in flight.
+  ///
+  /// Pause leaves the panel in `stopped`, and a resume produces no engine
+  /// event until the engine actually starts — which waits on the single
+  /// lifecycle lane and can therefore sit behind a stalled restart for as long
+  /// as that one takes to time out. Through all of it the hero kept saying
+  /// "sync stopped": the button had flipped, so the only thing on screen that
+  /// answered the click was the button itself. Held until the first engine
+  /// event, which knows better than we do.
+  bool _resuming = false;
   bool _connected = false;
   bool _connecting = false;
   int _connectAttempt = 0;
@@ -762,6 +773,8 @@ class SyncPanel {
   void _onEvent(SyncEngineEvent event) {
     switch (event) {
       case SyncStarted():
+        // The engine is talking; it owns the status from here.
+        _resuming = false;
         _everStarted = true;
         _connecting = true;
         _connected = false;
@@ -1500,6 +1513,10 @@ class SyncPanel {
 
   Future<void> _handleTogglePause() async {
     final next = !_isPaused();
+    // Resuming has nothing to show until the engine emits, so say what is
+    // actually happening in the meantime rather than leaving the pre-resume
+    // status on screen.
+    _resuming = !next;
     // _onSetPaused flips the shared pause flag synchronously (before its first
     // await), so an immediate re-render already reflects the new state.
     final done = _onSetPaused(next);
@@ -1508,6 +1525,10 @@ class SyncPanel {
       await done;
     } catch (e) {
       _log?.warning('sync panel: toggle pause failed: $e');
+    } finally {
+      // Cleared even when the engine never emitted: a resume that finished
+      // without starting anything must not leave a permanent "Connecting...".
+      _resuming = false;
     }
     _render();
   }
@@ -1695,7 +1716,7 @@ class SyncPanel {
     }
     if (_activity) return _Status.syncing;
     if (_connected) return _hasPending ? _Status.pending : _Status.ready;
-    if (_connecting) return _Status.connecting;
+    if (_connecting || _resuming) return _Status.connecting;
     if (_everStarted) return _Status.offline;
     return _Status.stopped;
   }

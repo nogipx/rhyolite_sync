@@ -1,3 +1,35 @@
+## [3.15.1] - 2026-08-27
+
+**Resume no longer takes a minute, and no longer looks like it did nothing.**
+Pausing and then resuming could leave sync idle for over a minute, with the
+panel still reading "Sync stopped" the whole time. The button looked broken,
+and the natural next move — press it again, or restart Obsidian — was the one
+that helped least.
+
+Two separate things caused that. Settings sync and note sync share one queue
+that runs a single job at a time, and a settings download already under way
+could not be interrupted: it kept the queue to itself until it gave up a
+minute later, and the resume waited behind it. Pausing now cancels that
+download outright. Separately, the panel had nothing to say between the click
+and the engine actually starting, so it kept showing the state from before the
+pause; it now says "Connecting..." from the moment you press it.
+
+Both also apply when sync restarts on its own — after waking from sleep, or
+when the connection is re-established.
+
+### Bug Fixes
+
+- resume says it is working instead of looking ignored (obsidian)
+- a settings pull no longer holds the only scheduler slot through a pause (core)
+- a paused sync stops settings work instead of letting it finish (core)
+- a start nobody is waiting for gets out of the way (core)
+- let a failed body read be caught like every other HTTP failure (core)
+
+### Other
+
+- bump plugin to 3.15.1 (obsidian)
+
+
 ## [3.15.0] - 2026-08-27
 
 **Sync now tells you why it is not running.** Signed out, no vault chosen, a

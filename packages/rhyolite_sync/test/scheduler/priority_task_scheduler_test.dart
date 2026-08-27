@@ -163,6 +163,50 @@ void main() {
       expect(ran, ['after']);
     });
 
+    // The engine-lifecycle lane, as the plugin drives it. A restart the plugin
+    // started by itself once wedged on a dead transport and held this single
+    // lane until its own 60s RPC timeout; the user's Resume queued behind it
+    // and looked like a dead button. Automatic lifecycle work is therefore
+    // preemptible and lower priority than anything the user asked for.
+    test('a user-initiated boot preempts an automatic one already running, on '
+        'the same lane key', () async {
+      final s = PriorityTaskScheduler();
+      const key = 'engine-lifecycle';
+      var automaticSawCancel = false;
+      var userRan = false;
+
+      // Automatic restart: running, and it will not finish on its own.
+      final stuck = Completer<void>();
+      unawaited(s.schedule(
+        key: key,
+        priority: 500,
+        preemptible: true,
+        run: (token) async {
+          unawaited(token.onCancel.then((_) {
+            automaticSawCancel = true;
+            // What the engine does at its next phase boundary: give up.
+            if (!stuck.isCompleted) stuck.complete();
+          }));
+          await stuck.future;
+        },
+      ));
+      await _pump();
+      expect(automaticSawCancel, isFalse, reason: 'nothing to yield to yet');
+
+      // The user presses Resume. Same key, but the automatic one is RUNNING,
+      // so this does not coalesce onto it — it queues and preempts.
+      unawaited(s.schedule(
+        key: key,
+        priority: 1000,
+        run: (_) async => userRan = true,
+      ));
+
+      await s.whenIdle;
+      expect(automaticSawCancel, isTrue,
+          reason: 'the automatic restart must be told to yield');
+      expect(userRan, isTrue, reason: 'the resume must actually run');
+    });
+
     test('a higher-priority schedule preempts a running PREEMPTIBLE task',
         () async {
       final s = PriorityTaskScheduler();

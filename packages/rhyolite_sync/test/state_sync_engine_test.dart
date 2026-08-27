@@ -991,11 +991,20 @@ void main() {
       addTearDown(h.dispose);
       await h.engine.start();
       var ran = false;
+      TaskCancelToken? handed;
       // Priority/gate/preemption semantics are covered by the scheduler unit
       // tests; here we just pin the public hook the plugin's settings sync
-      // uses to share the engine's connection-fair lane.
-      await h.engine.scheduleBackground(() async => ran = true);
+      // uses to share the engine's connection-fair lane — including that the
+      // task is HANDED the cancel token. Discarding it is what let settings
+      // sync keep writing through a pause, holding the shared data client
+      // while the engine's own restart timed out waiting on it.
+      await h.engine.scheduleBackground((token) async {
+        handed = token;
+        ran = true;
+      });
       expect(ran, isTrue);
+      expect(handed, isNotNull);
+      expect(handed!.isCancelled, isFalse);
     });
 
     test('stop() cancels only the engine\'s own work and never disposes the '

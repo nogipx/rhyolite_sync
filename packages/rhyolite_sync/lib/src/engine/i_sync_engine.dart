@@ -1,4 +1,5 @@
 import '../crypto/i_vault_cipher.dart';
+import '../scheduler/i_task_scheduler.dart';
 import '../use_cases/conflict_list_use_case.dart';
 import '../use_cases/vault_stats_use_case.dart';
 import 'vault_config.dart';
@@ -20,7 +21,13 @@ abstract interface class ISyncEngine {
   IVaultCipher? get cipher;
   set cipher(covariant IVaultCipher? cipher);
 
-  Future<void> start();
+  /// Starts a sync session.
+  ///
+  /// [token] lets the caller abandon a start that is no longer wanted — the
+  /// host schedules lifecycle work on a single lane, so a start that hangs
+  /// delays every later one, including the user pressing Resume. The engine
+  /// checks it between phases and threads it into the cancellable RPCs.
+  Future<void> start({TaskCancelToken? token});
   Future<void> stop();
   Future<void> dispose();
 

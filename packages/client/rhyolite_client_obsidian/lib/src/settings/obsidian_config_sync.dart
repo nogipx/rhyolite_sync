@@ -8,9 +8,12 @@ import 'package:rhyolite_sync/rhyolite_sync.dart'
         PluginDirManifest,
         SettingsSync,
         SettingsCrdtKind,
+        TaskCancelController,
+        TaskCancelToken,
         canonicalJsonBytes,
         jsonCanonicalEqual;
 import 'package:rpc_dart/rpc_dart.dart' show RpcCallerEndpoint;
+import 'package:rpc_dart/rpc_dart.dart';
 
 import 'enabled_list_gating.dart';
 import 'obsidian_settings_registry.dart';
@@ -53,8 +56,10 @@ class ObsidianConfigSync {
     void Function(bool active)? onActivity,
     void Function()? onRemoteApplied,
     void Function(String message)? log,
-    Future<void> Function(Future<void> Function() task, {Object? key})?
-        runBackground,
+    Future<void> Function(
+      Future<void> Function(TaskCancelToken token) task, {
+      Object? key,
+    })? runBackground,
   })  : _adapter = adapter,
         _sync = sync,
         _enabled = enabledCategories,
@@ -113,8 +118,15 @@ class ObsidianConfigSync {
   /// connection-fair scheduler (low-priority background lane), so settings
   /// sync yields to interactive note sync and pauses while the user is
   /// actively editing. Null → run directly (no engine scheduler).
-  final Future<void> Function(Future<void> Function() task, {Object? key})?
-      _runBackground;
+  final Future<void> Function(
+    Future<void> Function(TaskCancelToken token) task, {
+    Object? key,
+  })? _runBackground;
+
+  /// Cancel token of the background task currently running, if any. Read
+  /// through [_cancelled] at every loop boundary so a pause stops this work
+  /// instead of letting it hold the shared data client to completion.
+  TaskCancelToken? _taskToken;
 
   NotifyCoordinator? _notify;
   bool _busy = false;
@@ -137,9 +149,40 @@ class ObsidianConfigSync {
   /// Runs [body] on the engine scheduler (background) when available, else
   /// directly. Keeps `.obsidian` sync off the connection while notes sync.
   Future<void> _bg(Object key, Future<void> Function() body) {
+    Future<void> withToken(TaskCancelToken token) async {
+      _taskToken = token;
+      // Bridge to the RPC layer so a signal actually cuts a call already in
+      // flight. Checking between resources is not enough: the pull that held
+      // everything up was a SINGLE server call, and nothing between iterations
+      // could reach it.
+      final rpcToken = RpcCancellationToken();
+      unawaited(
+        token.onCancel.then((_) {
+          if (!rpcToken.isCancelled) rpcToken.cancel('settings sync paused');
+        }),
+      );
+      _sync.context = RpcContext.withCancellation(rpcToken);
+      try {
+        await body();
+      } on RpcCancelledException {
+        _log?.call('config: cancelled mid-call');
+      } finally {
+        if (identical(_taskToken, token)) {
+          _taskToken = null;
+          _sync.context = null;
+        }
+      }
+    }
+
     final run = _runBackground;
-    return run != null ? run(body, key: key) : body();
+    return run != null
+        ? run(withToken, key: key)
+        : withToken(TaskCancelController().token);
   }
+
+  /// True once this work is no longer wanted — the plugin unloaded, or the
+  /// user paused and the scheduler signalled our group.
+  bool get _cancelled => _disposed || (_taskToken?.isCancelled ?? false);
 
   Future<void> start() async {
     // Initial pull only: getting remote settings onto disk is cheap and enough
@@ -534,6 +577,12 @@ class ObsidianConfigSync {
   Future<void> _writeChanged(Set<String> changed) async {
     var pluginLanded = false;
     for (final resourceId in changed) {
+      // Between resources, not inside one: a half-written file is worse than
+      // a late stop, and every resource is self-contained.
+      if (_cancelled) {
+        _log?.call('config: write cancelled, ${changed.length} pending');
+        return;
+      }
       if (_isPluginDir(resourceId)) {
         if (await _applyPluginDir(resourceId)) pluginLanded = true;
         continue;

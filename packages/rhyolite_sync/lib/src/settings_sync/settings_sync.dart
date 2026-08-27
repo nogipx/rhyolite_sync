@@ -11,6 +11,7 @@ import '../crypto/vault_cipher.dart';
 import 'canonical_json.dart';
 import 'resource_crdt_codec.dart';
 import 'settings_store.dart';
+import 'package:rpc_dart/rpc_dart.dart';
 
 /// Settings sync orchestrator for the `<vaultId>_config` keyspace.
 ///
@@ -114,6 +115,16 @@ class SettingsSync {
 
   /// Load persisted state and do an initial pull. Returns resources whose
   /// merged state differs from disk (caller renders + writes them).
+  /// Context carried by every SERVER call this makes, or null when nothing can
+  /// cancel it.
+  ///
+  /// Settings work shares the engine's single scheduler slot, so a pull that
+  /// cannot be interrupted holds everything behind it — including the user's
+  /// own Resume, which then waited out the RPC layer's 60s call timeout. The
+  /// host sets this from the scheduler's cancel token; `stop()` (a pause) is
+  /// already wired to signal that token.
+  RpcContext? context;
+
   Future<Set<String>> start() async {
     if (_started) return const {};
     _started = true;
@@ -316,6 +327,7 @@ class SettingsSync {
   /// server collapses them). Returns resources whose rendered bytes changed.
   Future<Set<String>> pull() async {
     final resp = await _remote.getStates(
+      context: context,
       StateGetRequest(vaultId: vaultId, sinceCursor: _store.cursor),
     );
 
@@ -433,6 +445,7 @@ class SettingsSync {
       // the server-echoed notify be recognised as our own (skipped, not
       // pulled).
       final resp = await _remote.putStates(
+        context: context,
         StatePutRequest(
           vaultId: vaultId,
           items: sending,

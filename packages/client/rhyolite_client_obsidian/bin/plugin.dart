@@ -72,12 +72,12 @@ bool _syncPaused = false;
 /// through this so a persisted pause is honoured everywhere — otherwise the
 /// flag desyncs from reality (engine running while "paused"). The pause flag is
 /// cleared only by an explicit resume (`setSyncPaused(false)` in boot).
-Future<void> _guardedStart(ISyncEngine engine) async {
+Future<void> _guardedStart(ISyncEngine engine, [TaskCancelToken? token]) async {
   if (_syncPaused) {
     _log.info('Engine start skipped — sync paused by user.');
     return;
   }
-  await engine.start();
+  await engine.start(token: token);
 }
 
 /// Short, user-facing reason for a [SyncStartBlock] — the middle of the boot
@@ -255,6 +255,14 @@ PriorityTaskScheduler? _scheduler;
 /// lane (100) so a restart is never blocked by the user-active typing gate.
 const int _kBootPriority = 1000;
 
+/// Priority for lifecycle work the plugin decided to do on its own — the
+/// health-check restart, the offline self-heal. Below [_kBootPriority] and
+/// preemptible, so a start the USER asked for is not queued behind one of
+/// these. It used to be: a restart wedged on a dead transport held the single
+/// lane until its own 60s RPC timeout, and Resume sat behind it doing nothing
+/// visible. Above the engine's interactive lane (100) either way.
+const int _kRecoveryPriority = 500;
+
 /// Runs [body] as the single coalesced `engine-lifecycle` task, so the restart
 /// triggers (initial start, Start command, resume health-check, blob-config
 /// adopt, token refresh) can't overlap or interleave their `engine.start()` —
@@ -263,13 +271,20 @@ const int _kBootPriority = 1000;
 /// engine.scheduleBackground (lower priority) and awaiting it from inside this
 /// task would deadlock the single slot, so callers relaunch settings AFTER
 /// awaiting this. Runs [body] directly if the scheduler is gone (unloaded).
-Future<void> _scheduleBoot(Future<void> Function() body) {
+/// [automatic] marks work the plugin started by itself: it runs at
+/// [_kRecoveryPriority] and yields its token when a user-initiated boot
+/// arrives, so the engine can abandon a start nobody is waiting for any more.
+Future<void> _scheduleBoot(
+  Future<void> Function(TaskCancelToken token) body, {
+  bool automatic = false,
+}) {
   final scheduler = _scheduler;
-  if (scheduler == null) return body();
+  if (scheduler == null) return body(TaskCancelController().token);
   return scheduler.schedule(
     key: 'engine-lifecycle',
-    priority: _kBootPriority,
-    run: (_) => body(),
+    priority: automatic ? _kRecoveryPriority : _kBootPriority,
+    preemptible: automatic,
+    run: body,
   );
 }
 
@@ -1104,9 +1119,9 @@ $kSyncPanelCss
           // `engine.config` alone leaves the live socket authenticating as
           // whoever (or whatever) opened it.
           Future<void> restartForAuth() async {
-            await _scheduleBoot(() async {
+            await _scheduleBoot((token) async {
               await engine.stop();
-              await _guardedStart(engine);
+              await _guardedStart(engine, token);
             });
             await relaunchConfigSync();
             // A sign-in that can't start the engine yet (no vault picked) emits
@@ -1126,7 +1141,7 @@ $kSyncPanelCss
               );
               _capabilities = sub.capabilities;
             } catch (_) {}
-            await _scheduleBoot(() => _guardedStart(engine));
+            await _scheduleBoot((token) => _guardedStart(engine, token));
             await relaunchConfigSync();
             await _adoptDeviceId(engine, configStorage);
           }
@@ -1193,7 +1208,7 @@ $kSyncPanelCss
             // round-trip before failing.
             _cancelSelfHeal();
             _stopConfigSync();
-            unawaited(_scheduleBoot(() => engine.stop()));
+            unawaited(_scheduleBoot((_) => engine.stop()));
             // The settings tab rebuilds on every open and reads auth live, so
             // it needs no nudge — the panel is the one holding a stale render.
             _syncPanel?.refresh();
@@ -1445,7 +1460,7 @@ $kSyncPanelCss
               '— dropping it locally (files on disk untouched)',
             );
             engine.cipher = null;
-            await _scheduleBoot(() async {
+            await _scheduleBoot((_) async {
               await engine.stop();
               try {
                 await engine.wipeLocalState();
@@ -1505,7 +1520,7 @@ $kSyncPanelCss
             // If this device had that vault connected, clear its local state.
             if (engine.config.vaultId == vaultId) {
               engine.cipher = null;
-              await _scheduleBoot(() async {
+              await _scheduleBoot((_) async {
                 await engine.stop();
                 try {
                   await engine.wipeLocalState();
@@ -1848,10 +1863,13 @@ $kSyncPanelCss
                 if (!ok) {
                   _log.warning('Health check failed — restarting engine');
                   try {
-                    await _scheduleBoot(() async {
-                      await _engine!.stop();
-                      await _guardedStart(_engine!);
-                    });
+                    await _scheduleBoot(
+                      (token) async {
+                        await _engine!.stop();
+                        await _guardedStart(_engine!, token);
+                      },
+                      automatic: true,
+                    );
                     if (cipher != null) {
                       await _launchConfigSync(
                         engine: _engine!,
@@ -2065,7 +2083,7 @@ $kSyncPanelCss
                       externalStorageKind: extConfig?.kind ?? kind,
                     ),
                   );
-                  await _scheduleBoot(() async {
+                  await _scheduleBoot((_) async {
                     await engine.stop();
                     await _guardedStart(engine);
                   });
@@ -2361,7 +2379,7 @@ $kSyncPanelCss
       engine.config = buildConfig(updated);
       // Route the restart through the lifecycle lane so it can't overlap a
       // queued reconnect / token-refresh boot on the single WebSocket.
-      await _scheduleBoot(() async {
+      await _scheduleBoot((_) async {
         await engine.stop();
         await _guardedStart(engine);
       });
@@ -2382,7 +2400,7 @@ $kSyncPanelCss
     onSignOut: () async {
       auth.bindAccount(null);
       _setEngineAuth(engine, auth);
-      await _scheduleBoot(() => engine.stop());
+      await _scheduleBoot((_) => engine.stop());
       _log.info('Signed out');
     },
     onDisconnectVault: () async {
@@ -2393,7 +2411,7 @@ $kSyncPanelCss
       // cleared the on-disk vault config. Runs on the lifecycle lane so a
       // queued boot can't start the engine mid-wipe.
       engine.cipher = null;
-      await _scheduleBoot(() async {
+      await _scheduleBoot((_) async {
         await engine.stop();
         try {
           await engine.wipeLocalState();

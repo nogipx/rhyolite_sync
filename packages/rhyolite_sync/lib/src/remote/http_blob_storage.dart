@@ -379,7 +379,11 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
 
     try {
       final streamed = await _http.send(request);
-      return http.Response.fromStream(streamed);
+      // Awaited on purpose: returning the future bare would let a failure
+      // while READING the body escape this catch, so a truncated or reset
+      // response surfaced raw instead of as the wrapped error every caller
+      // here expects.
+      return await http.Response.fromStream(streamed);
     } catch (e) {
       throw Exception('HTTP $method $uri failed: $e');
     }

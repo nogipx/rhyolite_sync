@@ -266,7 +266,7 @@ class StateSyncEngine implements ISyncEngine {
   // ---------------------------------------------------------------------------
 
   @override
-  Future<void> start() async {
+  Future<void> start({TaskCancelToken? token}) async {
     if (config.vaultId.isEmpty || cipher == null) {
       _log.info('StateSyncEngine: not configured, skipping start');
       return;
@@ -275,12 +275,40 @@ class StateSyncEngine implements ISyncEngine {
     _running = true;
     _emit(SyncStarted());
 
+    // Bridges the host's lifecycle token to the RPC layer, exactly as the pull
+    // task does. Two effects, and both are needed: [_startCancelled] ends the
+    // start at the next phase boundary, and the context unwinds a cancellable
+    // call already in flight. The phases that CANNOT take a context (the
+    // WebSocket connect, the account-service metadata reads) are bounded by
+    // their own timeouts below instead — without which a single wedged call
+    // held the lane for its full 60s RPC timeout while the user's Resume
+    // waited behind it with nothing on screen.
+    final startToken = token;
+    RpcContext? startContext;
+    if (startToken != null) {
+      final rpcToken = RpcCancellationToken();
+      unawaited(
+        startToken.onCancel.then((_) {
+          if (!rpcToken.isCancelled) {
+            rpcToken.cancel('engine start superseded');
+          }
+        }),
+      );
+      startContext = RpcContext.withCancellation(rpcToken);
+    }
+    bool cancelled() => startToken?.isCancelled ?? false;
+
     try {
       _store = FileStateStore(
         client: dataClient,
         vaultId: config.vaultId,
         deviceId: config.deviceId,
       );
+      // Timed like every other phase. These are reads of the LOCAL database,
+      // and the local database is shared with settings sync — a long write
+      // batch there has held them until the data client's own 60s call
+      // timeout, which looks from outside exactly like a dead network.
+      final swStores = Stopwatch()..start();
       await _store!.load();
       // deviceId doubles as the HLC nodeId — every TaggedValue this device
       // emits is unambiguously attributable.
@@ -319,6 +347,8 @@ class StateSyncEngine implements ISyncEngine {
       await _fugueStore!.load();
       await _fmStore!.load();
       swFugueLoad.stop();
+      swStores.stop();
+      _log.info('startup phase: stores_load ${swStores.elapsedMilliseconds}ms');
       final fugueStats = _fugueStore!.stats;
       _log.info(
         'FugueStore load: files=${fugueStats.files} '
@@ -445,30 +475,30 @@ class StateSyncEngine implements ISyncEngine {
       // sync server's blob policy, so it works even when the user has
       // no managed-storage access at all.
       final swExt = Stopwatch()..start();
-      await _checkExternalBlobConfig();
+      await _checkExternalBlobConfig(timeout: _kStartupMetaTimeout);
       swExt.stop();
       _log.info(
         'startup phase: external_blob_config '
         '${swExt.elapsedMilliseconds}ms',
       );
-      if (!_running) return;
+      if (!_running || cancelled()) return;
 
       // Load the vault-global force-binary policy BEFORE the initial pull and
       // StartupDiff — both classify files (resolver routing / upload routing),
       // so the policy must be in place first. The children read it live via a
       // callback over [_forcedBinaryExtensions].
       await _loadForcedBinaryPolicy();
-      if (!_running) return;
+      if (!_running || cancelled()) return;
 
       // Initial pull: brings local in line with whatever the server knows.
       final swPull = Stopwatch()..start();
-      await _pull();
+      await _pull(context: startContext);
       swPull.stop();
       _log.info(
         'startup phase: initial_pull '
         '${swPull.elapsedMilliseconds}ms',
       );
-      if (!_running) return;
+      if (!_running || cancelled()) return;
 
       // Disk reconciliation: detect new/modified files, upload their blobs.
       final uploadStart = Stopwatch();
@@ -1202,15 +1232,30 @@ class StateSyncEngine implements ISyncEngine {
   ///
   /// Exposed so settings sync need not open a second connection or race the
   /// note engine for the shared one — see [[engine_sync_scheduler_plan]].
-  Future<void> scheduleBackground(Future<void> Function() task, {Object? key}) {
+  /// [task] receives the scheduler's cancel token. Passing it on is the whole
+  /// point: this lane shares the engine's group, so [stop] already signals
+  /// every task running here — and a sibling that discards the token keeps
+  /// working through a pause. Settings sync did, for as long as its write
+  /// batch took (over two minutes, measured), holding the shared data client
+  /// while the engine's own restart waited on it and eventually timed out.
+  Future<void> scheduleBackground(
+    Future<void> Function(TaskCancelToken token) task, {
+    Object? key,
+  }) {
     // Before a session is up the engine connection isn't available; run the
     // sibling task directly so callers (e.g. settings sync) still proceed.
-    if (!_running) return task();
+    // Nothing can cancel it then, so hand it a token nobody signals.
+    if (!_running) return task(TaskCancelController().token);
     return _scheduler.schedule(
       key: key,
       group: _schedulerGroup,
       priority: _pBackground,
-      run: (_) => task(),
+      // The scheduler runs ONE task at a time, so this is not a lane that
+      // yields on its own: without this flag a settings pull kept the slot
+      // while the user's Resume queued behind it, and only the RPC layer's
+      // 60s timeout broke the tie.
+      preemptible: true,
+      run: task,
     );
   }
 
@@ -1699,7 +1744,16 @@ class StateSyncEngine implements ISyncEngine {
     });
   }
 
-  Future<void> _checkExternalBlobConfig() async {
+  /// Ceiling for the account-service metadata reads during start.
+  ///
+  /// They cannot take an [RpcContext], so the cancel token cannot unwind them
+  /// and only a timeout can. Sized well above a healthy call (a slow TLS
+  /// handshake to the account service alone has been measured at several
+  /// seconds) and well under the RPC layer's own 60s, which is what used to
+  /// pin the lifecycle lane.
+  static const Duration _kStartupMetaTimeout = Duration(seconds: 12);
+
+  Future<void> _checkExternalBlobConfig({Duration? timeout}) async {
     // Secret already in memory (session fallback from migration, or applied on
     // a prior discovery) — the backend is already correct, nothing to fetch.
     if (config.externalBlobConfig != null) return;
@@ -1729,11 +1783,12 @@ class StateSyncEngine implements ISyncEngine {
 
     ExternalBlobConfig? remote;
     try {
-      remote = await VaultMetaService(
+      final load = VaultMetaService(
         storage: storage,
         vaultId: config.vaultId,
         cipher: c,
       ).loadExternalBlobConfig();
+      remote = timeout == null ? await load : await load.timeout(timeout);
     } catch (e) {
       if (isByo) {
         throw StateError(
@@ -1783,11 +1838,14 @@ class StateSyncEngine implements ISyncEngine {
     final c = cipher;
     if (storage == null || c == null) return;
     try {
+      // Bounded like the blob-config read above, and for the same reason: the
+      // catch below already treats any failure as "no policy", so waiting
+      // longer buys nothing and costs the lane.
       _forcedBinaryExtensions = await VaultMetaService(
         storage: storage,
         vaultId: config.vaultId,
         cipher: c,
-      ).loadForcedBinaryExtensions();
+      ).loadForcedBinaryExtensions().timeout(_kStartupMetaTimeout);
       _log.info(
         'forced-binary policy: ${_forcedBinaryExtensions.length} extension(s)',
       );

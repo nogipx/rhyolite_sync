@@ -1,7 +1,6 @@
 @TestOn('vm || node')
 library;
 
-import 'package:convergent/convergent.dart';
 import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/src/sync_v3/fugue_text_sync.dart';
 import 'package:test/test.dart';

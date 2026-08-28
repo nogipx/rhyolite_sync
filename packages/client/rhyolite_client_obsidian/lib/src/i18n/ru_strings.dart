@@ -709,7 +709,34 @@ class RuStrings extends AppStrings {
   @override
   String get subscriptionSection => 'Подписка';
   @override
+  String planEndedOn(String date) => 'Подписка закончилась $date';
+  @override
+  String get planEndedNoDate => 'Подписка закончилась';
+  @override
+  String planEndingOn(String date) => 'Подписка заканчивается $date';
+  @override
+  String get planEndedHint =>
+      'Синхронизация продолжается на бесплатных лимитах: выгрузка сверх '
+      'бесплатной квоты отклоняется.';
+  @override
+  String get planEndingHint => 'Продлите, чтобы сохранить текущие лимиты.';
+  @override
+  String get planRenew => 'Продлить';
+  @override
+  String get planQuotaFull => 'Место закончилось';
+  @override
+  String get planQuotaFullHint =>
+      'Новые и изменённые файлы не выгружаются, пока не освободится место или '
+      'не вырастет лимит.';
+  @override
+  String get planSeePlans => 'Тарифы';
+  @override
   String activeUntil(String date) => 'Активна до $date';
+  @override
+  String endedOn(String date) => 'Закончилась $date';
+  @override
+  String get subscriptionEnded =>
+      'Хранилище работает на бесплатных лимитах. Продлите, чтобы вернуть прежние.';
   @override
   String get subscriptionActive => 'Ваша подписка активна.';
   @override

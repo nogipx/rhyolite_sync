@@ -697,7 +697,34 @@ class EnStrings extends AppStrings {
   @override
   String get subscriptionSection => 'Subscription';
   @override
+  String planEndedOn(String date) => 'Your subscription ended on $date';
+  @override
+  String get planEndedNoDate => 'Your subscription has ended';
+  @override
+  String planEndingOn(String date) => 'Your subscription ends on $date';
+  @override
+  String get planEndedHint =>
+      'Sync continues on free-plan limits, so uploads over the free storage '
+      'quota are refused.';
+  @override
+  String get planEndingHint => 'Renew to keep your current storage limits.';
+  @override
+  String get planRenew => 'Renew';
+  @override
+  String get planQuotaFull => 'Storage is full';
+  @override
+  String get planQuotaFullHint =>
+      'New and changed files cannot be uploaded until you free space or raise '
+      'the limit.';
+  @override
+  String get planSeePlans => 'Plans';
+  @override
   String activeUntil(String date) => 'Active until $date';
+  @override
+  String endedOn(String date) => 'Ended on $date';
+  @override
+  String get subscriptionEnded =>
+      'Your vault is now on free-plan limits. Renew to restore them.';
   @override
   String get subscriptionActive => 'Your subscription is active.';
   @override

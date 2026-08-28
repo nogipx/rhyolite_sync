@@ -299,9 +299,24 @@ abstract class AppStrings {
   String get selfHostEnable;
   String get applyingSelfHost;
 
+  // ── Plan alerts (panel strip, notice, settings row) ──────────────────────
+  /// Shown only when there is something to act on — a plan that has ended or
+  /// is about to. A standing free tier says nothing.
+  String planEndedOn(String date);
+  String get planEndedNoDate;
+  String planEndingOn(String date);
+  String get planEndedHint;
+  String get planEndingHint;
+  String get planRenew;
+  String get planQuotaFull;
+  String get planQuotaFullHint;
+  String get planSeePlans;
+
   // ── Settings: subscription ───────────────────────────────────────────────
   String get subscriptionSection;
   String activeUntil(String date);
+  String endedOn(String date);
+  String get subscriptionEnded;
   String get subscriptionActive;
   String get manageSubscription;
   String get manageSubscriptionDescription;

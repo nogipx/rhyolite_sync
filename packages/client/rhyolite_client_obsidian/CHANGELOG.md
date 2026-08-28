@@ -1,3 +1,19 @@
+## [3.15.3] - 2026-08-28
+
+**The plugin now says when your subscription has ended.**
+A plan that lapses puts your vault back on free-tier limits, and uploads above
+the free storage quota stop going through. The sync panel and Settings now show
+that, with the date and a way to renew — and give you a heads-up in the week
+before a plan ends.
+
+### Features
+
+- say when a subscription has ended, where the effect is felt (obsidian)
+
+### Other
+
+- bump plugin to 3.15.3 (obsidian)
+
 ## [3.15.2] - 2026-08-28
 
 **Plugin sync only transfers what you don't already have.**

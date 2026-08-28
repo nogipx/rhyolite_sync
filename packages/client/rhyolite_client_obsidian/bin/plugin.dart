@@ -24,6 +24,7 @@ import 'package:rhyolite_client_obsidian/src/engine/self_host_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/server_rejections.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_cleanup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_overview_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/plan_status.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_panel.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_status_indicator.dart';
 import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
@@ -177,34 +178,102 @@ void _cancelSelfHeal() {
   _selfHealAttempt = 0;
 }
 
-/// Latest known plan capabilities (managed edition). Populated from
-/// getSubscription; the engine reads `maxFileSizeBytes` from it for the
-/// per-file size gate. Null in self-host / before the first fetch → no limit.
-PlanCapabilities? _capabilities;
+/// Latest known plan (managed edition), as the server last described it.
+/// Loaded from `data.json` at boot, refreshed by every getSubscription.
+PlanSnapshot? _plan;
 
-/// Records fresh capabilities and remembers them for the next session.
+/// The plan the previous session ended on, kept for the whole session.
 ///
-/// Every consumer of [_capabilities] treats null as "no answer", and the only
-/// way to get one is a network call made while a sync session starts — so it
-/// fails at exactly the times sessions are hardest to start. Persisting the
-/// last real answer turns a failed lookup into "what the server said last
-/// time", which is right far more often than "nothing is allowed".
+/// The account service reports a lapsed subscription as `none` with free
+/// capabilities — the same answer it gives someone who never paid. Comparing
+/// against what we remembered is the only way to tell those apart, so the
+/// remembered value must survive being overwritten by the fresh one.
+PlanSnapshot? _rememberedPlan;
+
+/// Plan capabilities, or null when no answer has ever been obtained. The engine
+/// reads `maxFileSizeBytes` from this for the per-file size gate.
+PlanCapabilities? get _capabilities => _plan?.capabilities;
+
+/// Records a fresh plan and remembers it for the next session.
 ///
-/// A null [caps] is the server omitting the field, which is that same "no
-/// answer" and not a denial, so it leaves the cached value standing. A real
-/// downgrade arrives as capabilities that say so, and overwrites it.
-Future<void> _rememberCapabilities(
-  PlanCapabilities? caps,
+/// Every consumer treats null as "no answer", and the only way to get one is a
+/// network call made while a sync session starts — so it fails at exactly the
+/// times sessions are hardest to start. Persisting the last real answer turns
+/// a failed lookup into "what the server said last time", which is right far
+/// more often than "nothing is allowed".
+Future<void> _rememberPlan(
+  SubscriptionDto? dto,
   ObsidianConfigStorage storage,
 ) async {
-  if (caps == null || _capabilities == caps) return;
-  _capabilities = caps;
+  if (dto == null) return;
+  final next = resolvePlan(prior: _plan ?? _rememberedPlan, fresh: dto);
+  if (_plan == next) return;
+  _plan = next;
   try {
-    await storage.saveCapabilities(caps);
+    await storage.savePlan(next);
   } catch (e) {
-    _log.debug('capabilities cache write failed: $e');
+    _log.debug('plan cache write failed: $e');
   }
 }
+
+/// What the panel and settings currently say about the plan, if anything.
+PlanNotice _planAlert = PlanNotice.quiet;
+
+/// Recomputes the plan alert and pushes it everywhere that shows it.
+///
+/// Called after every subscription lookup rather than on a timer: the alert
+/// only changes when the answer does, or when a date passes — and a date that
+/// passes mid-session is caught by the next session's lookup, which is soon
+/// enough for something measured in days.
+void _refreshPlanNotice() {
+  // Self-host has no account, no plan and nothing to renew.
+  final next = _selfHostActive
+      ? PlanNotice.quiet
+      : planNotice(
+          remembered: _rememberedPlan,
+          current: _plan,
+          now: DateTime.now(),
+        );
+  if (next == _planAlert) return;
+  _planAlert = next;
+  _syncPanel?.setPlanNotice(next);
+  if (!next.isQuiet) _announcePlanOnce(next);
+}
+
+/// The period a plan notice has already been announced for, so the one-off
+/// notice is one-off. Keyed on the date itself: renewing moves the date, which
+/// re-arms the announcement for the new period without any bookkeeping.
+String? _announcedPlanPeriod;
+
+/// Shows the plan alert once, as a notice with a way to act on it.
+///
+/// The panel strip is what persists; this exists because the panel may well be
+/// closed, and an alert nobody is looking at explains nothing. One per period,
+/// never per start.
+void _announcePlanOnce(PlanNotice notice) {
+  final key = '${notice.alert.name}:${notice.date?.toIso8601String() ?? "-"}';
+  if (_announcedPlanPeriod == key) return;
+  _announcedPlanPeriod = key;
+  final date = notice.date == null ? null : formatPlanDay(notice.date!);
+  final message = switch (notice.alert) {
+    PlanAlert.ended =>
+      date == null ? S.planEndedNoDate : S.planEndedOn(date),
+    PlanAlert.endingSoon => S.planEndingOn(date ?? ''),
+    PlanAlert.none => '',
+  };
+  if (message.isEmpty) return;
+  _noticeWithButton(
+    message,
+    buttonText: S.planRenew,
+    onClick: _openSubscriptionPage,
+  );
+}
+
+void _openSubscriptionPage() {
+  if (kEnv.siteUrl.isEmpty) return;
+  _openExternalUrl('${kEnv.siteUrl}/account');
+}
+
 
 /// Whether this session talks to a self-hosted server. Held here because the
 /// settings-sync launcher runs from several call sites that no longer have the
@@ -357,7 +426,16 @@ void _scheduleSettingsReloadNotice(PluginHandle plugin) {
 /// Persistent notice with a clickable "Reload" that runs Obsidian's reload
 /// command. Falls back to a plain notice if the DOM/command wiring is
 /// unavailable (e.g. mobile has no app:reload).
-void _showReloadNotice(PluginHandle plugin, String message) {
+/// A notice that stays until dismissed and carries one button.
+///
+/// Obsidian's own Notice has no such affordance, so the button is appended to
+/// its element. Any failure in that interop falls back to a plain notice —
+/// losing the button is acceptable, losing the message is not.
+void _noticeWithButton(
+  String message, {
+  required String buttonText,
+  required void Function() onClick,
+}) {
   try {
     final obsidian = jsu.callMethod<Object?>(jsu.globalThis, 'require', [
       'obsidian',
@@ -369,16 +447,13 @@ void _showReloadNotice(PluginHandle plugin, String message) {
     if (el == null) return;
     final btn = jsu.callMethod<Object?>(el, 'createEl', [
       'button',
-      jsu.jsify({'text': ' Reload', 'cls': 'mod-cta'}),
+      jsu.jsify({'text': ' $buttonText', 'cls': 'mod-cta'}),
     ])!;
     jsu.setProperty(btn, 'style', 'margin-left: 8px;');
     jsu.callMethod<void>(btn, 'addEventListener', [
       'click',
       jsu.allowInterop((_) {
-        final commands = jsu.getProperty<Object?>(plugin.app.raw, 'commands');
-        if (commands != null) {
-          jsu.callMethod<void>(commands, 'executeCommandById', ['app:reload']);
-        }
+        onClick();
         jsu.callMethod<void>(notice, 'hide', []);
       }),
     ]);
@@ -386,6 +461,17 @@ void _showReloadNotice(PluginHandle plugin, String message) {
     showNotice(message);
   }
 }
+
+void _showReloadNotice(PluginHandle plugin, String message) => _noticeWithButton(
+      message,
+      buttonText: 'Reload',
+      onClick: () {
+        final commands = jsu.getProperty<Object?>(plugin.app.raw, 'commands');
+        if (commands != null) {
+          jsu.callMethod<void>(commands, 'executeCommandById', ['app:reload']);
+        }
+      },
+    );
 
 Future<void> _launchConfigSync({
   required ISyncEngine engine,
@@ -752,7 +838,11 @@ $kSyncPanelCss
           // plugin-code storage gate both run during boot, and both would
           // otherwise spend the whole session on "no answer" whenever the
           // subscription lookup below is slow or fails.
-          _capabilities = await configStorage.loadCapabilities();
+          _plan = await configStorage.loadPlan();
+          // Held apart from _plan, which the first successful lookup
+          // overwrites. A lapse is only visible as the difference between the
+          // two, so this side of the comparison has to outlive the refresh.
+          _rememberedPlan = _plan;
 
           // -----------------------------------------------------------------------
           // Self-host mode: point the plugin at a self-hosted sync server with a
@@ -767,6 +857,12 @@ $kSyncPanelCss
               selfHost.syncUrl.isNotEmpty &&
               selfHostToken.isNotEmpty;
           _selfHostActive = selfHostActive;
+
+          // From the remembered plan alone, before any lookup. A paused vault
+          // never reaches startSyncSession and an offline one gets nothing back
+          // from it, and both are cases where a lapse that was already recorded
+          // still needs saying — a period ends on its date regardless.
+          _refreshPlanNotice();
 
           // Server URL: self-host overrides the compile-time managed sync URL.
           final syncServerUrl = selfHostActive
@@ -1185,7 +1281,7 @@ $kSyncPanelCss
               final sub = await accountClient.getSubscription().timeout(
                 const Duration(seconds: 5),
               );
-              await _rememberCapabilities(sub.capabilities, configStorage);
+              await _rememberPlan(sub, configStorage);
             } catch (e) {
               // Keep whatever we already know — the cached answer loaded at
               // boot, or a fresher one from earlier this session. Overwriting
@@ -1193,6 +1289,7 @@ $kSyncPanelCss
               _log.info('Subscription lookup failed, using last known plan '
                   '(${_capabilities?.toString() ?? "none cached"}): $e');
             }
+            _refreshPlanNotice();
             await _scheduleBoot((token) => _guardedStart(engine, token));
             await relaunchConfigSync();
             await _adoptDeviceId(engine, configStorage);
@@ -1437,8 +1534,14 @@ $kSyncPanelCss
                   ? null
                   : () => _fetchVaultUsage(engine, vaultId),
             ),
+            // Self-host has no account to renew, so the strip has no button
+            // there — and no plan alert ever reaches it either.
+            onPlanAction:
+                selfHostActive || kEnv.siteUrl.isEmpty ? null : _openSubscriptionPage,
           )..register();
           _syncPanel = syncPanel;
+          // The panel is built after the boot lookup may already have run.
+          syncPanel.setPlanNotice(_planAlert);
 
           // Single indicator, surface picks itself by platform:
           // status bar on desktop, floating pill on mobile. Tap reveals
@@ -2571,6 +2674,14 @@ $kSyncPanelCss
       final bytes = _pluginCodeLocalBytes;
       return bytes == null || bytes == 0 ? null : formatBytes(bytes);
     },
+    planNotice: () => _planAlert,
+    // This tab fetches its own subscription; route it through the host so the
+    // lapse comparison, the persisted snapshot and the panel strip all move
+    // together instead of the tab holding a private, fresher opinion.
+    onSubscriptionFetched: (sub) async {
+      await _rememberPlan(sub, configStorage);
+      _refreshPlanNotice();
+    },
     onShowStorageOverview: () => _showStorageOverview(
       plugin,
       engine,
@@ -2654,7 +2765,7 @@ Future<void> _waitForSubscriptionAndStart({
 
     try {
       final subscription = await accountClient.getSubscription();
-      await _rememberCapabilities(subscription.capabilities, configStorage);
+      await _rememberPlan(subscription, configStorage);
       if (subscription.isActive) {
         confirmed = true;
         break;

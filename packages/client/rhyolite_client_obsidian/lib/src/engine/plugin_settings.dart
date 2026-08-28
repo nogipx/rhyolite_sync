@@ -15,6 +15,7 @@ import '../i18n/i18n.dart';
 import '../settings/diagnostics_prefs.dart';
 import '../settings/file_filter_prefs.dart';
 import '../settings/plugin_code_gate.dart';
+import 'plan_status.dart';
 import '../settings/settings_sync_prefs.dart';
 import '../settings/settings_sync_settings_ui.dart';
 import 'build_env.dart';
@@ -75,6 +76,12 @@ import 'self_host_modal.dart';
   // user can trip into an informed choice.
   required PluginCodeAvailability Function() pluginCodeAvailability,
   required String? Function() pluginCodeSize,
+  // The host's current plan alert, and a way to hand it a fresher answer. This
+  // tab makes its own getSubscription call, so without the report-back the two
+  // could disagree about whether a subscription has lapsed — and the host owns
+  // the comparison that decides, since only it remembers the previous plan.
+  required PlanNotice Function() planNotice,
+  required void Function(SubscriptionDto sub) onSubscriptionFetched,
   // Opens the storage overview from the settings tab, so it is reachable
   // without going through the sync panel.
   required Future<void> Function() onShowStorageOverview,
@@ -355,6 +362,19 @@ import 'self_host_modal.dart';
           onClick: openAccountOnSite,
         );
       } else {
+        // A subscription that ended used to land in the same branch as one
+        // that never existed — a bare "Subscribe" button, with nothing to say
+        // that the plan lapsed or when. That is the branch a confused user
+        // arrives at after their uploads start being refused for quota.
+        final alert = planNotice();
+        if (alert.alert == PlanAlert.ended) {
+          t.addCustom((s) {
+            s.setName(alert.date == null
+                ? S.planEndedNoDate
+                : S.endedOn(formatPlanDay(alert.date!)));
+            s.setDesc(S.subscriptionEnded);
+          });
+        }
         t.addButton(
           name: S.subscribe,
           description: S.subscribeDescription,
@@ -673,6 +693,7 @@ import 'self_host_modal.dart';
       // capabilities.
       try {
         final sub = await client.getSubscription();
+        onSubscriptionFetched(sub);
         fetched = (sub.isActive && sub.currentPeriodEnd != null)
             ? DateTime.fromMillisecondsSinceEpoch(
                 sub.currentPeriodEnd! * 1000,

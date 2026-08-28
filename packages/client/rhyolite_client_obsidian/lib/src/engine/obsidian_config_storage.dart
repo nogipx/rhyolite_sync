@@ -6,6 +6,7 @@ import 'package:rhyolite_client_account/rhyolite_client_account.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 import 'data_json_writer.dart';
+import 'plan_status.dart';
 
 /// Adapts the Obsidian [PluginHandle] to the testable [RawDataStore] seam.
 class _PluginRawDataStore implements RawDataStore {
@@ -253,31 +254,55 @@ class ObsidianConfigStorage {
       _data.update((m) => m['syncPaused'] = paused);
 
   // ---------------------------------------------------------------------------
-  // Last known plan capabilities.
+  // Last known plan.
   //
   // `getSubscription` is a network call on a 5s budget at the top of every sync
   // session, and it fails whenever the network is slow — which is exactly when
-  // a session starts. The value it produces gates the per-file size limit and
+  // a session starts. What it returns gates the per-file size limit and
   // plugin-code uploads, so "the lookup timed out" used to read as "this plan
   // allows nothing". Cached here so a failed lookup falls back to the last
-  // answer the server actually gave instead of to null. Plaintext: caps are not
-  // secret, and the server enforces them regardless of what this says.
+  // answer the server actually gave instead of to null.
+  //
+  // The whole snapshot is kept, not just the capabilities, because the period
+  // end is the only way to tell a lapsed subscription from a user who never
+  // paid: the account service reports both as `none` with free capabilities.
+  // Plaintext — none of this is secret, and the server enforces limits
+  // regardless of what a client believes.
   // ---------------------------------------------------------------------------
 
-  static const _capabilitiesKey = 'planCapabilities';
+  static const _planKey = 'plan';
 
-  Future<PlanCapabilities?> loadCapabilities() async {
-    final raw = (await _data.read())[_capabilitiesKey];
-    if (raw is! Map) return null;
+  /// Pre-3.16 builds cached the capabilities alone under their own key. Read it
+  /// as a fallback so an update does not throw away a plan already known — that
+  /// would put the user back on the "no answer" path this cache exists to end.
+  static const _legacyCapabilitiesKey = 'planCapabilities';
+
+  Future<PlanSnapshot?> loadPlan() async {
+    final data = await _data.read();
+    final snapshot = PlanSnapshot.fromJson(data[_planKey]);
+    if (snapshot != null) return snapshot;
+
+    final legacy = data[_legacyCapabilitiesKey];
+    if (legacy is! Map) return null;
     try {
-      return PlanCapabilities.fromJson(Map<String, dynamic>.from(raw));
+      return PlanSnapshot(
+        // The old key recorded no status. Capabilities that allow managed
+        // storage came from a real answer, but which of active/none it was is
+        // unrecoverable — and `none` is the reading that cannot invent a lapse.
+        status: SubscriptionStatus.none,
+        capabilities: PlanCapabilities.fromJson(
+          Map<String, dynamic>.from(legacy),
+        ),
+      );
     } catch (_) {
       return null;
     }
   }
 
-  Future<void> saveCapabilities(PlanCapabilities caps) =>
-      _data.update((m) => m[_capabilitiesKey] = caps.toJson());
+  Future<void> savePlan(PlanSnapshot snapshot) => _data.update((m) {
+        m[_planKey] = snapshot.toJson();
+        m.remove(_legacyCapabilitiesKey);
+      });
 
   // ---------------------------------------------------------------------------
   // Remember passphrase

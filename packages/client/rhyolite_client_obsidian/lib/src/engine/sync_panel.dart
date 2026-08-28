@@ -8,6 +8,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
 import '../i18n/i18n.dart';
+import 'plan_status.dart';
 import 'server_rejections.dart';
 
 /// Stylesheet for the docked sync panel. Injected once at plugin load through
@@ -187,6 +188,26 @@ const kSyncPanelCss = r'''
 .rh-meter .rh-track { height: 6px; margin-top: 5px; }
 .rh-meter .rh-fill { background: var(--interactive-accent); }
 .rh-meter.is-near .rh-fill { background: rgb(230, 110, 50); }
+
+/* Plan alert — shown only when there is something to act on. */
+.rh-alert {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-top: 10px; padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--text-muted);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+.rh-alert.is-urgent { border-left-color: rgb(230, 110, 50); }
+.rh-alert-body { flex: 1; min-width: 0; }
+.rh-alert-title { font-size: var(--font-ui-smaller, 11px); font-weight: 600; }
+.rh-alert-hint {
+  margin-top: 2px;
+  font-size: var(--font-ui-smaller, 11px);
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+.rh-alert-btn { flex-shrink: 0; align-self: center; font-size: var(--font-ui-smaller, 11px); }
 
 /* Links row */
 .rh-links { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
@@ -412,6 +433,7 @@ class SyncPanel {
     Future<int> Function()? onSettingsSize,
     Future<({int count, int bytes})?> Function()? onPluginStats,
     void Function()? onStorageDetails,
+    void Function()? onPlanAction,
     Future<void> Function(List<String> fileIds)? onConfirmVanished,
     LogScope? logger,
   }) : _plugin = plugin,
@@ -434,6 +456,7 @@ class SyncPanel {
        _onSettingsSize = onSettingsSize,
        _onPluginStats = onPluginStats,
        _onStorageDetails = onStorageDetails,
+       _onPlanAction = onPlanAction,
        _onConfirmVanished = onConfirmVanished,
        _log = logger;
 
@@ -465,6 +488,23 @@ class SyncPanel {
   final Future<int> Function()? _onSettingsSize;
   final Future<({int count, int bytes})?> Function()? _onPluginStats;
   final void Function()? _onStorageDetails;
+
+  /// Opens the account page from the plan-alert strip. Null in self-host,
+  /// where there is no account and the strip never appears.
+  final void Function()? _onPlanAction;
+
+  /// The plan alert to show, pushed in by the host after each subscription
+  /// lookup. Quiet by default: a panel must not invent an alert from the
+  /// absence of an answer.
+  PlanNotice _planNotice = PlanNotice.quiet;
+
+  /// Shows (or clears) the plan alert. Cheap to call with an unchanged value —
+  /// the host does so after every lookup.
+  void setPlanNotice(PlanNotice notice) {
+    if (notice == _planNotice) return;
+    _planNotice = notice;
+    _render();
+  }
 
   /// Propagates the deletes the user approved from the vanished-files section.
   final Future<void> Function(List<String> fileIds)? _onConfirmVanished;
@@ -507,6 +547,10 @@ class SyncPanel {
   JSObject? _meterTitleEl;
   JSObject? _meterValueEl;
   JSObject? _meterFillEl;
+  JSObject? _alertEl;
+  JSObject? _alertTitleEl;
+  JSObject? _alertHintEl;
+  JSObject? _alertBtnEl;
   JSObject? _refreshEl;
   JSObject? _primaryBtnEl;
   JSObject? _primaryIconEl;
@@ -983,6 +1027,10 @@ class SyncPanel {
     _meterTitleEl = null;
     _meterValueEl = null;
     _meterFillEl = null;
+    _alertEl = null;
+    _alertTitleEl = null;
+    _alertHintEl = null;
+    _alertBtnEl = null;
     _refreshEl = null;
     _primaryBtnEl = null;
     _primaryIconEl = null;
@@ -1044,6 +1092,20 @@ class SyncPanel {
     _meterValueEl = _el(meterHead, 'span', cls: 'rh-meter-value');
     final meterTrack = _el(meter, 'div', cls: 'rh-track');
     _meterFillEl = _el(meterTrack, 'div', cls: 'rh-fill');
+
+    // ── Plan alert ──
+    //
+    // Directly under the meter, because it is the answer to the question the
+    // meter raises: a quota that shrank to the free tier looks like a bug
+    // until something says the subscription ended. Hidden unless there is
+    // something to act on — a standing free tier is a tier, not a warning.
+    final alert = _el(panel, 'div', cls: 'rh-alert rh-hidden');
+    _alertEl = alert;
+    final alertBody = _el(alert, 'div', cls: 'rh-alert-body');
+    _alertTitleEl = _el(alertBody, 'div', cls: 'rh-alert-title');
+    _alertHintEl = _el(alertBody, 'div', cls: 'rh-alert-hint');
+    _alertBtnEl = _el(alert, 'button', cls: 'rh-alert-btn mod-cta');
+    _onClick(_alertBtnEl!, () => _onPlanAction?.call());
 
     // ── Storage details link (+ usage refresh) ──
     final onDetails = _onStorageDetails;
@@ -1117,8 +1179,57 @@ class SyncPanel {
     _renderHero(status);
     _renderStats();
     _renderMeter();
+    _renderAlert();
     _renderActions(status);
     _renderSections();
+  }
+
+  /// The plan strip: a plan that ended or is about to, else a full quota.
+  ///
+  /// The plan wins when both are true, because it is the cause and the quota
+  /// is the symptom — "storage is full" under a lapsed subscription sends the
+  /// user to delete notes when what they need is the renew button.
+  void _renderAlert() {
+    final alert = _alertEl;
+    if (alert == null) return;
+
+    final notice = _planNotice;
+    final usage = _usage;
+    final full = usage != null &&
+        usage.quotaBytes > 0 &&
+        usage.usedBytes >= usage.quotaBytes;
+
+    final String title;
+    final String hint;
+    final String action;
+    if (!notice.isQuiet) {
+      final date = notice.date == null ? null : formatPlanDay(notice.date!);
+      final ended = notice.alert == PlanAlert.ended;
+      title = ended
+          ? (date == null ? S.planEndedNoDate : S.planEndedOn(date))
+          : S.planEndingOn(date ?? '');
+      hint = ended ? S.planEndedHint : S.planEndingHint;
+      action = S.planRenew;
+    } else if (full) {
+      title = S.planQuotaFull;
+      hint = S.planQuotaFullHint;
+      action = S.planSeePlans;
+    } else {
+      _setHidden(alert, true);
+      return;
+    }
+
+    // Only the ended/full states are urgent. "Ends in a few days" is a
+    // reminder, and colouring it like a failure would cry wolf.
+    final urgent = full || notice.alert == PlanAlert.ended;
+    _toggleClass(alert, 'is-urgent', urgent);
+    _setText(_alertTitleEl!, title);
+    _setText(_alertHintEl!, hint);
+    _setText(_alertBtnEl!, action);
+    // Without somewhere to send them, the strip still explains — it just
+    // stops promising an action it cannot perform.
+    _setHidden(_alertBtnEl!, _onPlanAction == null);
+    _setHidden(alert, false);
   }
 
   void _renderHero(_Status status) {

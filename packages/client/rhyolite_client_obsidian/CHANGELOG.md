@@ -1,3 +1,23 @@
+## [3.15.5] - 2026-08-28
+
+**A database error now tells you what actually went wrong.**
+When something went wrong writing to the local database, the sync panel showed
+"cannot rollback - no transaction is active" — a message about the cleanup, not
+about the failure. The real cause (the disk being full, a storage error from the
+device) was discarded on the way out. It is now the one you see.
+
+Writes to the local database are also genuinely atomic for the first time. A
+batch that failed part-way used to leave everything it had already written in
+place; it now leaves the database as it found it.
+
+### Bug Fixes
+
+- a database error reports what actually went wrong (core)
+
+### Other
+
+- bump plugin to 3.15.5 (obsidian)
+
 ## [3.15.4] - 2026-08-28
 
 **A plugin reload now leaves one plugin behind, and keeps its database.**

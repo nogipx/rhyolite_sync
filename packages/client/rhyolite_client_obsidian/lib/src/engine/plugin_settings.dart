@@ -323,7 +323,7 @@ import 'self_host_modal.dart';
             // Apply immediately by re-running the plugin's onLoad (disable +
             // re-enable) — no manual reload, no account interaction.
             showNotice(S.applyingSelfHost);
-            reloadPlugin(plugin);
+            unawaited(reloadPlugin(plugin));
           }
         },
       );

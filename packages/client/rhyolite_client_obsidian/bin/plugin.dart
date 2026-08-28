@@ -1711,7 +1711,7 @@ $kSyncPanelCss
             );
             if (picked == null) return;
             _log.info('Vault connected: ${picked.$1.vaultId} — reloading');
-            reloadPlugin(plugin);
+            unawaited(reloadPlugin(plugin));
           };
 
           late final ({void Function() refresh, void Function() beginSignIn})
@@ -1898,7 +1898,7 @@ $kSyncPanelCss
               );
               if (changed) {
                 // Re-run onLoad so the new mode takes effect immediately.
-                reloadPlugin(plugin);
+                unawaited(reloadPlugin(plugin));
               }
             },
           );
@@ -2448,36 +2448,67 @@ $kSyncPanelCss
       );
     },
     onUnload: (_) async {
-      _stopConfigSync();
-      await _configReconnectSub?.cancel();
+      // Everything this plugin owns lives in top-level variables, which in
+      // dart2js are ONE set of slots shared by every instance of the plugin in
+      // the JS realm. Obsidian does not await `onunload`, so a reload can start
+      // the next instance's onLoad while this function is still suspended at an
+      // await — and the globals it reads after resuming then belong to the NEW
+      // instance. Teardown would dispose the live objects and leave this
+      // instance's settings tab and status-bar item attached with no owner.
+      //
+      // So: take ownership of this instance's objects and clear the globals
+      // FIRST, in one synchronous block, before the first await. After this
+      // point the function only ever touches its own locals.
+      final indicator = _syncIndicator;
+      _syncIndicator = null;
+      final panel = _syncPanel;
+      _syncPanel = null;
+      final diagnostics = _diagnostics;
+      _diagnostics = null;
+      final engine = _engine;
+      _engine = null;
+      final scheduler = _scheduler;
+      _scheduler = null;
+      final dbConn = _dbConn;
+      _dbConn = null;
+      final configReconnectSub = _configReconnectSub;
       _configReconnectSub = null;
-      await _engineAuthEventsSub?.cancel();
+      final engineAuthEventsSub = _engineAuthEventsSub;
       _engineAuthEventsSub = null;
-      await _deletedVaultWatchSub?.cancel();
+      final deletedVaultWatchSub = _deletedVaultWatchSub;
       _deletedVaultWatchSub = null;
-      await _stateLostSub?.cancel();
+      final stateLostSub = _stateLostSub;
       _stateLostSub = null;
-      await _flushSub?.cancel();
+      final flushSub = _flushSub;
       _flushSub = null;
+      final selfHealSub = _selfHealSub;
+      _selfHealSub = null;
+
+      // Detach the UI synchronously, before anything can yield. This is what
+      // actually stops a racing reload from stacking a second settings tab and
+      // a second sync circle on the user.
+      indicator?.dispose();
+      panel?.closeLeaves();
+      panel?.dispose();
+      // Close the remote log sink's WebSocket, if the user had it on.
+      diagnostics?.dispose();
+      _stopConfigSync();
       _flushDebounce?.cancel();
       _flushDebounce = null;
-      await _selfHealSub?.cancel();
-      _selfHealSub = null;
+      _settingsReloadDebounce?.cancel();
+      _settingsReloadDebounce = null;
       _cancelSelfHeal();
-      _syncIndicator?.dispose();
-      _syncIndicator = null;
-      _syncPanel?.closeLeaves();
-      _syncPanel?.dispose();
-      _syncPanel = null;
-      // Close the remote log sink's WebSocket, if the user had it on.
-      _diagnostics?.dispose();
-      _diagnostics = null;
-      await _engine?.stop();
-      _engine = null;
-      await _scheduler?.dispose();
-      _scheduler = null;
-      await _dbConn?.close();
-      _dbConn = null;
+
+      // Only now the slow half, all of it against locals.
+      await configReconnectSub?.cancel();
+      await engineAuthEventsSub?.cancel();
+      await deletedVaultWatchSub?.cancel();
+      await stateLostSub?.cancel();
+      await flushSub?.cancel();
+      await selfHealSub?.cancel();
+      await engine?.stop();
+      await scheduler?.dispose();
+      await dbConn?.close();
     },
   );
 }
@@ -2593,7 +2624,7 @@ $kSyncPanelCss
       // The picker has already persisted the config, so a clean boot picks
       // everything up.
       _log.info('Vault connected: ${newConfig.vaultId} — reloading');
-      reloadPlugin(plugin);
+      unawaited(reloadPlugin(plugin));
     },
     onDeleteVault: onDeleteVault,
     onSubscribed: () => _waitForSubscriptionAndStart(

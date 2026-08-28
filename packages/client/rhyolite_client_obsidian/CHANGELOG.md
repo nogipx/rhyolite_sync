@@ -1,3 +1,26 @@
+## [3.15.4] - 2026-08-28
+
+**A plugin reload now leaves one plugin behind, and keeps its database.**
+Connecting a vault, switching to self-host and resetting the local database all
+reload the plugin. The instance being replaced now releases everything it held:
+its entry in Settings, its sync indicator, and its handle on the local database.
+
+Until now it released none of that. Each reload left an extra "Rhyolite Sync" in
+Settings and an extra sync circle in the status bar, and the database handle it
+kept locked the next instance out of durable storage — sync fell back to memory,
+which is lost when Obsidian closes, so the vault downloaded again on every
+launch. Toggling the plugin off and on, or reinstalling it, added another copy
+rather than clearing them; fully quitting Obsidian was the only way back.
+
+### Bug Fixes
+
+- a plugin reload releases the instance it replaced (obsidian)
+- a reload replaces the plugin instead of adding a second copy (obsidian)
+
+### Other
+
+- bump plugin to 3.15.4 (obsidian)
+
 ## [3.15.3] - 2026-08-28
 
 **The plugin now says when your subscription has ended.**

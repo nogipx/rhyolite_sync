@@ -11,6 +11,12 @@ import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_session_state.dart';
 import 'package:rhyolite_client_obsidian/src/engine/backup_modal.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report_modal.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/log_file_store.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/obsidian_log_file_store.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/diagnostic_redactor.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/persistent_log_sink.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
 import 'package:rhyolite_client_obsidian/src/engine/frontmatter_audit_binding.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
@@ -38,19 +44,29 @@ import 'package:rpc_dart_log/rpc_dart_log.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:rpc_data_sqlite/rpc_data_sqlite.dart';
 
-// Silent baseline level: dev builds stream everything; release builds sit at
-// warning. When the user enables remote diagnostics, [DiagnosticsLogging] drops
-// the level to debug and restores this on disable.
-const _baselineLogLevel = kDebug ? RpcLogLevel.debug : RpcLogLevel.warning;
+// Baseline level. This codebase logs at info/warning/error and almost nothing
+// below, so `info` captures everything the plugin and the engine actually say
+// while leaving out rpc_dart's debug/trace internals — which are voluminous,
+// and describe the transport rather than the sync. Dev builds take everything.
+//
+// Release used to sit at `warning` with no outputs at all, which meant a user
+// reporting a bug had nothing to report with. When the user enables remote
+// diagnostics, [DiagnosticsLogging] drops this to debug and restores it after.
+const _baselineLogLevel = kDebug ? RpcLogLevel.debug : RpcLogLevel.info;
 
-// Release builds start with NO outputs — nothing is written anywhere until the
-// user explicitly enables remote diagnostics (see [DiagnosticsLogging]). Dev
-// builds (RHYOLITE_DEBUG=true) keep the console for local debugging.
+// Release builds log to this device and nowhere else. [_logSink] keeps a
+// memory ring plus a two-generation file under the plugin folder; that file is
+// what a bug report ships. Nothing is transmitted anywhere unless the user
+// turns on remote diagnostics, which is still off by default.
 final _logController = LogController(
   outputs: kDebug ? [ConsoleOutput()] : [],
   minLevel: _baselineLogLevel,
 );
 final _log = _logController.scope('plugin');
+
+/// The always-on local log. Installed at the very top of onLoad, before
+/// anything that can fail, so a boot that dies still leaves something to read.
+PersistentLogSink? _logSink;
 
 /// Manages the optional remote log sink. Off until the user opts in; installed
 /// during boot from the persisted [DiagnosticsPrefs] and re-applied live from
@@ -105,6 +121,226 @@ String _diagnosticsOs(bool isMobile) {
     return ua.contains('Android') ? 'Android' : 'iOS';
   } catch (_) {
     return 'mobile';
+  }
+}
+
+/// Best-effort read of this build's version from the Obsidian manifest.
+String _pluginVersion(PluginHandle plugin) {
+  try {
+    final manifest = jsu.getProperty<JSObject?>(plugin.raw, 'manifest');
+    if (manifest == null) return '';
+    return jsu.getProperty<String?>(manifest, 'version') ?? '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/// Obsidian's own API version, so a report says which host it came from.
+String _obsidianVersion() {
+  try {
+    return jsu.getProperty<String?>(obsidianModule(), 'apiVersion') ?? '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/// Whether Obsidian considers this a mobile host. Read defensively — every
+/// caller has a sensible answer for "could not tell".
+bool _isMobileHost(PluginHandle plugin) {
+  try {
+    return jsu.getProperty<bool>(plugin.app.raw, 'isMobile');
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Starts the on-device log.
+///
+/// Runs at the very top of onLoad, before the first await, for the same reason
+/// the panel view is registered there: whatever this call is placed after is
+/// something a report can no longer explain. Boot is where the interesting
+/// failures are, and until this feature existed a release build recorded none
+/// of them.
+///
+/// Local only. This writes to a file inside the plugin's own folder and to a
+/// memory ring, and transmits nothing; shipping the result anywhere is a
+/// separate, deliberate act by the user (see [showBugReportModal]).
+void _installPersistentLog(PluginHandle plugin) {
+  if (_logSink != null) return;
+  LogFileStore store;
+  try {
+    store = ObsidianLogFileStore(plugin.app.vault);
+  } catch (e) {
+    // No vault adapter is not a reason to lose the session's logs — the ring
+    // still holds them, and the report falls back to it.
+    store = const NoopLogFileStore();
+  }
+  // Sized for a startup scan, which is the loudest thing this plugin does:
+  // DiskReconciler logs several info lines per text file, so a large vault's
+  // first pass runs to megabytes. Those lines are worth keeping at info —
+  // "sync never finished starting" is a common report, and they are what
+  // diagnoses it — so the buffers are sized to hold a boot rather than the
+  // levels lowered to hide one.
+  final sink = PersistentLogSink(
+    store: store,
+    segmentId: PersistentLogSink.segmentIdFor(DateTime.now()),
+    memoryCapacity: 4000,
+  );
+  _logSink = sink;
+  _logController.addOutput(sink);
+  final os = _isMobileHost(plugin) ? _diagnosticsOs(true) : 'desktop';
+  unawaited(
+    sink.start(
+      banner: 'rhyolite ${_pluginVersion(plugin)} on $os, '
+          'Obsidian ${_obsidianVersion()}'
+          '${kDebug ? ', debug build' : ''}',
+    ),
+  );
+}
+
+
+/// Tears the local log down on unload, flushing what is buffered.
+///
+/// Nulled out, not just disposed: onLoad runs again on a soft reload, and a
+/// sink left in place would leave the next session appending to a disposed
+/// output while its own boot went unrecorded.
+void _disposePersistentLog() {
+  final sink = _logSink;
+  if (sink == null) return;
+  _logController.removeOutput(sink);
+  sink.dispose();
+  _logSink = null;
+}
+
+/// Supplies the parts of a report that only the boot block knows: the vault,
+/// the account, the filters in force. Installed once boot reaches the engine.
+///
+/// Absent before that, and a report taken in that window is still worth having
+/// — a boot that never finishes is exactly the sort of thing being reported,
+/// and the environment plus the log will show it.
+List<BugReportSection> Function()? _reportFacts;
+
+/// Salt for the report's path pseudonyms — the vaultId, so a name maps to the
+/// same pseudonym in every report from this vault (a bug reported twice about
+/// one file is visibly about one file) and to nothing in any other vault.
+/// Empty before a vault is connected, when there are no vault paths to hide.
+String _reportPathSalt = '';
+
+
+/// Problems reach back across sessions and are rare, so this can be generous.
+const _kReportProblemLines = 600;
+
+/// States what the log is missing, in English alongside the rest of the report
+/// body. Silence here would be the worst outcome: a truncated log that looks
+/// complete is read as "nothing else happened", which is a wrong answer rather
+/// than a missing one.
+String? _logCompletenessNotice(LogStats stats, {required int fileCount}) {
+  final notes = <String>[];
+  if (fileCount == 0) {
+    notes.add('No log files could be read from disk.');
+  }
+  if (!stats.fileHealthy) {
+    notes.add(
+      'The log file could not be written, so this is only what was still in '
+      'memory from the current session.',
+    );
+  }
+  if (stats.tailSlotsDiscarded > 0) {
+    notes.add(
+      'This session outgrew its log ${stats.tailSlotsDiscarded} time(s), so '
+      'its middle was dropped. Nothing was summarised — every line here is '
+      'verbatim, and the gaps in the #n sequence say exactly how many records '
+      'are missing and where. ${stats.recordsSeen} records in total.',
+    );
+  }
+  if (notes.isEmpty) return null;
+  notes.add('Log segments kept on this device: ${stats.retainedSegments} '
+        '(a segment is a session or a day, whichever ends first).');
+  return notes.join(' ');
+}
+
+/// Report section titles are English in every locale, deliberately: the file is
+/// read by whoever is debugging it, not by the user who produced it. What the
+/// user reads — the modal, the preview, every button — is localised.
+Future<(BugReport, List<(String, String)>)> _buildBugReport(
+  PluginHandle plugin,
+  String description,
+) async {
+  final sink = _logSink;
+  var problems = '';
+  var logFiles = <(String, String)>[];
+  String? logNotice;
+  if (sink == null) {
+    logNotice = S.bugReportLogUnavailable;
+  } else {
+    // Files verbatim, not a rendered tail. There is no cap: entries are
+    // compressed one at a time, so the whole retained log costs one file of
+    // memory at a time rather than all of it at once.
+    logFiles = await sink.readAllLogFiles();
+    problems = await sink.readProblems(maxLines: _kReportProblemLines);
+    logNotice = _logCompletenessNotice(sink.stats, fileCount: logFiles.length);
+  }
+
+  return (
+    BugReport(
+    generatedAt: DateTime.now(),
+    userDescription: description,
+    problems: problems,
+    logNotice: logNotice,
+    pathsRedacted: _reportPathSalt.isNotEmpty,
+    sections: [
+      _environmentSection(plugin),
+      ...?_reportFacts?.call(),
+    ],
+    ),
+    logFiles,
+  );
+}
+
+BugReportSection _environmentSection(PluginHandle plugin) {
+  final mobile = _isMobileHost(plugin);
+  return BugReportSection.compact('Environment', [
+    ('Plugin', _pluginVersion(plugin)),
+    ('Obsidian', _obsidianVersion()),
+    ('Platform', mobile ? _diagnosticsOs(true) : 'desktop'),
+    ('Build', kDebug ? 'debug' : 'release'),
+    ('Edition', _selfHostActive ? 'self-host' : 'managed'),
+    ('Language', obsidianLanguage()),
+    ('Account server', kEnv.accountServiceUrl),
+    ('Site', kEnv.siteUrl),
+    // Stated rather than assumed: an unwritable log is the difference between
+    // "the session was quiet" and "the session was never recorded".
+    ('Log file', _logSink?.lastStoreError == null ? 'ok' : 'unwritable'),
+  ]);
+}
+
+/// Uploads a report archive, or null when there is nobody to upload to.
+///
+/// Filled during boot, once it is known whether there is an account service to
+/// talk to. Read when the button is pressed rather than when the command is
+/// registered — the command exists before boot, deliberately, so that a boot
+/// which never finished can still produce a report.
+///
+/// Null on self-host (no account service) and while signed out (the account is
+/// both the identity and the storage key). In both cases the archive stays a
+/// file to attach by hand, which is the path that worked before this existed.
+Future<String> Function(Uint8List archive, String description)?
+    _reportSubmitter;
+
+/// Erases the on-device diagnostic logs, reporting what it freed.
+///
+/// Logging continues afterwards — this clears history, it does not turn
+/// anything off. The size is read before the delete because afterwards there
+/// is nothing left to measure.
+Future<void> _clearDiagnosticLogs() async {
+  final sink = _logSink;
+  if (sink == null) return;
+  try {
+    final freed = await sink.diskBytes();
+    await sink.clear();
+    showNotice(S.clearLogsDone(formatBytes(freed)));
+  } catch (e) {
+    showNotice(S.clearLogsFailed(e));
   }
 }
 
@@ -483,13 +719,17 @@ Future<void> _launchConfigSync({
 }) async {
   _stopConfigSync();
   if (!prefs.enabled || engine is! StateSyncEngine) return;
-  final endpoint = engine.endpoint;
-  if (endpoint == null) return;
+  if (engine.endpoint == null) return;
 
-  final caller = StateSyncContractCaller(
-    endpoint,
-    serviceNameOverride: StateSyncContractNames.instance('config'),
-  );
+  // Resolved per call, like [BlobDirSync.blobIO] just below and for the same
+  // reason: the engine rebuilds its connection on reconnect, and on the
+  // re-upload and restore buttons, which stop and start it from inside
+  // without the plugin ever hearing about it.
+  RpcCallerEndpoint? currentEndpoint() => engine.endpoint;
+  StateSyncContractCaller caller() => StateSyncContractCaller(
+        currentEndpoint()!,
+        serviceNameOverride: StateSyncContractNames.instance('config'),
+      );
   // Plugin *code* is the one category whose bytes are measured in hundreds of
   // megabytes, so it is gated on the storage backing this vault as well as on
   // the user's own toggle.
@@ -546,7 +786,7 @@ Future<void> _launchConfigSync({
       totalBytes: totalBytes,
       done: done,
     ),
-    log: _log.info,
+    log: _logController.scope('settings'),
   );
   // Measure what plugins weigh here even when the category is off — that number
   // is exactly what the settings row shows to make the opt-in an informed one.
@@ -594,15 +834,14 @@ Future<void> _launchConfigSync({
     // The server decides what is actually dead; we only nominate.
     releaseBlobs: engine.releaseBlobs,
     // Event-driven remote->local: react to another device's settings push on
-    // the config keyspace topic (same vault qualification the server uses).
-    notifyEndpoint: endpoint,
+    notifyEndpoint: currentEndpoint,
     notifyTopic: 'vault:${vaultId}_config',
     onActivity: (active) => _syncIndicator?.setSettingsActivity(active),
     // Obsidian doesn't hot-apply config files from disk, so a settings change
     // synced from another device lands on disk but isn't live until a reload.
     // Prompt one (debounced, one notice per burst).
     onRemoteApplied: () => _scheduleSettingsReloadNotice(plugin),
-    log: _log.info,
+    log: _logController.scope('settings'),
     // Share the note engine's connection-fair scheduler: settings sync runs
     // as low-priority background work that yields to interactive note sync
     // and pauses while the user is actively editing.
@@ -794,11 +1033,47 @@ void main() {
         margin: -0.5em 0 0.75em 0;
       }
       .rhyolite-vault-label { font-weight: 500; }
+      .rhyolite-bug-report-input {
+        width: 100%; resize: vertical; font-family: inherit;
+      }
+      /* Bounded and scrollable: the preview exists so the report can be read
+         before it is sent, and an unbounded pre would push the buttons that
+         send it off the bottom of the modal. */
+      .rhyolite-bug-report-preview {
+        max-height: 40vh; overflow: auto; white-space: pre-wrap;
+        word-break: break-word; font-size: 0.8em;
+        background: var(--background-secondary); padding: 0.5em;
+        border-radius: 4px;
+      }
 $kSyncPanelCss
 ''',
     onLoad: (plugin) async {
       // Pick UI strings from Obsidian's language before any UI is built.
       initLocale();
+
+      // Before the first await too, and before anything that can throw: from
+      // here on the session is recorded, so a boot failure below leaves a bug
+      // report that can explain itself.
+      _installPersistentLog(plugin);
+
+      // Registered here rather than with the other commands, which live inside
+      // the boot block: the reports worth the most are the ones from a boot
+      // that never finished, and a command registered down there would not
+      // exist in exactly that case. It degrades instead of failing — without
+      // [_reportFacts] the report carries the environment and the log, which
+      // is what such a report is for.
+      plugin.addCommand(
+        id: 'rhyolite-sync-bug-report',
+        name: S.bugReportCommand,
+        callback: () => showBugReportModal(
+          plugin,
+          buildReport: (description) => _buildBugReport(plugin, description),
+          openUrl: _openExternalUrl,
+          supportUrl: kSupportUrl,
+          submit: _reportSubmitter,
+          log: _logController.scope('report'),
+        ),
+      );
 
       // Before the first await, always. Obsidian restores the workspace layout
       // once the plugin-load phase is done, and a leaf whose view type isn't
@@ -1239,6 +1514,92 @@ $kSyncPanelCss
             };
           }
           _log.info('boot: engine ctor ${bootSw.elapsedMilliseconds}ms');
+
+          _reportPathSalt = cfg.vaultId;
+
+          // Uploading needs an account service and a session; self-host has
+          // neither. Read live through `auth`, so signing in later enables it
+          // without rebuilding anything.
+          _reportSubmitter = selfHostActive
+              ? null
+              : (archive, description) async {
+                  final client = auth.client;
+                  if (client == null || client.session == null) {
+                    throw StateError('signed out');
+                  }
+                  return client.submitReport(
+                    archiveBase64: base64Encode(archive),
+                    description: description,
+                    pluginVersion: pluginVersion,
+                    platform: platformTag,
+                  );
+                };
+          // Hand the sink the salt now that a vault is known. Records buffered
+          // during boot have not been formatted yet, so they get pseudonymised
+          // too — that is the whole reason the sink holds records rather than
+          // lines.
+          _logSink?.redactor = DiagnosticRedactor(salt: cfg.vaultId);
+
+          // Everything a report needs that only this block knows. A closure
+          // over the boot locals rather than a snapshot: the prefs below are
+          // reassigned live from the settings tab, and a report is worth
+          // having only if it describes the state the user is actually in.
+          _reportFacts = () {
+            final stats = _engine?.statsSnapshot();
+            final scope = fileFilterPrefs.pathScope;
+            // Folder filters are known to be paths, so they go through
+            // redactPath directly. The text scanner would miss a top-level
+            // folder like `Work` — it has neither a slash nor an extension to
+            // recognise, and in free text that is indistinguishable from an
+            // ordinary word.
+            final paths = DiagnosticRedactor(salt: cfg.vaultId);
+            String folders(Iterable<String> entries) =>
+                entries.map(paths.redactPath).join(', ');
+            return [
+              if (!selfHostActive)
+                BugReportSection.compact('Account', [
+                  ('Signed in', auth.client?.email != null ? 'yes' : 'no'),
+                  ('Email', auth.client?.email),
+                  ('Plan', _plan?.status.name),
+                  ('Plan ends', _plan?.periodEnd?.toUtc().toIso8601String()),
+                ]),
+              BugReportSection.compact('Vault', [
+                ('Name', cfg.vaultName),
+                ('Vault id', cfg.vaultId),
+                ('Device id', storedDeviceId),
+                ('Encrypted', cipher != null ? 'yes' : 'no'),
+                // User-supplied on self-host — their own machine, possibly
+                // with a token in it. Only the shape is reported.
+                ('Sync server', paths.redactUrl(syncServerUrl)),
+                ('Database', dbName),
+              ]),
+              BugReportSection.compact('Sync state', [
+                ('Engine', _engine != null ? 'built' : 'absent'),
+                ('Paused by user', _syncPaused ? 'yes' : 'no'),
+                ('Files', stats?.totalFiles.toString()),
+                ('Tombstones', stats?.tombstones.toString()),
+                ('Conflicting', stats?.conflicting.toString()),
+                ('Unique blobs', stats?.uniqueBlobs.toString()),
+                ('Total size', stats == null
+                    ? null
+                    : formatBytes(stats.totalSizeBytes)),
+                ('Server cursor', stats?.serverCursor.toString()),
+                ('Server epoch', stats?.serverEpoch?.toString()),
+              ]),
+              BugReportSection.compact('Settings', [
+                ('Settings sync', settingsPrefs.enabled ? 'on' : 'off'),
+                ('Synced categories', settingsPrefs.enabled
+                    ? settingsPrefs.categories.map((c) => c.name).join(', ')
+                    : null),
+                ('Excluded extensions',
+                    fileFilterPrefs.excludedExtensions.join(', ')),
+                ('Sync only paths', folders(scope.include)),
+                ('Excluded paths', folders(scope.exclude)),
+                ('Remote diagnostics',
+                    diagnosticsPrefs.enabled ? 'on' : 'off'),
+              ]),
+            ];
+          };
 
           // (Re)binds `.obsidian` settings sync to the engine's CURRENT
           // endpoint. Every engine restart invalidates the old one, so any
@@ -2492,6 +2853,14 @@ $kSyncPanelCss
       panel?.dispose();
       // Close the remote log sink's WebSocket, if the user had it on.
       diagnostics?.dispose();
+      // The local log is one global slot too, and a reload's onLoad installs a
+      // fresh one. Closing it here costs this teardown's own log lines and
+      // buys never having two sinks appending to the same file. The report
+      // facts go with it — they close over THIS instance's boot locals.
+      _disposePersistentLog();
+      _reportFacts = null;
+      _reportSubmitter = null;
+      _reportPathSalt = '';
       _stopConfigSync();
       _flushDebounce?.cancel();
       _flushDebounce = null;
@@ -2722,6 +3091,17 @@ $kSyncPanelCss
     ),
     diagnosticsPrefs: diagnosticsPrefs,
     onDiagnosticsChanged: onDiagnosticsChanged,
+    // Same flow as the command palette entry, which stays the path that works
+    // when boot never got far enough to build this tab.
+    onCreateBugReport: () => showBugReportModal(
+      plugin,
+      buildReport: (description) => _buildBugReport(plugin, description),
+      openUrl: _openExternalUrl,
+      supportUrl: kSupportUrl,
+      submit: _reportSubmitter,
+      log: _logController.scope('report'),
+    ),
+    onClearLogs: _clearDiagnosticLogs,
     fileFilterPrefs: fileFilterPrefs,
     onFileFilterChanged: onFileFilterChanged,
     forcedBinaryExtensions: forcedBinaryExtensions,

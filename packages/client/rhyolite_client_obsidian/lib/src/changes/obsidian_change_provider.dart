@@ -123,7 +123,8 @@ class ObsidianChangeProvider implements core.IChangeProvider {
     events.created.listen((e) {
       final suppressed = _consumeSuppression(e.file.path);
       _log?.info(
-        'Obsidian event: CREATED ${e.file.path}${suppressed ? " [SUPPRESSED]" : ""}',
+        'Obsidian event: CREATED${suppressed ? " [SUPPRESSED]" : ""}',
+        data: {'path': core.LogPath(e.file.path)},
       );
       if (!suppressed) {
         _controller?.add(core.FileCreatedEvent(relativePath: e.file.path));
@@ -133,7 +134,8 @@ class ObsidianChangeProvider implements core.IChangeProvider {
     events.modified.listen((e) {
       final suppressed = _consumeSuppression(e.file.path);
       _log?.info(
-        'Obsidian event: MODIFIED ${e.file.path}${suppressed ? " [SUPPRESSED]" : ""}',
+        'Obsidian event: MODIFIED${suppressed ? " [SUPPRESSED]" : ""}',
+        data: {'path': core.LogPath(e.file.path)},
       );
       if (!suppressed) {
         _controller?.add(core.FileModifiedEvent(relativePath: e.file.path));
@@ -143,7 +145,8 @@ class ObsidianChangeProvider implements core.IChangeProvider {
     events.deleted.listen((e) {
       final suppressed = _consumeSuppression(e.file.path);
       _log?.info(
-        'Obsidian event: DELETED ${e.file.path}${suppressed ? " [SUPPRESSED]" : ""}',
+        'Obsidian event: DELETED${suppressed ? " [SUPPRESSED]" : ""}',
+        data: {'path': core.LogPath(e.file.path)},
       );
       if (!suppressed) {
         _controller?.add(core.FileDeletedEvent(relativePath: e.file.path));
@@ -156,7 +159,8 @@ class ObsidianChangeProvider implements core.IChangeProvider {
         final suppressed =
             _consumeSuppression(oldPath) || _consumeSuppression(e.file.path);
         _log?.info(
-          'Obsidian event: RENAMED $oldPath -> ${e.file.path}${suppressed ? " [SUPPRESSED]" : ""}',
+          'Obsidian event: RENAMED${suppressed ? " [SUPPRESSED]" : ""}',
+          data: {'from': core.LogPath(oldPath), 'to': core.LogPath(e.file.path)},
         );
         if (!suppressed) {
           _controller?.add(
@@ -166,7 +170,9 @@ class ObsidianChangeProvider implements core.IChangeProvider {
       } else {
         final suppressed = _consumeSuppression(e.file.path);
         _log?.info(
-          'Obsidian event: RENAMED (no oldPath) ${e.file.path}${suppressed ? " [SUPPRESSED]" : ""}',
+          'Obsidian event: RENAMED (no oldPath)'
+          '${suppressed ? " [SUPPRESSED]" : ""}',
+          data: {'path': core.LogPath(e.file.path)},
         );
         if (!suppressed) {
           _controller?.add(core.FileCreatedEvent(relativePath: e.file.path));

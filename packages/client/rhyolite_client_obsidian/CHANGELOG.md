@@ -1,3 +1,66 @@
+## [3.16.0] - 2026-08-31
+
+**A bug report reaches support in one press.**
+It carries the plugin version, vault statistics and this device's recent logs,
+and comes back with a short number to quote. Note and folder names are replaced
+with pseudonyms before anything leaves the device, and nothing you wrote in a
+note is included. A copy stays in your vault.
+
+**Sync makes fewer round trips.** Notes and attachments transfer in batches
+rather than one exchange each, and a large transfer names the file it is
+moving. Notes no longer keep a second copy in the local cache, and a launch
+sends only what the server does not already have.
+
+### Features
+
+- raise the report cap to a size that should never be reached (account)
+- send the report to support instead of asking for a file (obsidian)
+- a contract for handing a diagnostic report to support (account)
+- the report is an archive of the log files, not one document (obsidian)
+- a diagnostic report is never synced, whatever the filters say (core)
+- logs kept by segment, and a way to delete them (obsidian)
+- a bug report the user can hand to support (obsidian)
+- a log declares its paths and urls rather than spelling them out (core)
+- a re-upload says which large file it is sending (core)
+- a pull says which large file it is fetching (core)
+
+### Bug Fixes
+
+- the bug-report copy describes what the report now does (obsidian)
+- a preempted pull keeps the batches it already applied (core)
+- a restart no longer re-pushes every file this device authored (core)
+- startup progress counts files again, not upload groups (core)
+- a start that lands on a running start supersedes it, quietly (core)
+- the small indicator stops going green mid-sync (obsidian)
+- a pull asked for during startup no longer races the startup pull (core)
+- the engine states when it is busy instead of leaving the UI to guess (core)
+- the engine says it is connected when the socket is up, not 49s later (core)
+- settings sync survives an engine restart it did not order (obsidian)
+- an upload batch is not cancelled out from under a caller who rejoined (core)
+- re-upload confirmation says what it does to the other devices (obsidian)
+- restore from server no longer deletes files it cannot bring back (core)
+
+### Refactoring
+
+- a settings scan names what it skipped once, not every time (obsidian)
+
+### Other
+
+- bump plugin to 3.16.0 (obsidian)
+- per-file data moves off the global meta row, lazily (core)
+- a startup upload group costs two round trips, not two per file (core)
+- overlap the prefetch groups again — batching alone was a regression (core)
+- a pull batch costs two round trips, not two per file (core)
+- budget the remaining loop yields; leave the pre-flight ones alone (core)
+- yield on a time budget, not on an item count (core)
+- the post-pull sweep costs what changed, not the whole vault (core)
+- a pull sweeps the cache it just filled, instead of leaving it a day (core)
+- pin the byte-stability a note's blob recovery now depends on (core)
+- say why a note's blob needs no local copy, in the right order (core)
+- a note's blob is never cached, instead of cached and swept later (core)
+- a note's blob leaves the local cache, like an attachment's (core)
+- a note's CRDT tree is stored in the compact encoding, not JSON (core)
+
 ## [3.15.5] - 2026-08-28
 
 **A database error now tells you what actually went wrong.**

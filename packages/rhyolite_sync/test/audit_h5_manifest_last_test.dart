@@ -120,4 +120,75 @@ void main() {
       },
     );
   });
+
+  group('H5 — manifest-last holds across a batch upload', () {
+    test('every chunk of every file precedes every manifest', () async {
+      // uploadAll exists to stop paying two round trips per file. The saving
+      // must not come out of the ordering: the tempting shortcut is to append
+      // each manifest to its own chunk batch, which holds only because the
+      // server writes a batch in stream order — an invariant the client can
+      // see, moved into another repository. Two phases keep it here.
+      final backing = FakeBlobStorage();
+      final io = _io(backing);
+
+      final results = await io.uploadAll(
+        [
+          _bytes('first file, one chunk of content'),
+          _bytes('second file, different content entirely'),
+          _bytes('third file, also distinct'),
+        ],
+        <String>{},
+      );
+      expect(results, hasLength(3));
+
+      final order = backing.uploadedBatches.expand((b) => b).toList();
+      final manifests = results.map((r) => r.manifestHash).toSet();
+      final firstManifest = order.indexWhere(manifests.contains);
+      expect(firstManifest, greaterThanOrEqualTo(0),
+          reason: 'the manifests must actually have been sent');
+
+      for (final r in results) {
+        for (final chunk in r.chunkHashes) {
+          expect(order.indexOf(chunk), lessThan(firstManifest),
+              reason: 'every chunk of every file must be on the server before '
+                  'ANY manifest — otherwise a manifest can point at bytes '
+                  'nobody holds');
+        }
+      }
+    });
+
+    test('cancelling during the chunk phase sends no manifest at all',
+        () async {
+      final backing = FakeBlobStorage();
+      final io = _io(backing);
+      final token = RpcCancellationToken();
+      backing.afterUpload = (_) => token.cancel('mid chunks');
+
+      await expectLater(
+        () => io.uploadAll(
+          [
+            _bytes('a' * 4000),
+            _bytes('b' * 4000),
+          ],
+          <String>{},
+          context: RpcContext.withCancellation(token),
+        ),
+        throwsA(isA<RpcCancelledException>()),
+      );
+
+      // Whatever landed, none of it is a manifest: the phase that sends them
+      // had not begun.
+      final sentIds = backing.store.keys.toSet();
+      final refIo = _io(FakeBlobStorage());
+      final refs = await refIo.uploadAll(
+        [_bytes('a' * 4000), _bytes('b' * 4000)],
+        <String>{},
+      );
+      for (final r in refs) {
+        expect(sentIds.contains(r.manifestHash), isFalse,
+            reason: 'a manifest reached the server while the batch was still '
+                'uploading chunks');
+      }
+    });
+  });
 }

@@ -382,7 +382,7 @@ void main() {
         blobStorage: remote,
         localBlobStore: local,
         vaultId: _vaultId,
-        recoverFromDisk: (path, wanted) async {
+        recoverBytes: (path, wanted) async {
           asked[path] = wanted;
           return {chunk: chunkBytes};
         },
@@ -421,7 +421,7 @@ void main() {
         localBlobStore: local,
         vaultId: _vaultId,
         // The rewritten file produces entirely different ids.
-        recoverFromDisk: (_, __) async => {'c-other': Uint8List(4)},
+        recoverBytes: (_, __) async => {'c-other': Uint8List(4)},
       )();
 
       expect(result.unhealable, 1);
@@ -454,7 +454,7 @@ void main() {
         blobStorage: remote,
         localBlobStore: local,
         vaultId: _vaultId,
-        recoverFromDisk: (_, wanted) async {
+        recoverBytes: (_, wanted) async {
           calls++;
           return {for (final id in wanted) id: Uint8List(4)};
         },
@@ -490,7 +490,7 @@ void main() {
         blobStorage: remote,
         localBlobStore: local,
         vaultId: _vaultId,
-        recoverFromDisk: (_, __) async {
+        recoverBytes: (_, __) async {
           diskCalls++;
           return const {};
         },

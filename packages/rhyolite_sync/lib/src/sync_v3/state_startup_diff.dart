@@ -2,6 +2,7 @@ import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
+import 'disk_reconciler.dart';
 import 'path_normalize.dart';
 
 class StateStartupDiffResult {
@@ -75,6 +76,21 @@ class StateStartupDiff {
   /// event so the UI can show a counter without polling.
   final void Function(int completed, int total)? onUploadProgress;
 
+  /// Reports ONE file's upload as its chunks go out, so the active-transfers
+  /// list can name what is moving.
+  ///
+  /// [onUploadProgress] above is a file counter; it says 40 of 251 and nothing
+  /// about the 27 MB one that has held position 41 for a minute. The
+  /// interactive reconcile has narrated large files all along — this path,
+  /// which is the one a re-upload of the whole vault takes, did not.
+  final void Function(String relPath, int sent, int total, bool done)?
+      onFileTransfer;
+
+  /// Files per upload request-pair. The round trips a group costs no longer
+  /// scale with its size, so a small group only means more of them; this is
+  /// the download side's [_prefetchGroupSize] read backwards.
+  static const int _uploadGroupSize = 8;
+
   /// Number of files uploaded in parallel. Defaults to 4 — single-thread
   /// CPU is still the bottleneck on dart2js, but a small pool hides
   /// network ack latency behind the next file's chunker/encrypt.
@@ -120,6 +136,7 @@ class StateStartupDiff {
     required this.writeClock,
     this.remoteBlobStorage,
     this.onUploadProgress,
+    this.onFileTransfer,
     this.uploadConcurrency = 4,
     this.reconcileText,
     this.sigStore,
@@ -175,8 +192,8 @@ class StateStartupDiff {
     );
 
     final swScan = Stopwatch()..start();
+    final scanYielder = TimeBudgetYielder();
     var shaSkipped = 0;
-    var processedSinceYield = 0;
 
     // Per-category pending counters, to surface the "text files always
     // re-upload because fast-path compares disk content to Fugue blob
@@ -204,16 +221,14 @@ class StateStartupDiff {
     // Text files reconciled through the Fugue delegate (see [reconcileText]).
     final pendingTextPaths = <String>[];
     for (final absPath in diskFiles) {
-      // Yield every 16 files so the host event loop gets a turn —
-      // sha256 of a 1MB file on dart2js is ~50-100ms of synchronous CPU,
-      // and listFiles can return thousands of paths. Without yields the
-      // whole scan pins the main thread and Obsidian's UI freezes
-      // through the entire StartupDiff phase.
-      processedSinceYield += 1;
-      if (processedSinceYield >= 16) {
-        processedSinceYield = 0;
-        await Future<void>.delayed(Duration.zero);
-      }
+      // Yield so the host event loop gets a turn — sha256 of a 1MB file on
+      // dart2js is ~50-100ms of synchronous CPU, listFiles can return
+      // thousands of paths, and without yields the whole scan pins the main
+      // thread and Obsidian's UI freezes through the entire StartupDiff phase.
+      //
+      // Measured in time, not files: the 16 this used to count was one guess
+      // covering both a file skipped on its signature and one hashed in full.
+      await scanYielder.maybeYield();
 
       final relPath = normalizeVaultPath(absPath.substring(vaultPath.length + 1));
       if (_isHidden(relPath)) continue;
@@ -230,6 +245,7 @@ class StateStartupDiff {
       // Type admission (per-device denylist): skip excluded extensions — not
       // read/uploaded, and no stat signature written, so a re-included type is
       // re-evaluated on the next scan. Reported so the engine surfaces the list.
+      if (isNeverSynced(relPath)) continue;
       if (denylist.isNotEmpty) {
         final ext = FileTypeDetector.extensionOf(relPath);
         if (ext.isNotEmpty && denylist.contains(ext)) {
@@ -273,7 +289,10 @@ class StateStartupDiff {
                       : stat.sizeBytes != sig.sizeBytes
                           ? 'size disk=${stat.sizeBytes} sig=${sig.sizeBytes}'
                           : 'mtime disk=${stat.mtimeMs} sig=${sig.mtimeMs}';
-          log.info('StartupDiff: text re-delegated path=$relPath reason=$reason');
+          log.info(
+            'StartupDiff: text re-delegated reason=$reason',
+            data: {'path': LogPath(relPath)},
+          );
         }
         pendingTextPaths.add(relPath);
         continue;
@@ -286,8 +305,11 @@ class StateStartupDiff {
       if (limit != null && limit > 0) {
         final stat = await io.statFile(absPath);
         if (stat != null && stat.sizeBytes > limit) {
-          log.info('StartupDiff: skip oversize $relPath '
-              'size=${stat.sizeBytes} limit=$limit');
+          log.info(
+            'StartupDiff: skip oversize '
+            'size=${stat.sizeBytes} limit=$limit',
+            data: {'path': LogPath(relPath)},
+          );
           blocked.add((
             path: relPath,
             sizeBytes: stat.sizeBytes,
@@ -391,11 +413,12 @@ class StateStartupDiff {
                     ? 'size-mismatch'
                     : 'chunk-list-mismatch';
         log.info(
-          'StartupDiff: pending path=$relPath isText=$isText reason=$reason '
+          'StartupDiff: pending isText=$isText reason=$reason '
           'diskBytes=${bytes.length} diskHash=${wholeHash.substring(0, 8)} '
           'chunks.len=${current.chunks.length} chunks[0]=$chunkPrev '
           'state.blobRef=${current.blobRef.length < 8 ? current.blobRef : current.blobRef.substring(0, 8)} '
           'state.sizeBytes=${current.sizeBytes}',
+          data: {'path': LogPath(relPath)},
         );
       } else {
         // Two distinct sub-cases:
@@ -416,18 +439,23 @@ class StateStartupDiff {
         if (current == null) {
           pendingNew++;
           log.info(
-            'StartupDiff: pending-new path=$relPath isText=$isText '
+            'StartupDiff: pending-new isText=$isText '
             'fileId=$fileId diskBytes=${bytes.length}',
+            data: {'path': LogPath(relPath)},
           );
         } else {
           // Tombstoned but on disk.
           pendingTombstoneRevive++;
           log.info(
-            'StartupDiff: pending-revive path=$relPath isText=$isText '
+            'StartupDiff: pending-revive isText=$isText '
             'fileId=$fileId diskBytes=${bytes.length} '
-            'state.hlc=${current.hlc} state.path=${current.path} '
+            'state.hlc=${current.hlc} '
             'state.blobRef=${current.blobRef.length < 8 ? current.blobRef : current.blobRef.substring(0, 8)} '
             'state.sizeBytes=${current.sizeBytes}',
+            data: {
+              'path': LogPath(relPath),
+              'state.path': LogPath(current.path),
+            },
           );
         }
       }
@@ -468,41 +496,94 @@ class StateStartupDiff {
     // One job per pending unit: binary files upload their raw blob here;
     // text files are reconciled through the Fugue delegate. Both run in the
     // same bounded pool so progress is a single counter.
+    //
+    // Counted in FILES, not jobs. A job used to be one file; grouping the
+    // uploads made it up to eight, and the counter followed — the log read
+    // "processing 2 file(s)" for sixteen, and the progress bar advanced in
+    // steps of eight. The unit the user sees must not depend on how the work
+    // happens to be packed.
+    final totalFiles = pending.length + pendingTextPaths.length;
+    var doneFiles = 0;
+    void creditFile() {
+      doneFiles++;
+      onUploadProgress?.call(doneFiles, totalFiles);
+    }
+
     final jobs = <Future<void> Function()>[];
     if (chunkedIO != null) {
-      for (final item in pending) {
+      // A GROUP per job, not a file: upload paid a request for a file's chunks
+      // and another for its manifest, so a re-upload of 251 files cost 502
+      // round trips. uploadAll sends a group's chunks together and then its
+      // manifests together — same manifest-last guarantee, made stricter
+      // across the group, at two requests per group instead of per file.
+      for (var i = 0; i < pending.length; i += _uploadGroupSize) {
+        final group = pending.sublist(
+          i,
+          i + _uploadGroupSize > pending.length
+              ? pending.length
+              : i + _uploadGroupSize,
+        );
         jobs.add(() async {
-          final result = await chunkedIO.upload(item.bytes, knownChunks);
-          // knownChunks is a plain Set — additions from concurrent
-          // workers race-free under Dart's single-threaded event loop.
-          // Mid-upload concurrent files may submit the same chunk hash;
-          // BlobTransferHub dedups so each chunk is uploaded once.
-          knownChunks.addAll(result.chunkHashes);
-          final hlc = store.nextHlc();
-          if (item.current == null) {
-            store.upsert(
-              FileState(
-                fileId: item.fileId,
-                path: item.relPath,
-                blobRef: result.manifestHash,
-                sizeBytes: item.bytes.length,
-                hlc: hlc,
-                chunks: result.chunkHashes,
-              ),
-            );
-            newFiles++;
-          } else {
-            store.upsert(
-              item.current!.copyWith(
-                path: item.relPath,
-                blobRef: result.manifestHash,
-                sizeBytes: item.bytes.length,
-                hlc: hlc,
-                tombstone: false,
-                chunks: result.chunkHashes,
-              ),
-            );
-            modifiedFiles++;
+          final results = await chunkedIO.uploadAll(
+            [for (final item in group) item.bytes],
+            knownChunks,
+            onFileProgress: (index, sent, total) {
+              final item = group[index];
+              // Same threshold the reconcile path uses, so a file that names
+              // itself when edited also names itself on a re-upload.
+              if (item.bytes.length <
+                  DiskReconciler.transferMonitorMinBytes) {
+                return;
+              }
+              onFileTransfer?.call(item.relPath, sent, total, false);
+            },
+          );
+          for (var j = 0; j < group.length; j++) {
+            final item = group[j];
+            final result = results[j];
+            if (item.bytes.length >=
+                DiskReconciler.transferMonitorMinBytes) {
+              // Retire it from the active list; without this it sits there at
+              // whatever fraction the last chunk left it on.
+              onFileTransfer?.call(
+                item.relPath,
+                item.bytes.length,
+                item.bytes.length,
+                true,
+              );
+            }
+            // knownChunks is a plain Set — additions from concurrent
+            // workers race-free under Dart's single-threaded event loop.
+            // Mid-upload concurrent groups may submit the same chunk hash;
+            // BlobTransferHub dedups so each chunk is uploaded once.
+            knownChunks.addAll(result.chunkHashes);
+            final hlc = store.nextHlc();
+            if (item.current == null) {
+              store.upsert(
+                FileState(
+                  fileId: item.fileId,
+                  path: item.relPath,
+                  blobRef: result.manifestHash,
+                  sizeBytes: item.bytes.length,
+                  hlc: hlc,
+                  chunks: result.chunkHashes,
+                ),
+              );
+              newFiles++;
+            } else {
+              store.upsert(
+                item.current!.copyWith(
+                  path: item.relPath,
+                  blobRef: result.manifestHash,
+                  sizeBytes: item.bytes.length,
+                  hlc: hlc,
+                  tombstone: false,
+                  chunks: result.chunkHashes,
+                ),
+              );
+              modifiedFiles++;
+            }
+            creditFile();
           }
         });
       }
@@ -516,20 +597,20 @@ class StateStartupDiff {
           // produces no push, which is the whole point of this path.
           final changed = await reconcile(relPath);
           if (changed) modifiedFiles++;
+          creditFile();
         });
       }
     }
 
-    final total = jobs.length;
-    if (total > 0) {
+    if (totalFiles > 0) {
       log.info(
-        'StartupDiff: processing $total file(s) '
-        '(${pending.length} binary upload, ${pendingTextPaths.length} text '
-        'reconcile) with concurrency=$uploadConcurrency…',
+        'StartupDiff: processing $totalFiles file(s) '
+        '(${pending.length} binary upload in ${jobs.length} group(s), '
+        '${pendingTextPaths.length} text reconcile) '
+        'with concurrency=$uploadConcurrency…',
       );
-      onUploadProgress?.call(0, total);
+      onUploadProgress?.call(0, totalFiles);
       final swatch = Stopwatch()..start();
-      var done = 0;
       var nextIndex = 0;
 
       // Bounded-concurrency worker pool. CPU work (CDC chunker, encrypt,
@@ -540,16 +621,16 @@ class StateStartupDiff {
         while (true) {
           final i = nextIndex++;
           if (i >= jobs.length) return;
+          // Progress is credited per file from inside the job, so a group
+          // advances the bar eight times rather than once at the end.
           await jobs[i]();
-          done++;
-          onUploadProgress?.call(done, total);
         }
       }
 
-      final workerCount = uploadConcurrency.clamp(1, total);
+      final workerCount = uploadConcurrency.clamp(1, jobs.length);
       await Future.wait(List.generate(workerCount, (_) => worker()));
       log.info(
-        'StartupDiff: processing of $total file(s) done in '
+        'StartupDiff: processing of $totalFiles file(s) done in '
         '${swatch.elapsed.inSeconds}s',
       );
     }

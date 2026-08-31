@@ -5,7 +5,9 @@ import 'dart:typed_data';
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart'
-    show ChunkedBlobIO, PluginDirManifest, PluginFileRef, boundedParallel;
+    show ChunkedBlobIO, LogPath, PluginDirManifest, PluginFileRef,
+        boundedParallel;
+import 'package:rpc_dart/rpc_dart.dart' show LogScope;
 
 import 'obsidian_settings_registry.dart';
 import 'synced_dir_kind.dart';
@@ -43,12 +45,12 @@ class BlobDirSync {
     required ChunkedBlobIO? Function() blobIO,
     required this.isMobile,
     this.deviceLabel,
-    void Function(String message)? log,
+    LogScope? log,
     Object? pluginsManagerRaw,
     DirTransferReport? onTransfer,
   })  : _adapter = adapter,
         _blobIO = blobIO,
-        _log = log,
+        _log = log ?? LogScope.noop,
         _pluginsManagerRaw = pluginsManagerRaw,
         _onTransfer = onTransfer;
 
@@ -78,7 +80,12 @@ class BlobDirSync {
   /// Human-readable name of this device, shown in the UI as "updated from …".
   final String? deviceLabel;
 
-  final void Function(String message)? _log;
+  /// The same LogScope everything else uses, so a path here can be declared
+  /// with [LogPath.config] instead of being interpolated into a string. The
+  /// plain `void Function(String)` callback this replaced had no way to carry
+  /// structured data, which put these files outside the redaction the rest of
+  /// the plugin relies on.
+  final LogScope _log;
 
   /// Obsidian's `app.plugins` manager, used to cycle a plugin after its files
   /// change. Null in tests / when the host does not expose it.
@@ -119,7 +126,7 @@ class BlobDirSync {
         out.add(id);
       }
     } catch (e) {
-      _log?.call('${kind.folder} listing failed: $e');
+      _log.warning('${kind.folder} listing failed: $e');
     }
     out.sort();
     return out;
@@ -193,7 +200,7 @@ class BlobDirSync {
   }) async {
     final io = _blobIO();
     if (io == null) {
-      _log?.call('${kind.folder} capture skipped (no connection): $id');
+      _log.warning('${kind.folder} capture skipped (no connection): $id');
       return null;
     }
 
@@ -204,7 +211,7 @@ class BlobDirSync {
 
     final entryBytes = await _readOrNull(filePath(kind, id, kind.entryFile));
     if (entryBytes == null) {
-      _log?.call('${kind.folder} capture skipped (no ${kind.entryFile}): $id');
+      _log.warning('${kind.folder} capture skipped (no ${kind.entryFile}): $id');
       return null;
     }
 
@@ -221,7 +228,7 @@ class BlobDirSync {
 
     for (final entry in sources.entries) {
       if (entry.value.length > maxFileBytes) {
-        _log?.call('${kind.folder} capture skipped (${entry.key} is '
+        _log.info('${kind.folder} capture skipped (${entry.key} is '
             '${entry.value.length} B > $maxFileBytes): $id');
         return null;
       }
@@ -291,14 +298,15 @@ class BlobDirSync {
     // `../plugins/rhyolite-sync/main.js` and replace the running engine.
     final id = kind.idOf(resourceId);
     if (id == null) {
-      _log?.call('refusing unusable resource id: $resourceId');
+      _log.warning('refusing unusable resource id',
+          data: {'resource': LogPath.config(resourceId)});
       return false;
     }
     // The same denylist classify() applies to resource ids, restated at the
     // boundary that actually touches disk.
     if (kind == SyncedDirKind.plugin &&
         ObsidianSettingsRegistry.selfPluginIds.contains(id)) {
-      _log?.call('refusing to apply over our own plugin: $id');
+      _log.warning('refusing to apply over our own plugin: $id');
       return false;
     }
     // Checked BEFORE the desktop-only skip: a removal applies everywhere, and
@@ -306,12 +314,12 @@ class BlobDirSync {
     // download it.
     if (manifest.deleted) return _removeLocally(kind, id);
     if (manifest.desktopOnly && isMobile) {
-      _log?.call('${kind.folder} skipped on mobile (desktop-only): $id');
+      _log.info('${kind.folder} skipped on mobile (desktop-only): $id');
       return false;
     }
     final io = _blobIO();
     if (io == null) {
-      _log?.call('${kind.folder} apply skipped (no connection): $id');
+      _log.warning('${kind.folder} apply skipped (no connection): $id');
       return false;
     }
 
@@ -320,7 +328,7 @@ class BlobDirSync {
       // The parser accepts the union of every kind's file names, so a theme
       // record may carry `main.js`. Only what THIS kind declares reaches disk.
       if (kind.fileNames.contains(entry.key)) return true;
-      _log?.call('${kind.folder} $id: ignoring foreign file ${entry.key}');
+      _log.info('${kind.folder} $id: ignoring foreign file ${entry.key}');
       return false;
     }).toList();
     for (final entry in wanted) {
@@ -351,7 +359,7 @@ class BlobDirSync {
       stale.add(entry);
     }
     if (stale.length < wanted.length) {
-      _log?.call('${kind.folder} $id: ${wanted.length - stale.length} of '
+      _log.info('${kind.folder} $id: ${wanted.length - stale.length} of '
           '${wanted.length} file(s) already current on disk');
     }
 
@@ -415,12 +423,13 @@ class BlobDirSync {
         await _adapter.remove(path);
         removed++;
       } catch (e) {
-        _log?.call('${kind.folder} file remove failed: $path: $e');
+        _log.warning('${kind.folder} file remove failed: $e',
+            data: {'resource': LogPath.config(path)});
       }
     }
 
     if (wrote == 0 && removed == 0) return false;
-    _log?.call('${kind.folder} applied: $id ${manifest.version ?? "?"} '
+    _log.info('${kind.folder} applied: $id ${manifest.version ?? "?"} '
         '($wrote written, $removed removed)');
     if (kind.reloadable) _reload(id);
     return true;
@@ -454,7 +463,7 @@ class BlobDirSync {
     try {
       return await io.blobRefOf(bytes) == ref.blobRef;
     } catch (e) {
-      _log?.call('${kind.folder} $id: verify failed for $name, '
+      _log.warning('${kind.folder} $id: verify failed for $name, '
           'will download: $e');
       return false;
     }
@@ -481,7 +490,8 @@ class BlobDirSync {
         await _adapter.remove(path);
         removed++;
       } catch (e) {
-        _log?.call('${kind.folder} file remove failed: $path: $e');
+        _log.warning('${kind.folder} file remove failed: $e',
+            data: {'resource': LogPath.config(path)});
       }
     }
     try {
@@ -489,9 +499,10 @@ class BlobDirSync {
     } catch (e) {
       // Non-empty (it kept its own state) or held open — the content is gone
       // either way, which is what the removal was about.
-      _log?.call('${kind.folder} dir not removed: $dir: $e');
+      _log.warning('${kind.folder} dir not removed: $e',
+          data: {'resource': LogPath.config(dir)});
     }
-    _log?.call('${kind.folder} removed locally: $id ($removed files)');
+    _log.info('${kind.folder} removed locally: $id ($removed files)');
     return removed > 0;
   }
 
@@ -520,7 +531,7 @@ class BlobDirSync {
     try {
       jsu.callMethod<Object?>(plugins, 'disablePlugin', [pluginId]);
     } catch (e) {
-      _log?.call('plugin disable failed: $pluginId: $e');
+      _log.warning('plugin disable failed: $pluginId: $e');
     }
   }
 
@@ -539,9 +550,9 @@ class BlobDirSync {
       if (!isEnabled) return; // not loaded — nothing to cycle
       jsu.callMethod<Object?>(plugins, 'disablePlugin', [pluginId]);
       jsu.callMethod<Object?>(plugins, 'enablePlugin', [pluginId]);
-      _log?.call('plugin reloaded: $pluginId');
+      _log.info('plugin reloaded: $pluginId');
     } catch (e) {
-      _log?.call('plugin reload failed: $pluginId: $e');
+      _log.warning('plugin reload failed: $pluginId: $e');
     }
   }
 
@@ -560,7 +571,8 @@ class BlobDirSync {
     try {
       return await _adapter.readBinary(path);
     } catch (e) {
-      _log?.call('read failed: $path: $e');
+      _log.warning('read failed: $e',
+          data: {'resource': LogPath.config(path)});
       return null;
     }
   }

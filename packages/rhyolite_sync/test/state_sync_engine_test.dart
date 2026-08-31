@@ -156,6 +156,44 @@ void main() {
       );
     });
 
+    test('restore deletes only what this device syncs — the folder filter and '
+        'the type denylist are not a delete list', () async {
+      // Restore means "make this device match the server". A file the filters
+      // keep out was never uploaded, so nothing downloads it back: sweeping it
+      // up with the rest is a one-way loss of a file the user explicitly told
+      // us not to manage.
+      final h = await _Harness.create(
+        pathScope: () => PathScope(include: ['Work']),
+        excludedExtensions: () => {'tmp'},
+      );
+      addTearDown(h.dispose);
+      h.io.files['$_vaultPath/Work/plan.md'] =
+          Uint8List.fromList('synced'.codeUnits);
+      h.io.files['$_vaultPath/Work/scratch.tmp'] =
+          Uint8List.fromList('excluded type'.codeUnits);
+      h.io.files['$_vaultPath/Personal/diary.md'] =
+          Uint8List.fromList('out of scope'.codeUnits);
+      await h.engine.start();
+
+      await h.engine.triggerRestoreFromServer();
+
+      expect(
+        h.io.files.containsKey('$_vaultPath/Work/plan.md'),
+        isFalse,
+        reason: 'the synced file still yields to the server copy',
+      );
+      expect(
+        h.io.files['$_vaultPath/Work/scratch.tmp'],
+        isNotNull,
+        reason: 'an excluded type has no server copy to come back as',
+      );
+      expect(
+        h.io.files['$_vaultPath/Personal/diary.md'],
+        isNotNull,
+        reason: 'an out-of-scope folder has no server copy to come back as',
+      );
+    });
+
     test('a failed epoch-triggered restore is observed, not an unobserved '
         'async error (L1-10b)', () async {
       final h = await _Harness.create();
@@ -776,8 +814,394 @@ void main() {
       }
     });
 
-    test('a text note keeps its cached blob — disk holds a projection, not it',
+    test('a large file being pulled names itself while it transfers', () async {
+      // The applier used to do the downloading and knew the path. Now the
+      // prefetch warms the cache first, so by the time the applier runs there
+      // is nothing left to narrate — and the minutes spent on a big
+      // attachment looked, from the panel, exactly like a hang.
+      final remote = _MemRemote();
+
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      // Comfortably over the 1 MiB narration floor, and incompressible so it
+      // really is chunked rather than deduped away.
+      a.io.files['$_vaultPath/att/big.bin'] = Uint8List.fromList(
+        List.generate(3 << 20, (i) => (i * 2654435761) & 0xFF),
+      );
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+      await pumpEventQueue();
+
+      final named = b.events
+          .whereType<SyncBlobTransfer>()
+          .where((e) => e.path == 'att/big.bin')
+          .toList();
+      expect(named, isNotEmpty,
+          reason: 'the file has to say what it is while it is being fetched');
+      expect(named.any((e) => !e.upload), isTrue,
+          reason: 'and say that it is coming down, not going up');
+      // Partial progress is what distinguishes the prefetch — the applier's
+      // own download runs off a warm cache and reports one finished step, so
+      // an assertion that only checks "some event exists" passes either way.
+      expect(
+        named.any((e) => !e.done && e.totalBytes > 0 &&
+            e.sentBytes < e.totalBytes),
+        isTrue,
+        reason: 'the transfer must be narrated WHILE it moves, not summarised '
+            'after it is already in the cache',
+      );
+      expect(named.last.done, isTrue,
+          reason: 'and be retired from the active list when the batch ends, '
+              'or it hangs around forever');
+    });
+
+    test('a start during a start supersedes it quietly instead of colliding',
         () async {
+      // start() opens by stopping, and stop() nulls _store, _reconciler and
+      // the connection. Nothing guarded that, so a second start pulled the
+      // fields out from under the first, which died on `_store!`. Cheap to hit
+      // once the auth path began restarting the engine repeatedly: four starts
+      // in sixty seconds, two ending in "Null check operator used on a null
+      // value" and a disposed BlobTransferHub.
+      //
+      // Worse than the noise: the loser's catch called stop(), so a dying
+      // start could tear down the live one.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      h.io.files['$_vaultPath/note.md'] =
+          Uint8List.fromList(utf8.encode('hello\n'));
+
+      // Park the first start inside its initial pull — where a real start
+      // spends its time, and where the collisions were observed.
+      final gate = Completer<void>();
+      h.state.getStatesGate = gate;
+      final first = h.engine.start();
+      for (var i = 0; i < 20 && h.state.getSince.isEmpty; i++) {
+        await pumpEventQueue();
+      }
+
+      // A second start arrives while the first is still inside its pipeline.
+      final second = h.engine.start();
+      gate.complete();
+      await first;
+      await second;
+      await pumpEventQueue();
+
+      expect(h.events.whereType<SyncError>(), isEmpty,
+          reason: 'being superseded is not a sync failure and must not be '
+              'reported as one');
+
+      // And the survivor is actually alive: it answers, which a torn-down
+      // engine cannot.
+      expect(await h.engine.healthCheck(), isTrue,
+          reason: 'the losing start must not have stopped the winning one');
+    });
+
+    test('a pull asked for during startup does not race the startup pull, and '
+        'is not lost either', () async {
+      // The startup pull runs outside the scheduler, so the 'pull' key cannot
+      // coalesce against it. A notify or a visibility resume landing mid-start
+      // used to begin a SECOND pull from the same un-advanced cursor and
+      // re-fetch every record the first was still applying — observed on a
+      // restore as 270 records applied twice, 68 s instead of 45.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+
+      // Park start() mid-pipeline: a file to push means StartupDiff reaches
+      // putStates, which the fake gates.
+      h.io.files['$_vaultPath/note.md'] =
+          Uint8List.fromList(utf8.encode('hello\n'));
+      final gate = Completer<void>();
+      h.state.putStatesGate = gate;
+      final starting = h.engine.start();
+      for (var i = 0; i < 20 && h.state.puts.isEmpty; i++) {
+        await pumpEventQueue();
+      }
+
+      final beforeTrigger = h.state.getSince.length;
+      await h.engine.triggerPull();
+      await pumpEventQueue();
+
+      expect(h.state.getSince.length, beforeTrigger,
+          reason: 'no second getStates while the startup pull still owns the '
+              'cursor — that is the race: both read it un-advanced and fetch '
+              'the same records');
+
+      // And it is not dropped: startup completing releases it. It goes back
+      // through the scheduler, so give that a few turns.
+      gate.complete();
+      await starting;
+      for (var i = 0; i < 20 && h.state.getSince.length == beforeTrigger; i++) {
+        await pumpEventQueue();
+      }
+      expect(h.state.getSince.length, greaterThan(beforeTrigger),
+          reason: 'a pull requested during startup has to happen eventually — '
+              'dropping it loses whatever the notify was about');
+    });
+
+    test('busy is held across the whole startup pipeline and released after',
+        () async {
+      // The indicator must not be inferred from how densely a phase reports
+      // progress. Before this, a gap between progress events let the UI say
+      // "up to date" mid-download — and someone who believes that and quits
+      // loses the rest of the transfer.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      for (var i = 0; i < 4; i++) {
+        a.io.files['$_vaultPath/n$i.md'] =
+            Uint8List.fromList(utf8.encode('note $i\n'));
+      }
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+      // Broadcast delivery is asynchronous: the listener has not run yet.
+      await pumpEventQueue();
+
+      final busy = b.events.whereType<SyncBusy>().toList();
+      expect(busy.map((e) => e.busy), [true, false],
+          reason: 'exactly one transition each way for one start');
+
+      final order = b.events.toList();
+      final busyOn = order.indexWhere((e) => e is SyncBusy && e.busy);
+      final busyOff = order.indexWhere((e) => e is SyncBusy && !e.busy);
+      final pulled = order.indexWhere((e) => e is SyncFilePulled);
+      expect(busyOn, lessThan(pulled));
+      expect(busyOff, greaterThan(pulled),
+          reason: 'busy must still be held while the pull is applying, or the '
+              'UI goes quiet in the middle of it');
+    });
+
+    test('busy is released even when the work is torn down mid-flight',
+        () async {
+      // The release lives in a finally for this reason: these bodies end by
+      // being preempted at least as often as they end by finishing, and a
+      // release only on the success path leaves the UI claiming work forever.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+      h.events.clear();
+
+      // Stop mid-session: whatever is in flight is torn down without any
+      // finally further up getting to run.
+      await h.engine.stop();
+      await pumpEventQueue();
+
+      final busy = h.events.whereType<SyncBusy>().toList();
+      if (busy.isNotEmpty) {
+        expect(busy.last.busy, isFalse,
+            reason: 'a torn-down engine must not leave the indicator busy');
+      }
+      expect(h.events.whereType<SyncStopped>(), isNotEmpty);
+    });
+
+    test('the engine calls itself connected once the socket is up, not once '
+        'the startup pipeline finishes', () async {
+      // These events used to straddle the whole pipeline, so on a full
+      // download the engine reported "connecting" for the entire initial pull
+      // — 49 s of it, while visibly transferring files. The panel then showed
+      // "Connecting…" every time its activity debounce lapsed mid-pull.
+      final remote = _MemRemote();
+
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      for (var i = 0; i < 4; i++) {
+        a.io.files['$_vaultPath/n$i.md'] =
+            Uint8List.fromList(utf8.encode('note $i\n'));
+      }
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      final order = b.events.map((e) => e.runtimeType.toString()).toList();
+      final connected = order.indexOf('SyncConnected');
+      final pulled = order.indexWhere((t) => t == 'SyncFilePulled');
+      expect(connected, greaterThanOrEqualTo(0),
+          reason: 'the engine must announce the connection at all');
+      expect(pulled, greaterThanOrEqualTo(0),
+          reason: 'and this pull must have applied something');
+      expect(connected, lessThan(pulled),
+          reason: 'connected must precede the pull it is meant to enable — if '
+              'it trails, the UI spends the whole download being told the '
+              'engine is still connecting');
+    });
+
+    test('startup progress counts files, whatever the uploads are packed into',
+        () async {
+      // Jobs used to be one per file; grouping the uploads made a job up to
+      // eight, and the counter followed it — the log read "processing 2
+      // file(s)" for sixteen and the bar advanced in steps of eight. The unit
+      // the user sees must not depend on how the work happens to be packed.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      for (var i = 0; i < 12; i++) {
+        h.io.files['$_vaultPath/att/f$i.bin'] =
+            Uint8List.fromList(List.generate(64, (b) => (b + i) % 256));
+      }
+      await h.engine.start();
+      await pumpEventQueue();
+
+      final progress =
+          h.events.whereType<SyncStartupBlobUploadProgress>().toList();
+      expect(progress, isNotEmpty);
+      expect(progress.last.total, 12,
+          reason: 'twelve files is twelve, not two groups');
+      expect(progress.last.completed, 12);
+      // Two groups would report at most three distinct completed values
+      // (0, 8, 12); per file gives thirteen.
+      expect(progress.map((e) => e.completed).toSet().length, greaterThan(4),
+          reason: 'the bar must move per file, not once per group');
+    });
+
+    test('a startup upload sends a group in a couple of round trips, not two '
+        'per file', () async {
+      // Symmetric to the pull. upload() costs a request for a file's chunks
+      // and another for its manifest, and the startup path called it once per
+      // file: a 251-file re-upload was 502 requests. Counting CALLS is the
+      // point — the per-file version moved exactly the same bytes.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      for (var i = 0; i < 12; i++) {
+        // Binary, so it takes the batch-upload path rather than the text
+        // reconciler.
+        h.io.files['$_vaultPath/att/f$i.bin'] =
+            Uint8List.fromList(List.generate(64, (b) => (b + i) % 256));
+      }
+      h.remote.uploadCalls = 0;
+      await h.engine.start();
+
+      expect(h.state.puts, isNotEmpty, reason: 'the files must have published');
+      expect(h.remote.uploadCalls, lessThan(12),
+          reason: 'fewer calls than files is impossible per-file, which is '
+              'what makes this meaningful');
+      expect(h.remote.uploadCalls, lessThanOrEqualTo(6),
+          reason: 'twelve files are two groups of eight and four, each costing '
+              'a chunk request and a manifest request');
+    });
+
+    test('a pull fetches a batch in a couple of round trips, not two per file',
+        () async {
+      // The wire contract has always taken a LIST of blob ids and streamed
+      // them back; the puller called it with one element, twice per file —
+      // once for the manifest, once for its chunks. On a link with ~250 ms of
+      // latency that, not bytes, was the cost of a pull: 207 files meant 414
+      // requests for 8 s of actual apply.
+      //
+      // Counting CALLS rather than ids is the whole point of the test: the
+      // per-file version moved exactly the same bytes.
+      final remote = _MemRemote();
+
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      for (var i = 0; i < 12; i++) {
+        a.io.files['$_vaultPath/note$i.md'] =
+            Uint8List.fromList(utf8.encode('note number $i\n'));
+      }
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+      expect(records.length, 12, reason: 'A must publish all twelve');
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      remote.downloadCalls = 0;
+      await b.engine.start();
+
+      for (var i = 0; i < 12; i++) {
+        expect(b.io.files.containsKey('$_vaultPath/note$i.md'), isTrue,
+            reason: 'every note must still arrive');
+      }
+
+      // Twelve files are one step of 32, fetched as two concurrent groups of
+      // eight and four: a manifest request and a chunk request each. The old
+      // code needed twenty-four.
+      expect(remote.downloadCalls, lessThanOrEqualTo(6),
+          reason: 'a batch costs a request for its manifests and one for its '
+              'chunks — if this climbs toward one per file, the prefetch went '
+              'back to fetching files one at a time');
+      expect(remote.downloadCalls, lessThan(records.length),
+          reason: 'fewer calls than files is impossible per-file, which is '
+              'what makes this assertion meaningful at all');
+    });
+
+    test('a pull sweeps the cache it just filled, without waiting for the '
+        'next session', () async {
+      // Prefetch stages every downloaded chunk in the cache — that is how it
+      // hands bytes to apply. Once apply has written the file, the vault holds
+      // those bytes and the staged copy is dead weight. The sweep used to be
+      // scheduled once, at start, so everything pulled today stayed duplicated
+      // in the database until tomorrow; on a first full sync that is the whole
+      // vault.
+      final remote = _MemRemote();
+
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      a.io.files['$_vaultPath/att/photo.bin'] =
+          Uint8List.fromList(List.generate(4096, (i) => (i * 37) % 256));
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+      expect(records, isNotEmpty, reason: 'A must publish the attachment');
+
+      // B starts with nothing to pull, so the sweep start() schedules runs and
+      // finds an empty cache. Anything below is therefore the PULL's doing —
+      // the startup sweep has already had its turn and will not come again
+      // this session, which is exactly the gap being closed.
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (_) => const [];
+      await b.engine.start();
+      for (var i = 0; i < 20; i++) {
+        await pumpEventQueue();
+      }
+
+      // Now the attachment shows up on a later pull.
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.triggerPull();
+
+      // The pull really did materialise it.
+      expect(b.io.files.containsKey('$_vaultPath/att/photo.bin'), isTrue);
+
+      // Nobody calls runLocalBlobGc here on purpose: the pull has to ask for
+      // the sweep itself. Let the maintenance tier drain.
+      for (var i = 0; i < 40; i++) {
+        if ((await b.engine.blobStore.listBlobIds(vaultId: _vaultId)).isEmpty) {
+          break;
+        }
+        await pumpEventQueue();
+      }
+
+      expect(await b.engine.blobStore.listBlobIds(vaultId: _vaultId), isEmpty,
+          reason: 'the pulled chunks are a second copy of a file now on disk, '
+              'and the pull must not leave them for the next session');
+      expect(b.io.files['$_vaultPath/att/photo.bin'],
+          a.io.files['$_vaultPath/att/photo.bin'],
+          reason: 'and sweeping must not disturb the file it wrote');
+    });
+
+    test("a text note's blob leaves the cache too — the FugueStore holds the "
+        'tree it is made of', () async {
+      // The cache used to keep every note's blob because disk holds only a
+      // rendered projection of the tree. True, and beside the point: the tree
+      // itself is in the FugueStore, in the very encoding the blob wraps, so
+      // the cached copy was pure duplication.
       final h = await _Harness.create();
       addTearDown(h.dispose);
       await h.engine.start();
@@ -789,11 +1213,87 @@ void main() {
           Uint8List.fromList('hello notes'.codeUnits);
       h.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
       await pushed;
+      // Not "evicted by the next sweep" — never written. The sweep runs once
+      // a session, so caching first would keep a second copy of everything
+      // edited today until tomorrow.
+      expect(await h.engine.blobStore.listBlobIds(vaultId: _vaultId), isEmpty,
+          reason: 'the tree is already persisted; the blob is the same bytes');
 
       await h.engine.runLocalBlobGc();
 
-      expect(await h.engine.blobStore.listBlobIds(vaultId: _vaultId), isNotEmpty,
-          reason: "a note's blob is its Fugue tree, which disk does not hold");
+      expect(await h.engine.blobStore.listBlobIds(vaultId: _vaultId), isEmpty,
+          reason: 'and a sweep finds nothing to do either');
+    });
+
+    test("a note evicted from the cache is still healable — eviction and "
+        'recovery agree on what the tree can rebuild', () async {
+      // The two halves must hold together: the GC drops a blob because the
+      // tree can rebuild it, so the recovery path had better actually rebuild
+      // it. Testing them apart would let them drift into a cache that evicts
+      // what nothing can bring back.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'note.md')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+        utf8.encode('---\ntags: [a]\n---\n\nтекст заметки\n'),
+      );
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
+      await pushed;
+      final uploaded = h.remote.store.keys.toSet();
+
+      await h.engine.runLocalBlobGc();
+      expect(await h.engine.blobStore.listBlobIds(vaultId: _vaultId), isEmpty);
+
+      // Now the server loses them, with no cached copy left anywhere.
+      h.remote.store.clear();
+      final verify = await h.engine.runVerifyBlobs();
+
+      expect(verify.unhealable, 0);
+      expect(h.remote.store.keys.toSet(), uploaded,
+          reason: 'the same ids must come back, or the GC evicted something '
+              'the tree cannot actually reproduce');
+    });
+
+    test('a text note whose blob the server lost is healed from its Fugue '
+        'tree, frontmatter and all', () async {
+      // Text used to be unhealable here: the recovery path only knew how to
+      // re-chunk the file on disk, and a note's disk bytes are the rendered
+      // projection, not the tree the blob holds. Rebuilding from the tree only
+      // works if it reproduces the uploader's bytes EXACTLY — including the
+      // frontmatter tail, which is appended after the tree and is the part
+      // most likely to be forgotten.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed && e.path == 'note.md')
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+        utf8.encode('---\ntags: [a, b]\ntitle: Заметка\n---\n\nтекст\n'),
+      );
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
+      await pushed;
+
+      final uploaded = h.remote.store.keys.toSet();
+      expect(uploaded, isNotEmpty, reason: 'the note must have been uploaded');
+
+      // The server silently loses every one of them, and the local cache is
+      // gone too — so nothing but the tree can produce these bytes again.
+      h.remote.store.clear();
+      await h.engine.blobStore.wipeAll(vaultId: _vaultId);
+
+      final verify = await h.engine.runVerifyBlobs();
+
+      expect(verify.unhealable, 0,
+          reason: 'every lost blob of a text note must be recoverable');
+      expect(h.remote.store.keys.toSet(), uploaded,
+          reason: 'healed blobs must land under the SAME ids — anything else '
+              'means the tree did not reproduce the uploaded bytes');
     });
 
     test('a file deleted while nothing was watching is reported, not deleted',
@@ -1271,6 +1771,13 @@ class _FakeStateContract implements IStateSyncContract {
   final List<int> getSince = [];
   final List<StatePutRequest> puts = [];
 
+  /// If set, the FIRST getStates awaits this before responding — parks the
+  /// engine inside its INITIAL PULL, which is where a real start spends most
+  /// of its time and therefore where a second start is most likely to land on
+  /// top of it.
+  Completer<void>? getStatesGate;
+  bool _getGateUsed = false;
+
   /// If set, the FIRST putStates awaits this before responding — lets a test
   /// pause the engine mid-startup (after StartupDiff) to inject an edit.
   Completer<void>? putStatesGate;
@@ -1288,6 +1795,11 @@ class _FakeStateContract implements IStateSyncContract {
     RpcContext? context,
   }) async {
     getSince.add(request.sinceCursor);
+    final gate = getStatesGate;
+    if (gate != null && !_getGateUsed) {
+      _getGateUsed = true;
+      await gate.future;
+    }
     if (failFirstGetStatesWith != null && !_firstGetStatesFailed) {
       _firstGetStatesFailed = true;
       throw failFirstGetStatesWith!;
@@ -1407,6 +1919,16 @@ class _MemRemote implements IBlobStorage {
   /// left off disk.
   final List<String> downloadedIds = [];
 
+  /// How many download CALLS were made, as opposed to how many ids they
+  /// carried. The wire contract takes a list, so these two numbers are the
+  /// difference between one round trip and N — which on a latency-bound link
+  /// is the whole cost of a pull.
+  int downloadCalls = 0;
+
+  /// Upload CALLS, as opposed to ids carried — the same distinction the
+  /// download counter draws, on the other direction.
+  int uploadCalls = 0;
+
   @override
   Future<Set<String>> exists(
     List<String> blobIds, {
@@ -1421,6 +1943,7 @@ class _MemRemote implements IBlobStorage {
     List<(Uint8List, String)> blobs, {
     RpcContext? context,
   }) async {
+    uploadCalls += 1;
     for (final (bytes, id) in blobs) {
       store[id] = bytes;
     }
@@ -1431,6 +1954,7 @@ class _MemRemote implements IBlobStorage {
     List<String> blobIds, {
     RpcContext? context,
   }) async {
+    downloadCalls += 1;
     downloadedIds.addAll(blobIds);
     return {
       for (final id in blobIds)

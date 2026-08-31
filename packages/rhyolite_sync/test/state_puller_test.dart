@@ -135,7 +135,7 @@ Future<_Fx> _newPuller(
     emit: events.add,
     isFatalRejection: (_) => false,
     log: LogScope.noop,
-    prefetchContentFile: (blobRef, {context}) async {},
+    prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
     downloadConcurrency: 1,
   );
 
@@ -143,6 +143,7 @@ Future<_Fx> _newPuller(
 }
 
 void main() {
+  _incrementalCursorTests();
   group('StatePuller — pull persists meta at its convergence point (L1-4)', () {
     test('cursor + recorded LCA survive a crash before the next push',
         () async {
@@ -171,9 +172,9 @@ void main() {
         emit: events.add,
         isFatalRejection: (_) => false,
         log: LogScope.noop,
-        prefetchContentFile: (blobRef, {context}) async {},
-        downloadConcurrency: 1,
-      );
+        prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
+    downloadConcurrency: 1,
+          );
 
       await puller.pull();
       expect(store.serverCursor, 2);
@@ -314,8 +315,17 @@ void main() {
         'transient failure', () async {
       // B throws RpcCancelledException — exactly what an in-flight blob download
       // raises when the interactive push preempts the pull. Unlike a StateError
-      // (which is held-and-retried), this must abort the WHOLE pull with the
-      // cursor left at 0 so the re-scheduled pull retries from scratch.
+      // (which is held-and-retried), this aborts the WHOLE pull.
+      //
+      // A was applied and persisted before B was reached, so the cursor banks
+      // it and the re-scheduled pull resumes at B. It used to be left at 0,
+      // discarding work already on disk: on a vault of any size the pull was
+      // preempted long before it finished, so every attempt re-downloaded what
+      // the last one had applied and the vault never converged.
+      //
+      // Banking is only safe because an applied file leaves `unapplied` after
+      // `_applyFile` returns, so a file cancelled mid-apply still holds the
+      // cursor behind its own seq.
       final f = await _newPuller(
         [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
         failFor: (_) => false,
@@ -327,10 +337,93 @@ void main() {
         () => f.puller.pull(),
         throwsA(isA<RpcCancelledException>()),
       );
-      expect(f.store.serverCursor, 0,
-          reason: 'the pull unwinds; the cursor is never advanced NOR held '
-              '(a StateError would hold it at 1 — cancellation must not)');
-      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty);
+      expect(f.store.serverCursor, 1,
+          reason: 'A applied before the preemption, so the resumed pull starts '
+              'at B rather than re-downloading A');
+      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty,
+          reason: 'cancellation is not a per-file failure — nothing is skipped');
+    });
+  });
+}
+
+void _incrementalCursorTests() {
+  group('StatePuller — the cursor banks progress as batches land', () {
+    test('a preempted pull keeps what it applied', () async {
+      // The bug: the cursor was committed once, after the whole batch loop,
+      // while a pull is preemptible by design. Every preemption threw away
+      // progress that was already applied and persisted, and the next pull
+      // re-downloaded the same records — on a big vault, forever.
+      final f = await _newPuller(
+        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
+        failFor: (_) => false,
+        errorFor: (id) =>
+            id == _idC ? RpcCancelledException('preempted') : null,
+      );
+
+      await expectLater(
+        () => f.puller.pull(),
+        throwsA(isA<RpcCancelledException>()),
+      );
+      expect(f.store.serverCursor, 2,
+          reason: 'A and B landed; only C is left to fetch');
+    });
+
+    test('it never passes a record that has not been applied', () async {
+      // B fails transiently while C succeeds. The cursor must stop below B
+      // even though a later record applied — otherwise B is skipped forever.
+      final f = await _newPuller(
+        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
+        failFor: (id) => id == _idB,
+      );
+
+      await f.puller.pull();
+
+      expect(f.store.serverCursor, 1,
+          reason: 'held below B, whatever else applied after it');
+    });
+
+    test('a batch boundary banks the batch that finished', () async {
+      // The batch-start cancellation check sits outside the per-file try on
+      // purpose: nothing new has happened since the previous batch committed.
+      // That reasoning only holds while the per-batch commit exists, so this
+      // is what pins it — the three-record cases all fit in one batch and
+      // would pass without it.
+      const batch = 32;
+      // At least eight characters: the puller logs fileId.substring(0, 8).
+      final ids = [
+        for (var i = 1; i <= batch + 8; i++)
+          'fileid-${i.toString().padLeft(4, '0')}',
+      ];
+      final token = RpcCancellationToken();
+      final f = await _newPuller(
+        [for (var i = 0; i < ids.length; i++) _rec(ids[i], i + 1)],
+        failFor: (_) => false,
+        // Cancels while the last file of batch one is applying, so that file
+        // still lands and the SECOND batch is the one that finds the token
+        // cancelled — at its start, before any work.
+        errorFor: (id) {
+          if (id == ids[batch - 1]) token.cancel('preempted by edit');
+          return null;
+        },
+      );
+
+      await expectLater(
+        () => f.puller.pull(context: RpcContext.withCancellation(token)),
+        throwsA(isA<RpcCancelledException>()),
+      );
+      expect(f.store.serverCursor, batch,
+          reason: 'the finished batch is banked; the next pull resumes after it');
+    });
+
+    test('a clean pull still ends at the server cursor', () async {
+      final f = await _newPuller(
+        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
+        failFor: (_) => false,
+      );
+
+      await f.puller.pull();
+
+      expect(f.store.serverCursor, 3);
     });
   });
 }

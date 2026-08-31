@@ -339,6 +339,41 @@ abstract class AppStrings {
   String get logCollectorDescription;
   String get sendLogsToCollector;
   String get sendLogsDescription;
+
+  // ── Bug report ───────────────────────────────────────────────────────────
+  String get bugReportSettingName;
+  String get bugReportSettingDescription;
+  String get bugReportCommand;
+  String get bugReportTitle;
+  String get bugReportIntro;
+  String get bugReportPlaceholder;
+  String get bugReportContents;
+
+  /// Where the report goes, shown before anything is collected. Which of the
+  /// two applies is decided by whether an uploader exists — self-host has no
+  /// account service, so there is nobody to send to.
+  String get bugReportWillSend;
+  String get bugReportWillSaveOnly;
+  String get bugReportCreate;
+  String get bugReportCollecting;
+  String bugReportFailed(Object error);
+  String get bugReportReadyTitle;
+  String get bugReportSent;
+  String get bugReportSentHint;
+  String bugReportNotSent(String reason);
+  String get bugReportTooLargeToSend;
+  String get bugReportSavedTo;
+  String get bugReportSummaryTitle;
+  String get bugReportSendHint;
+  String bugReportSaveFailed(Object error);
+  String get bugReportOpenTelegram;
+  String get bugReportLogUnavailable;
+  String get clearLogsName;
+  String get clearLogsDescription;
+  String get clearLogsButton;
+  String clearLogsDone(String freed);
+  String clearLogsFailed(Object error);
+
   String get deviceSettingsSection;
   String get deviceSettingsNote;
   String get sharedSettingsSection;

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_dart_websocket/rpc_dart_websocket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -97,7 +98,7 @@ class WebSocketSyncConnection implements SyncConnection {
       transportFactory: () async {
         final ch = WebSocketChannel.connect(wsUri);
         await ch.ready;
-        _log.info('WebSocket connected to $wsUri');
+        _log.info('WebSocket connected', data: {'url': LogUrl('$wsUri')});
         return RpcWebSocketCallerTransport(ch);
       },
       maxAttempts: 3,

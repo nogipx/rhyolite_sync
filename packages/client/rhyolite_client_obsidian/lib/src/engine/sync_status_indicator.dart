@@ -79,6 +79,12 @@ class SyncStatusIndicator {
   /// work hasn't reached the server. Sticky between SyncPending events.
   bool _hasPending = false;
 
+  /// The engine is inside work the user must not interrupt. Held between the
+  /// phase-specific events rather than inferred from their spacing — see
+  /// [SyncBusy]. Guards the idle paint so green never means "done" while a
+  /// download is still running.
+  bool _busy = false;
+
   /// Last state passed to [_set]. Needed so SyncPending can repaint
   /// the dot without forcing a logical state transition.
   _State _currentState = _State.off;
@@ -222,14 +228,24 @@ class SyncStatusIndicator {
         _set(_State.connecting);
       case SyncStopped():
         _cancelRevert();
+        _busy = false;
         _set(_State.off);
       case SyncConnecting():
         _set(_State.connecting);
+      case SyncBusy(:final busy):
+        _busy = busy;
+        _cancelRevert();
+        // Generic "working": the specific phase paints over this as soon as it
+        // reports, and this is what holds the indicator between reports.
+        _set(_restingState);
       case SyncConnected():
         _cancelRevert();
-        _set(_State.idle);
+        // Connected now fires when the socket comes up, which is BEFORE the
+        // startup pull — so it must not paint green over work still to come.
+        if (!_busy) _set(_State.idle);
       case SyncDisconnected():
         _cancelRevert();
+        _busy = false;
         // Distinct from `off` (intentionally stopped): the engine was running
         // and lost the backend. Orange so green never implies "ready" while
         // we actually can't reach the server.
@@ -256,14 +272,15 @@ class SyncStatusIndicator {
         _set(_State.uploading);
       case SyncStartupBlobUploadDone():
         _progress = null;
-        _set(_State.idle);
+        _set(_restingState);
       case SyncBlobDownloadProgress(:final completed, :final total):
         _cancelRevert();
         _progress = (completed: completed, total: total);
         _set(_State.downloading);
       case SyncBlobDownloadDone():
         _progress = null;
-        _set(_State.idle);
+        // One batch's blobs are in; the pull that asked for them may not be.
+        _set(_restingState);
       case SyncRepairStarted(:final totalFiles):
         _cancelRevert();
         _progress = (completed: 0, total: totalFiles);
@@ -274,7 +291,7 @@ class SyncStatusIndicator {
         _set(_State.repairing);
       case SyncRepairDone():
         _progress = null;
-        _set(_State.idle);
+        _set(_restingState);
       case SyncError():
         _setWithRevert(_State.error, _errorRevertDelay);
       case SessionExpired():
@@ -370,8 +387,16 @@ class SyncStatusIndicator {
   void _setWithRevert(_State state, Duration delay) {
     _cancelRevert();
     _set(state);
-    _revertTimer = Timer(delay, () => _set(_State.idle));
+    _revertTimer = Timer(delay, () => _set(_restingState));
   }
+
+  /// Where a per-file flash falls back to when it expires.
+  ///
+  /// Not unconditionally idle: these reverts fire between the events of a run
+  /// that is still going, and a green dot next to a panel reading
+  /// "Syncing 242/255" is the reassuring kind of wrong — the kind that gets
+  /// someone to close the app mid-transfer.
+  _State get _restingState => _busy ? _State.pulling : _State.idle;
 
   void _cancelRevert() {
     _revertTimer?.cancel();

@@ -132,7 +132,7 @@ Future<_Fx> _newPuller(
     emit: events.add,
     isFatalRejection: (_) => false,
     log: LogScope.noop,
-    prefetchContentFile: (blobRef, {context}) async {},
+    prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
     downloadConcurrency: 1,
   );
 

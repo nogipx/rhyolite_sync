@@ -30,6 +30,8 @@ Future<FileStateStore> _newStore(IDataClient client) async {
 }
 
 void main() {
+  _lazyMigrationTests();
+  _pushedSignatureTests();
   group('FileStateStore in-memory', () {
     test('upsert and get', () async {
       final env = await DataServiceFactory.inMemory();
@@ -467,6 +469,236 @@ void main() {
       final reloaded = await _newStore(env.client);
       expect(reloaded.loadedEmpty, isFalse);
       expect(reloaded.serverCursor, 42);
+    });
+  });
+}
+
+void _pushedSignatureTests() {
+  group('pushed signature', () {
+    test('survives a reload — the record is on the per-file row', () async {
+      // The bug this exists for: while the guard was a session-local map, a
+      // file authored here and never pulled back looked unpushed at every
+      // launch. The server skips the insert when the HLC already matches, so
+      // nothing came back to apply and nothing advanced the LCA — one vault
+      // re-sent 117 records on every startup, forever.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      store.recordPushedSignature('f1', 'blobA note.md false');
+      await store.persistOne('f1');
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.lastPushedSignatureFor('f1'), 'blobA note.md false');
+    });
+
+    test('a row written before this existed reads as never pushed', () async {
+      // Costs one redundant push apiece, once, rather than a migration.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      await store.persistOne('f1'); // no signature recorded
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.lastPushedSignatureFor('f1'), isNull);
+    });
+
+    test('it does not disturb the register sharing the row', () async {
+      // The signature rides as a sibling key; MvRegisterCodec reads `v` and
+      // `values` and ignores the rest.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1', blob: 'blobZ', path: 'deep/note.md'));
+      store.recordPushedSignature('f1', 'blobZ deep/note.md false');
+      await store.persistOne('f1');
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.get('f1')?.blobRef, 'blobZ');
+      expect(reloaded.get('f1')?.path, 'deep/note.md');
+    });
+
+    test('forgetting a file forgets that it was pushed', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      store.recordPushedSignature('f1', 'sig');
+      store.remove('f1');
+
+      expect(store.lastPushedSignatureFor('f1'), isNull);
+    });
+
+    test('a vault reset forgets every one of them', () async {
+      // Otherwise a wiped server would be told, file by file, that it already
+      // has records it no longer holds — and nothing would ever be re-sent.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      store.recordPushedSignature('f1', 'sig');
+      await store.persistOne('f1');
+
+      await store.wipeAll();
+
+      expect(store.lastPushedSignatureFor('f1'), isNull);
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.lastPushedSignatureFor('f1'), isNull);
+    });
+  });
+}
+
+/// Rewrites [fileId]'s row without the keys this version writes, and puts the
+/// values back in the meta row — i.e. exactly what an install that predates
+/// the move looks like on disk.
+Future<void> _makeLegacy(
+  IDataClient client,
+  String fileId, {
+  String? lca,
+  int? serverSeq,
+}) async {
+  final row = await client.get(collection: '${_v}_state_store', id: fileId);
+  final payload = Map<String, dynamic>.from(row!.payload)
+    ..remove('lca')
+    ..remove('srvSeq');
+  await client.update(
+    collection: '${_v}_state_store',
+    id: fileId,
+    expectedVersion: row.version,
+    payload: payload,
+  );
+
+  final meta = await client.get(collection: '${_v}_state_meta', id: 'meta');
+  final metaPayload = Map<String, dynamic>.from(meta!.payload);
+  metaPayload['lastSyncedBlobRef'] = {if (lca != null) fileId: lca};
+  metaPayload['serverSeq'] = {if (serverSeq != null) fileId: serverSeq};
+  await client.update(
+    collection: '${_v}_state_meta',
+    id: 'meta',
+    expectedVersion: meta.version,
+    payload: metaPayload,
+  );
+}
+
+Future<Map<String, dynamic>> _metaPayload(IDataClient client) async =>
+    (await client.get(collection: '${_v}_state_meta', id: 'meta'))!.payload;
+
+void _lazyMigrationTests() {
+  group('per-file data moving off the meta row', () {
+    test('a value written now is read back from the file row', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      store.recordSyncedBlobRef('f1', 'blobA');
+      store.recordServerSeq('f1', 42);
+      await store.persistOne('f1');
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.lastSyncedBlobRefFor('f1'), 'blobA');
+      expect(reloaded.serverSeqFor('f1'), 42);
+    });
+
+    test('an install that predates the move still reads its values', () async {
+      // The whole point of the lazy scheme: no migration step runs, and an
+      // untouched file keeps working out of the meta row.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      await store.persistOne('f1');
+      await store.persistMeta();
+      await _makeLegacy(env.client, 'f1', lca: 'oldBlob', serverSeq: 7);
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.lastSyncedBlobRefFor('f1'), 'oldBlob');
+      expect(reloaded.serverSeqFor('f1'), 7);
+    });
+
+    test('touching a legacy file moves it, and meta stops carrying it',
+        () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      await store.persistOne('f1');
+      await store.persistMeta();
+      await _makeLegacy(env.client, 'f1', lca: 'oldBlob', serverSeq: 7);
+
+      final second = await _newStore(env.client);
+      expect((await _metaPayload(env.client))['lastSyncedBlobRef'],
+          containsPair('f1', 'oldBlob'));
+
+      await second.persistOne('f1'); // the migration, triggered by ordinary use
+      await second.persistMeta();
+
+      final meta = await _metaPayload(env.client);
+      expect((meta['lastSyncedBlobRef'] as Map), isEmpty,
+          reason: 'meta shrinks as files are touched');
+      expect((meta['serverSeq'] as Map), isEmpty);
+
+      final third = await _newStore(env.client);
+      expect(third.lastSyncedBlobRefFor('f1'), 'oldBlob');
+      expect(third.serverSeqFor('f1'), 7);
+    });
+
+    test('the row wins over a stale meta entry', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      store.recordSyncedBlobRef('f1', 'fromRow');
+      await store.persistOne('f1');
+
+      // A duplicate left behind by a crash between the two writes.
+      final meta = await env.client.get(
+        collection: '${_v}_state_meta',
+        id: 'meta',
+      );
+      final payload = Map<String, dynamic>.from(meta!.payload);
+      payload['lastSyncedBlobRef'] = {'f1': 'staleFromMeta'};
+      await env.client.update(
+        collection: '${_v}_state_meta',
+        id: 'meta',
+        expectedVersion: meta.version,
+        payload: payload,
+      );
+
+      final reloaded = await _newStore(env.client);
+      expect(reloaded.lastSyncedBlobRefFor('f1'), 'fromRow');
+    });
+
+    test('a cleared LCA is not resurrected by the meta fallback', () async {
+      // Why the row always writes the key, empty included: an absent key means
+      // "not migrated" and falls back to meta, so clearing a legacy file's LCA
+      // would otherwise bring the old value back on the next launch — and the
+      // LCA is a merge base, so a stale one produces a wrong three-way merge.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      final store = await _newStore(env.client);
+      store.upsert(_state('f1'));
+      await store.persistOne('f1');
+      await store.persistMeta();
+      await _makeLegacy(env.client, 'f1', lca: 'oldBlob');
+
+      final second = await _newStore(env.client);
+      expect(second.lastSyncedBlobRefFor('f1'), 'oldBlob');
+      second.recordSyncedBlobRef('f1', ''); // e.g. a tombstone resolution
+      await second.persistOne('f1');
+
+      final third = await _newStore(env.client);
+      expect(third.lastSyncedBlobRefFor('f1'), isNull);
     });
   });
 }

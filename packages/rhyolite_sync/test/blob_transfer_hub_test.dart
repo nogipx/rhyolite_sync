@@ -230,6 +230,140 @@ void main() {
       await fc;
     });
 
+    test('one call for many ids stays ONE call to the backend', () async {
+      // The hub used to open a task, and therefore a request, per id — which
+      // silently undid any batching done above it. Everything upstream can ask
+      // for eight blobs in one list and still pay eight round trips.
+      final storage = _ControllableStorage();
+      for (var i = 0; i < 8; i++) {
+        storage.bytes['b$i'] = Uint8List.fromList([i]);
+      }
+      final hub = BlobTransferHub(inner: storage);
+      addTearDown(hub.dispose);
+
+      final got = await hub.download([for (var i = 0; i < 8; i++) 'b$i']);
+
+      expect(got.length, 8, reason: 'every id must still come back');
+      expect(storage.downloadCalls, 1,
+          reason: 'the list is the point — one request, not one per id');
+    });
+
+    test('an id already in flight joins its call instead of opening another',
+        () async {
+      // Dedup is the hub's other job and grouping must not cost it: a second
+      // caller wanting a blob someone is already fetching still waits on that
+      // fetch.
+      final storage = _ControllableStorage();
+      storage.bytes['shared'] = Uint8List.fromList([1]);
+      storage.bytes['other'] = Uint8List.fromList([2]);
+      final gate = storage.downloadGate('shared');
+      final hub = BlobTransferHub(inner: storage);
+      addTearDown(hub.dispose);
+
+      final first = hub.download(['shared']);
+      await Future<void>.delayed(Duration.zero);
+      expect(storage.downloadCalls, 1);
+
+      // 'shared' joins the in-flight call; only 'other' is new.
+      final second = hub.download(['shared', 'other']);
+      await Future<void>.delayed(Duration.zero);
+      expect(storage.downloadCalls, 2,
+          reason: 'one more call for the fresh id, not for the joined one');
+
+      gate.complete();
+      expect((await first)['shared'], isNotNull);
+      expect((await second).keys.toSet(), {'shared', 'other'});
+    });
+
+    test('one caller walking away does not cancel its neighbours in the '
+        'same call', () async {
+      // Cancellation used to be per id, which grouping cannot keep: the tasks
+      // now share a request, so honouring the first abandoned id would take
+      // the others' bytes with it. The call dies only when the last waiter
+      // has gone.
+      final storage = _ControllableStorage();
+      storage.bytes['keep'] = Uint8List.fromList([1]);
+      storage.bytes['leave'] = Uint8List.fromList([2]);
+      final gate = storage.downloadGate('keep');
+      final hub = BlobTransferHub(inner: storage);
+      addTearDown(hub.dispose);
+
+      final staying = hub.download(['keep', 'leave']);
+      await Future<void>.delayed(Duration.zero);
+
+      // A second caller asks for one of them and immediately gives up.
+      final leaving = RpcCancellationToken();
+      final abandoned = hub.download(
+        ['leave'],
+        context: RpcContext.withCancellation(leaving),
+      );
+      leaving.cancel('gone');
+      await abandoned.then((_) {}, onError: (_) {});
+      await Future<void>.delayed(Duration.zero);
+
+      gate.complete();
+      final got = await staying;
+      expect(got.keys.toSet(), {'keep', 'leave'},
+          reason: 'the caller that stayed must still get everything it asked '
+              'for, including the id the other one abandoned');
+    });
+
+    test('a rejoined upload is not cancelled when the OTHER ids leave',
+        () async {
+      // The batch used to count live tasks down, decrementing whenever a task
+      // reached zero subscribers. But a task stays in the map until it
+      // completes, so it can be joined again afterwards — and then reach zero
+      // a second time, decrementing twice for one slot. The count hits zero
+      // while somebody is still waiting, and their upload is cancelled.
+      //
+      // Reaching it needs three callers: one to put both ids in a batch, one
+      // to keep the second id alive while the first drops to zero, and one to
+      // rejoin the first.
+      final storage = _ControllableStorage();
+      final gate = storage.uploadGate('a'); // keeps the call in flight
+      final hub = BlobTransferHub(inner: storage);
+      addTearDown(hub.dispose);
+
+      final bytesA = Uint8List.fromList([1]);
+      final bytesB = Uint8List.fromList([2]);
+
+      final tokenX = RpcCancellationToken();
+      final x = hub.upload(
+        [(bytesA, 'a'), (bytesB, 'b')],
+        context: RpcContext.withCancellation(tokenX),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // W keeps 'b' subscribed, so X leaving cannot take the batch down.
+      final tokenW = RpcCancellationToken();
+      final w = hub.upload(
+        [(bytesB, 'b')],
+        context: RpcContext.withCancellation(tokenW),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // X goes: 'a' reaches zero subscribers (one decrement), 'b' does not.
+      tokenX.cancel('gone');
+      await x.then((_) {}, onError: (_) {});
+      await Future<void>.delayed(Duration.zero);
+
+      // Z comes back for 'a'. Invisible to a counter already decremented.
+      final z = hub.upload([(bytesA, 'a')]);
+      await Future<void>.delayed(Duration.zero);
+
+      // W goes: 'b' reaches zero. Under the counter that is the second
+      // decrement of a two-slot batch — cancel, with Z still waiting.
+      tokenW.cancel('gone');
+      await w.then((_) {}, onError: (_) {});
+      await Future<void>.delayed(Duration.zero);
+
+      gate.complete();
+      await z;
+      expect(storage.bytes['a'], isNotNull,
+          reason: 'Z was waiting on this upload and nothing had a right to '
+              'cancel it');
+    });
+
     test('disposed hub rejects new calls', () async {
       final hub = BlobTransferHub(inner: _ControllableStorage());
       hub.dispose();

@@ -1,3 +1,4 @@
+import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_dart_log/rpc_dart_log.dart';
 
@@ -53,7 +54,8 @@ class DiagnosticsLogging {
     final uri = Uri.tryParse(url);
     if (uri == null || (uri.scheme != 'ws' && uri.scheme != 'wss')) {
       _log?.warning(
-        'Diagnostics: collector URL must be ws:// or wss:// — ignoring "$url"',
+        'Diagnostics: collector URL must be ws:// or wss:// — ignoring it',
+        data: {'url': LogUrl(url)},
       );
       _teardown();
       return;
@@ -70,7 +72,7 @@ class DiagnosticsLogging {
       ..addOutput(output);
     _output = output;
     _activeUrl = url;
-    _log?.warning('Diagnostics: streaming logs to $url');
+    _log?.warning('Diagnostics: streaming logs', data: {'url': LogUrl(url)});
   }
 
   /// Detaches and disposes the current sink (closing its WebSocket) and

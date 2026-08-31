@@ -94,7 +94,7 @@ void main() {
     await store.load();
     remote = _CountingRemote();
     sync = SettingsSync(
-      remote: remote,
+      remote: () => remote,
       store: store,
       cipher: IdentityCipher(),
       vaultId: _vaultId,
@@ -242,7 +242,7 @@ void main() {
       await store.load();
       final remote2 = _CountingRemote()..rejectAtLeastBytes = 1024;
       final sync2 = SettingsSync(
-        remote: remote2,
+        remote: () => remote2,
         store: store,
         cipher: IdentityCipher(),
         vaultId: _vaultId,

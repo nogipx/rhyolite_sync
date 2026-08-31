@@ -1,6 +1,9 @@
+import 'package:rpc_dart/rpc_dart.dart';
+
 import '../local/local_blob_store.dart';
 import 'file_state.dart';
 import 'file_state_store.dart';
+import 'time_budget_yielder.dart';
 
 /// Garbage-collects blobs in the local cache that are no longer referenced.
 ///
@@ -54,17 +57,40 @@ class LocalBlobGc {
   /// already treats a cache miss as routine and refetches, and blob verify can
   /// now re-derive a lost chunk from the file.
   ///
-  /// Applies only where the answer is exact. A text file's blob is its Fugue
-  /// tree — the disk holds a rendered projection, not the blob — so text is
-  /// never regenerable and its cache entries stay. Null (the default) keeps
-  /// every referenced blob, the behaviour that shipped before this.
+  /// "The file itself" is not always the bytes on disk. A binary rebuilds from
+  /// its disk copy; a text note rebuilds from its Fugue tree, which the disk
+  /// does NOT hold (it holds a rendered projection) but the FugueStore does.
+  /// Text was excluded here while only the disk route existed, which left the
+  /// cache holding a second copy of every tree. Null (the default) keeps every
+  /// referenced blob, the behaviour that shipped before this.
   ///
   /// A blob is dropped only when EVERY state referencing it says yes: chunks
   /// are content-addressed and shared, and one shared with a file that is not
   /// on disk must survive.
   final Future<bool> Function(FileState state)? isRegenerable;
 
-  Future<LocalBlobGcResult> call() async {
+  /// Sweeps the cache.
+  ///
+  /// [candidates] narrows the sweep to a known set of ids — what a pull just
+  /// staged — instead of the whole cache. That turns the cost from O(vault)
+  /// into O(what changed): the id list is already known so [listBlobIds] is
+  /// skipped, and a state whose refs cannot touch a candidate is never asked
+  /// [isRegenerable], which is the part that costs a stat per attachment. The
+  /// full sweep still runs at startup, where paying once is the point.
+  ///
+  /// [context] aborts the sweep. Honoured only where aborting is SAFE: during
+  /// the state walk it returns having deleted nothing, because a half-built
+  /// pinned set would call a blob unreferenced merely for not having reached
+  /// its owner yet. Once that set is complete, stopping early just deletes
+  /// fewer — always safe, since the next sweep finds the rest.
+  Future<LocalBlobGcResult> call({
+    RpcContext? context,
+    Set<String>? candidates,
+  }) async {
+    if (candidates != null && candidates.isEmpty) {
+      return const LocalBlobGcResult(scanned: 0, deleted: 0);
+    }
+    final token = context?.cancellationToken;
     final live = <String>{};
 
     final external = externalLiveIds?.call();
@@ -80,13 +106,27 @@ class LocalBlobGc {
     // Walk every TaggedValue across all registers — multi-value registers
     // pin each concurrent version's blobs until the resolver collapses
     // them (doc §9).
+    final yielder = TimeBudgetYielder();
     for (final state in store.allValuesFlat) {
+      if (token?.isCancelled ?? false) {
+        return const LocalBlobGcResult(scanned: 0, deleted: 0, skipped: true);
+      }
       final refs = [
         if (state.blobRef.isNotEmpty) state.blobRef,
         ...state.chunks,
       ];
+      // Scoped: a state that shares nothing with the candidates can neither
+      // pin one nor be pinned by one, so skip it BEFORE isRegenerable — that
+      // call stats the file, and doing it per state is what made the full
+      // sweep too heavy to run often.
+      if (candidates != null && !refs.any(candidates.contains)) continue;
       live.addAll(refs);
       if (regenerable == null || !await regenerable(state)) pinned.addAll(refs);
+      // Thousands of iterations on a large vault, sharing the host's only
+      // thread — and wildly uneven: a text state costs a set lookup, a binary
+      // one costs a stat. Measured in time rather than items for exactly that
+      // reason.
+      await yielder.maybeYield();
     }
     // Anything live only on behalf of files that can rebuild it is dropped —
     // the vault is holding those bytes already.
@@ -94,10 +134,14 @@ class LocalBlobGc {
       live.removeWhere((id) => !pinned.contains(id) && !(external?.contains(id) ?? false));
     }
     final List<String> allBlobIds;
-    try {
-      allBlobIds = await blobStore.listBlobIds(vaultId: vaultId);
-    } catch (_) {
-      return const LocalBlobGcResult(scanned: 0, deleted: 0);
+    if (candidates != null) {
+      allBlobIds = candidates.toList();
+    } else {
+      try {
+        allBlobIds = await blobStore.listBlobIds(vaultId: vaultId);
+      } catch (_) {
+        return const LocalBlobGcResult(scanned: 0, deleted: 0);
+      }
     }
 
     final orphans = allBlobIds.where((id) => !live.contains(id)).toList();

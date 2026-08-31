@@ -629,14 +629,17 @@ class EnStrings extends AppStrings {
   @override
   String get reuploadDescription =>
       'Use this device as the source of truth. Server history will be replaced '
-      'with files from this device. Other devices will download the updated '
-      'files automatically.';
+      'with files from this device, and every other device will replace its '
+      'copy with this one.';
   @override
   String get reuploadConfirmTitle => 'Re-upload from this device?';
   @override
   String get reuploadConfirmBody =>
-      'Server history will be replaced with files from this device. Other '
-      'devices will re-sync automatically. No files are deleted.';
+      'Server history will be replaced with files from this device. Every '
+      'other device then wipes its own copy of the vault and downloads these '
+      'files, so a note that is missing here disappears there too — run this '
+      'from the device with the most complete vault. Files on this device are '
+      'not touched.';
   @override
   String get downloadServerName => 'Download from server';
   @override
@@ -647,8 +650,9 @@ class EnStrings extends AppStrings {
   String get downloadServerConfirmTitle => 'Download from server?';
   @override
   String get downloadServerConfirmBody =>
-      'Local files will be deleted and replaced with the server version. This '
-      'only affects this device.';
+      'Local files will be deleted and replaced with the server version. '
+      'Folders and file types excluded from sync are left alone. This only '
+      'affects this device.';
   @override
   String get repairName => 'Repair vault sync state';
   @override
@@ -775,9 +779,96 @@ class EnStrings extends AppStrings {
   String get sendLogsToCollector => 'Send logs to collector';
   @override
   String get sendLogsDescription =>
-      "Off by default — nothing is logged until you enable this. Streams this "
-      "device's debug logs to the URL above. Logs include file paths, ids, "
-      'hashes, sizes and timings — never file content.';
+      "Off by default. Streams this device's logs to the URL above as they "
+      'happen. Logs are always kept on this device — this only adds a live '
+      'remote copy. They include file paths, ids, hashes, sizes and timings — '
+      'never file content.';
+
+  // ── Bug report ──
+  @override
+  String get bugReportSettingName => 'Bug report';
+  @override
+  String get bugReportSettingDescription =>
+      'Collects everything needed to debug a sync problem, sends it to '
+      'support, and keeps a copy in your vault. Note names are replaced with '
+      'pseudonyms and nothing you wrote is included.';
+  @override
+  String get bugReportCommand => 'Rhyolite: create bug report';
+  @override
+  String get bugReportTitle => 'Create bug report';
+  @override
+  String get bugReportIntro =>
+      'Describe what went wrong. Anything you noticed helps — what you were '
+      'doing, which device, and roughly when.';
+  @override
+  String get bugReportPlaceholder =>
+      'Edits from my phone stopped arriving on the desktop around 14:30.';
+  @override
+  String get bugReportContents =>
+      'The report holds your plugin version and settings, vault statistics, '
+      'and this device\'s recent log. Note and folder names are replaced with '
+      'pseudonyms: the extensions and folder structure show, the names do '
+      'not. Nothing you wrote in a note is included. Passwords, keys and '
+      'tokens are removed.';
+  @override
+  String get bugReportWillSend =>
+      'The finished report goes to support, and a copy stays in your vault — '
+      'you can open it and read all of it.';
+  @override
+  String get bugReportWillSaveOnly =>
+      'The report is saved to your vault and sent nowhere — you decide who to '
+      'hand it to.';
+  @override
+  String get bugReportCreate => 'Create report';
+  @override
+  String get bugReportCollecting => 'Collecting diagnostics…';
+  @override
+  String bugReportFailed(Object error) => 'Could not build the report: $error';
+  @override
+  String get bugReportReadyTitle => 'Report ready';
+  @override
+  String get bugReportSent => 'Sent to support. Report id:';
+  @override
+  String get bugReportSentHint =>
+      'Nothing else to do — quote this id when you write. A copy was also '
+      'saved to your vault and can be deleted.';
+  @override
+  String bugReportNotSent(String reason) =>
+      'Could not send it to support ($reason), so attach the file instead.';
+  @override
+  String get bugReportTooLargeToSend =>
+      'the report is larger than the server accepts';
+  @override
+  String get bugReportSavedTo => 'Saved to your vault as:';
+  @override
+  String get bugReportSummaryTitle => 'What the report says';
+  @override
+  String get bugReportSendHint =>
+      'A compressed archive. Attach it from your file picker — the vault is an '
+      'ordinary folder on your device. It is never synced, and you can delete '
+      'it once it has been sent.';
+  @override
+  String bugReportSaveFailed(Object error) =>
+      'Could not save the report to your vault: $error';
+  @override
+  String get bugReportOpenTelegram => 'Open Telegram';
+  @override
+  String get bugReportLogUnavailable =>
+      'The log file could not be read, so this is only what is still held in '
+      'memory from the current session.';
+  @override
+  String get clearLogsName => 'Diagnostic logs';
+  @override
+  String get clearLogsDescription =>
+      'Logs are kept on this device only, capped at about 26 MB, and older '
+      'ones are removed automatically. Deleting them now loses the history a '
+      'bug report would carry; logging continues either way.';
+  @override
+  String get clearLogsButton => 'Delete logs';
+  @override
+  String clearLogsDone(String freed) => 'Diagnostic logs deleted ($freed).';
+  @override
+  String clearLogsFailed(Object error) => 'Could not delete the logs: $error';
   @override
   String get deviceSettingsSection => 'On this device only';
   @override

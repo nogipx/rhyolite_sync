@@ -6,6 +6,7 @@ import 'package:rhyolite_sync/src/sync_v3/file_state.dart';
 import 'package:rhyolite_sync/src/sync_v3/file_state_store.dart';
 import 'package:rhyolite_sync/src/sync_v3/local_blob_gc.dart';
 import 'package:rpc_blob/rpc_blob.dart';
+import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
 
@@ -327,6 +328,72 @@ void main() {
       )();
 
       expect(r.deleted, 1);
+    });
+  });
+
+  group('scoped to what a pull staged', () {
+    test('an orphan outside the candidates is left for the full sweep',
+        () async {
+      // The point of scoping is cost, not reach: a pull pays for its own
+      // leftovers, and the startup sweep still collects everything else.
+      await _seedBlob(blobs, 'just-pulled', [1]);
+      await _seedBlob(blobs, 'old-orphan', [2]);
+
+      final scoped = await gc(candidates: {'just-pulled'});
+      expect(scoped.deleted, 1);
+      expect(await blobs.read('old-orphan', vaultId: _v), isNotNull,
+          reason: 'an id nobody asked about must not be touched');
+
+      expect((await gc()).deleted, 1, reason: 'the full sweep still gets it');
+    });
+
+    test('a candidate pinned by a file that cannot rebuild it survives',
+        () async {
+      // Chunks are content-addressed and shared. A pull staging one that some
+      // other file depends on must not delete it just because the pulled file
+      // no longer needs it.
+      await _seedBlob(blobs, 'shared', [3]);
+      store.upsert(_state('keeper', blobRef: 'shared'));
+
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        isRegenerable: (_) async => false,
+      )(candidates: {'shared'});
+
+      expect(r.deleted, 0);
+      expect(await blobs.read('shared', vaultId: _v), isNotNull);
+    });
+
+    test('an empty candidate set does no work at all', () async {
+      await _seedBlob(blobs, 'orphan', [4]);
+      final r = await gc(candidates: const {});
+      expect(r.deleted, 0);
+      expect(await blobs.read('orphan', vaultId: _v), isNotNull);
+    });
+  });
+
+  group('cancellation', () {
+    test('aborting during the state walk deletes NOTHING', () async {
+      // Stopping mid-walk leaves the pinned set half built, and acting on it
+      // would delete a blob merely because its owner had not been reached
+      // yet. The sweep must forfeit the whole pass instead.
+      await _seedBlob(blobs, 'orphan', [5]);
+      store.upsert(_state('f1', blobRef: 'other'));
+
+      final token = RpcCancellationToken()..cancel('user is typing');
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        isRegenerable: (_) async => true,
+      )(context: RpcContext.withCancellation(token));
+
+      expect(r.skipped, isTrue);
+      expect(r.deleted, 0);
+      expect(await blobs.read('orphan', vaultId: _v), isNotNull,
+          reason: 'a half-built pinned set must never authorise a delete');
     });
   });
 }

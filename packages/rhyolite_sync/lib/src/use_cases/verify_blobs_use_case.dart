@@ -59,7 +59,7 @@ class VerifyBlobsUseCase {
     this.existsBatch = 128,
     this.uploadBatch = 64,
     this.confirmedPresent,
-    this.recoverFromDisk,
+    this.recoverBytes,
     LogScope? logger,
   }) : _log = logger ?? LogScope.noop;
 
@@ -103,7 +103,7 @@ class VerifyBlobsUseCase {
   final Future<Map<String, Uint8List>> Function(
     String relPath,
     Set<String> wantedIds,
-  )? recoverFromDisk;
+  )? recoverBytes;
 
   final LogScope _log;
 
@@ -170,7 +170,7 @@ class VerifyBlobsUseCase {
 
     // Second source: the file itself. Group the survivors by the path that
     // references them so a file is read and chunked once, not once per chunk.
-    if (notInCache.isNotEmpty && recoverFromDisk != null) {
+    if (notInCache.isNotEmpty && recoverBytes != null) {
       final byPath = <String, Set<String>>{};
       for (final state in store.allValuesFlat) {
         if (state.tombstone || state.path.isEmpty) continue;
@@ -183,13 +183,18 @@ class VerifyBlobsUseCase {
       for (final entry in byPath.entries) {
         context?.cancellationToken?.throwIfCancelled();
         try {
-          final recovered = await recoverFromDisk!(entry.key, entry.value);
+          final recovered = await recoverBytes!(entry.key, entry.value);
           for (final found in recovered.entries) {
             if (!notInCache.remove(found.key)) continue;
             toUpload.add((found.value, found.key));
           }
         } catch (e) {
-          _log.warning('Blob verify: disk recovery for ${entry.key} failed: $e');
+          // entry.key is a vault path — declared, not interpolated, so the
+          // shared log carries a pseudonym.
+          _log.warning(
+            'Blob verify: disk recovery failed: $e',
+            data: {'path': LogPath(entry.key)},
+          );
         }
       }
     }

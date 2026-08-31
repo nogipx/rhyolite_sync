@@ -78,6 +78,15 @@ class ChunkedBlobIO {
     Set<String> knownChunks, {
     RpcContext? context,
     void Function(int sent, int total)? onProgress,
+    /// Whether to mirror the produced chunks into the local cache.
+    ///
+    /// False for content the vault can rebuild on its own — a note's blob is
+    /// its Fugue tree, which the FugueStore already holds. Caching that would
+    /// keep a second copy until the next sweep, and the sweep runs once a
+    /// session. Nothing reads it in between: upload dedup comes from the
+    /// FileStateStore, not from here, and a chunk the server loses is
+    /// regenerated from the tree.
+    bool cacheLocally = true,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
@@ -97,10 +106,12 @@ class ChunkedBlobIO {
     // Local cache mirrors everything in plain — same as the legacy
     // single-blob path. Future reads of the same file (own device)
     // never need a remote roundtrip.
-    for (final entry in chunkBytes.entries) {
-      await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+    if (cacheLocally) {
+      for (final entry in chunkBytes.entries) {
+        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+      }
+      await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
     }
-    await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
 
     // Upload only chunks the server hasn't already got. The manifest is
     // uploaded LAST (after every chunk it references is on the server) so a
@@ -154,6 +165,318 @@ class ChunkedBlobIO {
     onProgress?.call(total, total);
 
     return (manifestHash: manifestHash, chunkHashes: orderedHashes);
+  }
+
+  /// Uploads several files in a bounded number of round trips instead of two
+  /// per file, without weakening manifest-last.
+  ///
+  /// [upload] costs a call for a file's chunks and another for its manifest,
+  /// and the startup path — the one a whole-vault re-upload takes — called it
+  /// once per file. 251 files meant 502 requests, four in flight, and on a
+  /// latency-bound link that is what the wait is made of.
+  ///
+  /// The ordering is kept on THIS side, and made stricter rather than weaker:
+  /// every chunk of every file in the batch goes up before any manifest does.
+  /// A manifest visible while a chunk it names is absent is the silent-loss
+  /// failure (audit H5), and the tempting shortcut — appending the manifest to
+  /// its own chunk batch — would hold only because the server happens to write
+  /// a batch in stream order. That moves an invariant the client can see into
+  /// one file in another repository, where parallelising blob writes would
+  /// break it silently. Two phases keep it here.
+  ///
+  /// Cancellation stays safe in both phases: cut during the chunks, no
+  /// manifest was sent at all; cut during the manifests, every chunk is
+  /// already up. Nothing published points at anything missing.
+  Future<List<({String manifestHash, List<String> chunkHashes})>> uploadAll(
+    List<Uint8List> files,
+    Set<String> knownChunks, {
+    RpcContext? context,
+    void Function(int fileIndex, int sent, int total)? onFileProgress,
+  }) async {
+    final token = context?.cancellationToken;
+    token?.throwIfCancelled();
+    if (files.isEmpty) return const [];
+
+    // --- build (CPU: rolling hash + sha256 over every byte) --------------
+    final built = <({
+      BlobManifest manifest,
+      Map<String, Uint8List> chunkBytes,
+      List<String> orderedHashes,
+      Uint8List manifestPlain,
+      String manifestHash,
+    })>[];
+    for (final bytes in files) {
+      token?.throwIfCancelled();
+      built.add(await _build(bytes));
+    }
+
+    // Mirror everything into the local cache, as the per-file path does.
+    for (final b in built) {
+      for (final entry in b.chunkBytes.entries) {
+        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+      }
+      await blobStore.write(b.manifestPlain, b.manifestHash, vaultId: vaultId);
+    }
+
+    // --- phase 1: every chunk of every file ------------------------------
+    const batchLimitBytes = 2 * 1024 * 1024;
+    final sent = List<int>.filled(built.length, 0);
+    void report(int i) => onFileProgress?.call(
+          i,
+          sent[i] > built[i].manifest.totalSize
+              ? built[i].manifest.totalSize
+              : sent[i],
+          built[i].manifest.totalSize,
+        );
+
+    // Deduped across the batch: two files sharing a chunk send it once.
+    final queued = <String>{};
+    var batch = <(Uint8List, String)>[];
+    var batchWire = 0;
+    // Which files to re-report after a flush, and by how much.
+    var pendingCredit = <int, int>{};
+    Future<void> flush() async {
+      if (batch.isEmpty) return;
+      token?.throwIfCancelled();
+      await remoteBlobStorage.upload(batch, context: context);
+      pendingCredit.forEach((i, bytes) {
+        sent[i] += bytes;
+        report(i);
+      });
+      batch = <(Uint8List, String)>[];
+      batchWire = 0;
+      pendingCredit = <int, int>{};
+    }
+
+    for (var i = 0; i < built.length; i++) {
+      final b = built[i];
+      for (final c in b.manifest.chunks) {
+        if (knownChunks.contains(c.hash) || queued.contains(c.hash)) {
+          // Already on the server, or already in this batch for another file:
+          // counts instantly, exactly as the per-file path credits dedup.
+          sent[i] += c.size;
+          continue;
+        }
+        queued.add(c.hash);
+        batch.add((b.chunkBytes[c.hash]!, c.hash));
+        batchWire += c.size;
+        pendingCredit[i] = (pendingCredit[i] ?? 0) + c.size;
+        if (batchWire >= batchLimitBytes) await flush();
+      }
+      report(i);
+    }
+    await flush();
+
+    // --- phase 2: the manifests, once every chunk is up ------------------
+    var manifests = <(Uint8List, String)>[];
+    var manifestWire = 0;
+    Future<void> flushManifests() async {
+      if (manifests.isEmpty) return;
+      token?.throwIfCancelled();
+      await remoteBlobStorage.upload(manifests, context: context);
+      manifests = <(Uint8List, String)>[];
+      manifestWire = 0;
+    }
+
+    for (final b in built) {
+      if (knownChunks.contains(b.manifestHash)) continue;
+      manifests.add((b.manifestPlain, b.manifestHash));
+      manifestWire += b.manifestPlain.length;
+      if (manifestWire >= batchLimitBytes) await flushManifests();
+    }
+    await flushManifests();
+
+    for (var i = 0; i < built.length; i++) {
+      sent[i] = built[i].manifest.totalSize;
+      report(i);
+    }
+    return [
+      for (final b in built)
+        (manifestHash: b.manifestHash, chunkHashes: b.orderedHashes),
+    ];
+  }
+
+  /// Warms the local cache for several files with a bounded number of round
+  /// trips, instead of two per file.
+  ///
+  /// [download] costs two SEQUENTIAL round trips — one for the manifest, then
+  /// one for the chunks it names — and the puller called it once per file. On
+  /// a latency-bound link that is the dominant cost of a pull: 207 files meant
+  /// 414 round trips, four in flight, against a server ~250 ms away — 39 s of
+  /// prefetch for 8 s of actual apply.
+  ///
+  /// Here it is two round trips per CALL: every uncached manifest in one
+  /// request, then every missing chunk across ALL of those files in
+  /// byte-bounded requests. Chunks shared between files are fetched once.
+  ///
+  /// Deliberately does NOT assemble. Prefetch through [download] decrypted,
+  /// concatenated and length-checked each whole file — and the caller then
+  /// dropped the bytes, only for the applier to assemble the same file again
+  /// from cache moments later. Warming the cache is all this owes anyone.
+  ///
+  /// Best-effort per file: a manifest that is absent, corrupt or oversized is
+  /// skipped rather than failing its neighbours, leaving that one file to the
+  /// applier's own [download] — which refetches and can fail honestly.
+  Future<void> prefetchAll(
+    List<String> manifestHashes, {
+    RpcContext? context,
+    /// Reports a file's transfer as its chunks land, keyed by manifest hash.
+    ///
+    /// Without it a pull is silent about WHAT it is moving: the applier used
+    /// to do the downloading and knew the path, but now the cache is warm by
+    /// the time it runs, so nothing narrates the minutes spent on a large
+    /// attachment. From the outside that is indistinguishable from a hang.
+    void Function(String manifestHash, int sent, int total)? onFileProgress,
+  }) async {
+    final token = context?.cancellationToken;
+    token?.throwIfCancelled();
+    if (manifestHashes.isEmpty) return;
+    final unique = manifestHashes.toSet().toList();
+
+    // --- manifests -----------------------------------------------------
+    final manifests = <String, Uint8List>{};
+    final needManifest = <String>[];
+    for (final hash in unique) {
+      var plain = await blobStore.read(hash, vaultId: vaultId);
+      // Same bit-rot guard [download] applies: the plain-byte cache carries no
+      // MAC, so a cached blob that no longer content-addresses to its id is
+      // corrupt and must be refetched, not parsed.
+      if (plain != null && _hasher(plain) != hash) {
+        await blobStore.deleteBlobs([hash], vaultId: vaultId);
+        plain = null;
+      }
+      if (plain == null) {
+        needManifest.add(hash);
+      } else {
+        manifests[hash] = plain;
+      }
+    }
+    // Capped because a manifest is only small for small files: one for a 1 GiB
+    // blob lists ~1000 hashes. The cap keeps a single request bounded whatever
+    // the caller passes.
+    const manifestsPerRequest = 64;
+    for (var i = 0; i < needManifest.length; i += manifestsPerRequest) {
+      token?.throwIfCancelled();
+      final slice = needManifest.sublist(
+        i,
+        (i + manifestsPerRequest).clamp(0, needManifest.length),
+      );
+      final got = await remoteBlobStorage.download(slice, context: context);
+      for (final entry in got.entries) {
+        if (_hasher(entry.value) != entry.key) continue;
+        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+        manifests[entry.key] = entry.value;
+      }
+    }
+
+    // --- what is missing, across every file at once ---------------------
+    final missing = <String>{};
+    final sizeOf = <String, int>{};
+    // Which files still want which chunks, so a chunk landing can be credited
+    // to every file that references it — chunks are shared.
+    final wantedBy = <String, Set<String>>{};
+    final totalOf = <String, int>{};
+    final doneOf = <String, int>{};
+    final yielder = TimeBudgetYielder();
+    for (final hash in unique) {
+      token?.throwIfCancelled();
+      final plain = manifests[hash];
+      if (plain == null) continue;
+      final parsed = _parseManifest(plain);
+      if (parsed == null) continue;
+      // Declared-size admission, as in [download]. An oversized file is left
+      // out of the warm-up entirely; the applier's own guard rejects it again.
+      final max = maxDownloadBytes;
+      if (max != null && max > 0) {
+        final declared =
+            parsed.chunks.fold<int>(0, (a, r) => a + (r.size < 0 ? 0 : r.size));
+        if (parsed.size > max || declared > max) continue;
+      }
+      totalOf[hash] = parsed.size;
+      doneOf[hash] = 0;
+      for (final ref in parsed.chunks) {
+        sizeOf[ref.hash] = ref.size;
+        if (missing.contains(ref.hash)) {
+          (wantedBy[ref.hash] ??= <String>{}).add(hash);
+          continue;
+        }
+        final bytes = await blobStore.read(ref.hash, vaultId: vaultId);
+        if (bytes != null && _hasher(bytes) == ref.hash) {
+          // Already cached: counts instantly, exactly as the upload path
+          // credits chunks the server already holds.
+          doneOf[hash] = (doneOf[hash] ?? 0) + ref.size;
+          continue;
+        }
+        if (bytes != null) {
+          await blobStore.deleteBlobs([ref.hash], vaultId: vaultId);
+        }
+        missing.add(ref.hash);
+        (wantedBy[ref.hash] ??= <String>{}).add(hash);
+        await yielder.maybeYield();
+      }
+      onFileProgress?.call(hash, doneOf[hash]!, parsed.size);
+    }
+    if (missing.isEmpty) return;
+
+    // --- chunks ---------------------------------------------------------
+    // Bounded by BOTH: bytes, so one response stays a reasonable size, and
+    // count, because a batch of small notes is one chunk each and the byte
+    // bound alone would let the id list in the REQUEST grow without limit.
+    const batchLimitBytes = 2 * 1024 * 1024;
+    const batchLimitCount = 256;
+    var batch = <String>[];
+    var batchBytes = 0;
+    Future<void> flush() async {
+      if (batch.isEmpty) return;
+      token?.throwIfCancelled();
+      final got = await remoteBlobStorage.download(batch, context: context);
+      for (final entry in got.entries) {
+        // A backend returning the wrong bytes for a content-addressed id is
+        // corrupt or hostile: drop it, leaving the chunk absent so the
+        // applier's assemble fails loudly instead of caching corruption.
+        if (_hasher(entry.value) != entry.key) continue;
+        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+        for (final owner in wantedBy[entry.key] ?? const <String>{}) {
+          doneOf[owner] = (doneOf[owner] ?? 0) + (sizeOf[entry.key] ?? 0);
+          onFileProgress?.call(owner, doneOf[owner]!, totalOf[owner] ?? 0);
+        }
+      }
+      batch = <String>[];
+      batchBytes = 0;
+    }
+
+    for (final hash in missing) {
+      batch.add(hash);
+      batchBytes += sizeOf[hash] ?? 0;
+      if (batchBytes >= batchLimitBytes || batch.length >= batchLimitCount) {
+        await flush();
+      }
+    }
+    await flush();
+  }
+
+  /// Parses a manifest blob into its declared total size and chunk list.
+  ///
+  /// Factored out for the same reason [_build] is: the manifest JSON *is* part
+  /// of the content address, and a second reader drifting by one field name
+  /// would fail in a way that looks like corruption.
+  ({int size, List<({String hash, int size})> chunks})? _parseManifest(
+    Uint8List manifestPlain,
+  ) {
+    final Map<String, dynamic> json;
+    try {
+      json = jsonDecode(utf8.decode(manifestPlain)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+    final chunksJson = (json['chunks'] as List?) ?? const [];
+    return (
+      size: (json['size'] as int?) ?? 0,
+      chunks: chunksJson.map((e) {
+        final m = e as Map<String, dynamic>;
+        return (hash: m['h'] as String, size: (m['s'] as int?) ?? 0);
+      }).toList(),
+    );
   }
 
   /// Chunks [bytes] and derives the manifest exactly as [upload] does,
@@ -245,18 +568,10 @@ class ChunkedBlobIO {
       await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
     }
 
-    final Map<String, dynamic> json;
-    try {
-      json = jsonDecode(utf8.decode(manifestPlain)) as Map<String, dynamic>;
-    } catch (_) {
-      return null;
-    }
-    final chunksJson = (json['chunks'] as List?) ?? const [];
-    final size = (json['size'] as int?) ?? 0;
-    final chunkRefs = chunksJson.map((e) {
-      final m = e as Map<String, dynamic>;
-      return (hash: m['h'] as String, size: (m['s'] as int?) ?? 0);
-    }).toList();
+    final parsed = _parseManifest(manifestPlain);
+    if (parsed == null) return null;
+    final size = parsed.size;
+    final chunkRefs = parsed.chunks;
 
     // Size admission (see [maxDownloadBytes]). Reject early on the DECLARED
     // sizes so an oversized blob is never fetched. The declared sizes are
@@ -273,7 +588,7 @@ class ChunkedBlobIO {
     final cached = <String, Uint8List>{};
     final missing = <String>[];
     var localBytes = 0;
-    var verifiedSinceYield = 0;
+    final verifyYielder = TimeBudgetYielder();
     for (final ref in chunkRefs) {
       final bytes = await blobStore.read(ref.hash, vaultId: vaultId);
       // Verify every cached chunk against its content-address. The local cache
@@ -289,12 +604,10 @@ class ChunkedBlobIO {
         }
         missing.add(ref.hash);
       }
-      // Hashing every chunk is O(bytes); yield periodically so a many-chunk
-      // download doesn't pin the dart2js main thread (mirrors the chunker).
-      if (++verifiedSinceYield >= 16) {
-        verifiedSinceYield = 0;
-        await Future<void>.delayed(Duration.zero);
-      }
+      // Hashing every chunk is O(bytes), so 16 of them is anywhere between
+      // trivial and very expensive depending on chunk size — measure the work
+      // instead of counting it.
+      await verifyYielder.maybeYield();
     }
     // Chunks already in the local cache count instantly; fetch the rest in
     // byte-bounded batches so a large file reports moving progress.

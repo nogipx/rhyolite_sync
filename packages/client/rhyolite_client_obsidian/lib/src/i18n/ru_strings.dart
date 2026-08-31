@@ -641,14 +641,16 @@ class RuStrings extends AppStrings {
   @override
   String get reuploadDescription =>
       'Использовать это устройство как источник истины. История на сервере '
-      'будет заменена файлами с этого устройства. Другие устройства скачают '
-      'обновлённые файлы автоматически.';
+      'будет заменена файлами с этого устройства, а остальные устройства '
+      'заменят свою копию на эту.';
   @override
   String get reuploadConfirmTitle => 'Перезалить с этого устройства?';
   @override
   String get reuploadConfirmBody =>
-      'История на сервере будет заменена файлами с этого устройства. Другие '
-      'устройства пересинхронизируются автоматически. Файлы не удаляются.';
+      'История на сервере будет заменена файлами с этого устройства. Каждое '
+      'остальное устройство сотрёт свою копию хранилища и скачает эти файлы, '
+      'поэтому заметка, которой здесь нет, исчезнет и на них — запускайте с '
+      'самого полного устройства. Файлы на этом устройстве не трогаются.';
   @override
   String get downloadServerName => 'Скачать с сервера';
   @override
@@ -659,7 +661,8 @@ class RuStrings extends AppStrings {
   String get downloadServerConfirmTitle => 'Скачать с сервера?';
   @override
   String get downloadServerConfirmBody =>
-      'Локальные файлы будут удалены и заменены серверной версией. Это касается '
+      'Локальные файлы будут удалены и заменены серверной версией. Папки и '
+      'типы файлов, исключённые из синхронизации, не трогаются. Это касается '
       'только этого устройства.';
   @override
   String get repairName => 'Починить состояние синхронизации';
@@ -786,9 +789,95 @@ class RuStrings extends AppStrings {
   String get sendLogsToCollector => 'Отправлять логи в сборщик';
   @override
   String get sendLogsDescription =>
-      'По умолчанию выключено — ничего не логируется, пока не включите. Стримит '
-      'отладочные логи этого устройства на адрес выше. Логи включают пути '
-      'файлов, id, хэши, размеры и тайминги — но не содержимое файлов.';
+      'По умолчанию выключено. Стримит логи этого устройства на адрес выше в '
+      'реальном времени. Логи всегда хранятся на устройстве — это лишь '
+      'добавляет удалённую копию. Они включают пути файлов, id, хэши, размеры '
+      'и тайминги — но не содержимое файлов.';
+
+  // ── Отчёт об ошибке ──
+  @override
+  String get bugReportSettingName => 'Отчёт об ошибке';
+  @override
+  String get bugReportSettingDescription =>
+      'Соберёт всё, что нужно для разбора проблемы синхронизации, отправит в '
+      'поддержку и оставит копию в хранилище. Названия заметок заменяются на '
+      'псевдонимы, содержимого в отчёте нет.';
+  @override
+  String get bugReportCommand => 'Rhyolite: создать отчёт об ошибке';
+  @override
+  String get bugReportTitle => 'Создать отчёт об ошибке';
+  @override
+  String get bugReportIntro =>
+      'Опишите, что пошло не так. Помогает любая деталь: что вы делали, на '
+      'каком устройстве и примерно когда.';
+  @override
+  String get bugReportPlaceholder =>
+      'Правки с телефона перестали приходить на компьютер около 14:30.';
+  @override
+  String get bugReportContents =>
+      'В отчёт войдут версия плагина и настройки, статистика хранилища и '
+      'недавние логи этого устройства. Названия заметок и папок заменяются на '
+      'псевдонимы: видно расширения и структуру папок, но не имена. '
+      'Содержимого заметок в отчёте нет. Пароли, ключи и токены вырезаются.';
+  @override
+  String get bugReportWillSend =>
+      'Готовый отчёт уйдёт в поддержку, а копия останется в хранилище — её '
+      'можно открыть и прочитать целиком.';
+  @override
+  String get bugReportWillSaveOnly =>
+      'Отчёт сохранится в хранилище и никуда не отправится — вы сами решаете, '
+      'кому его передать.';
+  @override
+  String get bugReportCreate => 'Создать отчёт';
+  @override
+  String get bugReportCollecting => 'Собираю диагностику…';
+  @override
+  String bugReportFailed(Object error) => 'Не удалось собрать отчёт: $error';
+  @override
+  String get bugReportReadyTitle => 'Отчёт готов';
+  @override
+  String get bugReportSent => 'Отправлен в поддержку. Номер отчёта:';
+  @override
+  String get bugReportSentHint =>
+      'Больше ничего делать не нужно — назовите этот номер, когда напишете. '
+      'Копия сохранена в хранилище, её можно удалить.';
+  @override
+  String bugReportNotSent(String reason) =>
+      'Отправить в поддержку не удалось ($reason) — приложите файл вручную.';
+  @override
+  String get bugReportTooLargeToSend =>
+      'отчёт больше, чем принимает сервер';
+  @override
+  String get bugReportSavedTo => 'Сохранён в хранилище как:';
+  @override
+  String get bugReportSummaryTitle => 'Что в отчёте';
+  @override
+  String get bugReportSendHint =>
+      'Это сжатый архив. Приложите его через выбор файлов — хранилище '
+      'обычная папка на устройстве. Он не синхронизируется, и после отправки '
+      'его можно удалить.';
+  @override
+  String bugReportSaveFailed(Object error) =>
+      'Не удалось сохранить отчёт в хранилище: $error';
+  @override
+  String get bugReportOpenTelegram => 'Открыть Telegram';
+  @override
+  String get bugReportLogUnavailable =>
+      'Файл логов прочитать не удалось — здесь только то, что осталось в '
+      'памяти от текущей сессии.';
+  @override
+  String get clearLogsName => 'Логи диагностики';
+  @override
+  String get clearLogsDescription =>
+      'Логи хранятся только на этом устройстве, занимают не больше ~26 МБ, и '
+      'старые удаляются сами. Удаление сейчас потеряет историю, которую унёс '
+      'бы отчёт об ошибке; запись логов при этом продолжится.';
+  @override
+  String get clearLogsButton => 'Удалить логи';
+  @override
+  String clearLogsDone(String freed) => 'Логи диагностики удалены ($freed).';
+  @override
+  String clearLogsFailed(Object error) => 'Не удалось удалить логи: $error';
   @override
   String get deviceSettingsSection => 'Только на этом устройстве';
   @override

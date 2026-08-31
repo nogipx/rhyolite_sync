@@ -7,6 +7,7 @@ export 'src/contract/subscription_contract.dart';
 export 'src/contract/vault_usage_contract.dart';
 export 'src/contract/internal_contract.dart';
 export 'src/contract/admin_contract.dart';
+export 'src/contract/report_contract.dart';
 export 'src/auth_keys.dart';
 export 'src/session.dart';
 export 'src/vault_info.dart';

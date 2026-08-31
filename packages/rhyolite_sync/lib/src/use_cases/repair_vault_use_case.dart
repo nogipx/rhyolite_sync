@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:convergent/fugue.dart';
 
 import '../chunking/file_type_detector.dart';
+import '../sync_v3/time_budget_yielder.dart';
 import '../engine/sync_engine_event.dart';
 import '../frontmatter/fm_state.dart';
 import '../frontmatter/fm_store.dart';
@@ -134,6 +135,7 @@ class RepairVaultUseCase {
 
     var repaired = 0;
     var failed = 0;
+    final yielder = TimeBudgetYielder();
 
     for (final rel in textPaths) {
       try {
@@ -151,7 +153,10 @@ class RepairVaultUseCase {
         ),
       );
       // Yield between files — keeps host UI responsive on large vaults.
-      await Future<void>.delayed(Duration.zero);
+      // Budgeted: reseeding a one-line note and a 40 KB one differ by orders
+      // of magnitude, so a yield per file buys a clamped timer for work that
+      // did not need one.
+      await yielder.maybeYield();
     }
 
     sw.stop();

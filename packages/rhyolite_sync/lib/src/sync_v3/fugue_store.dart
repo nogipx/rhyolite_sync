@@ -8,8 +8,10 @@ import 'package:rpc_data/rpc_data.dart';
 
 /// Persistent + lazily-cached per-file [Fugue] text states.
 ///
-/// Storage layout: one row per fileId in `<vaultId>_fugue_store`,
-/// payload is the JSON-encoded [Fugue] via [FugueCodec].
+/// Storage layout: one row per fileId in `<vaultId>_fugue_store`, payload is
+/// the compact binary encoding of the tree, base64'd — see [_encodePayload].
+/// Rows written before that carry the old JSON encoding and are still read;
+/// see [_decodePayload].
 ///
 /// Load policy: [load] learns the set of stored fileIds (no Fugue
 /// decode — that's the expensive part), then individual [get] calls
@@ -45,12 +47,47 @@ class FugueStore {
 
   String get _storeCol => '${vaultId}_fugue_store';
 
-  /// JSON codec for LOCAL sqlite persistence (payload is a Map). The WIRE
-  /// blob uses the compact binary codec instead — see [encodeBlob].
+  /// JSON codec. Legacy for local rows (still read, never written — see
+  /// [_decodePayload]); still the format of [encodeForBlob].
   static const _codec = FugueCodec<String>(StringCodec());
 
-  /// Compact binary codec for the WIRE blob content (`Uint8List`, ~2 B/char).
+  /// Compact binary codec (`Uint8List`, ~2 B/char). Used for the WIRE blob
+  /// (see [encodeBlob]) and, since [_encodePayload], for local rows too.
   static const _binary = FugueTextBinaryCodec();
+
+  /// Marks a row as carrying [_encodePayload]'s form. Absent on legacy rows.
+  static const _binaryPayloadTag = 'fz1';
+
+  /// Local rows now carry the same compact encoding the wire blob uses.
+  ///
+  /// The JSON form spent one quoted, comma-separated entry per character —
+  /// 4 B for ASCII, 5 for Cyrillic — where the binary codec writes about 2,
+  /// and it repeated the replica id in full on every block with no interning.
+  /// On a text-heavy vault that made this store the largest thing in the
+  /// database, for a tree the blob cache was already holding in the compact
+  /// form a few tables over.
+  ///
+  /// base64 gives back most of that and costs no schema change. Raw bytes are
+  /// not an option: `rpc_data`'s payload column is TEXT and the value is
+  /// `jsonEncode`d, so a `Uint8List` would land as an array of integers —
+  /// several times worse than the JSON it replaced.
+  static Map<String, dynamic> _encodePayload(Fugue<String> state) => {
+    'enc': _binaryPayloadTag,
+    'd': base64Encode(_binary.encode(state)),
+  };
+
+  /// Reads either form.
+  ///
+  /// Migration is lazy on purpose: a row is rewritten when its file is next
+  /// edited, never in a sweep at startup. A vault big enough to care about
+  /// the size win is exactly the one that cannot afford rewriting every row
+  /// before sync may begin.
+  static Fugue<String> _decodePayload(Map<String, dynamic> payload) {
+    if (payload['enc'] == _binaryPayloadTag) {
+      return _binary.decode(base64Decode(payload['d'] as String));
+    }
+    return _codec.decode(payload);
+  }
 
   /// Hot cache, LRU-evicted.
   final Map<String, Fugue<String>> _cache = {};
@@ -68,6 +105,13 @@ class FugueStore {
 
   Iterable<String> get fileIds => _knownFileIds;
   int get count => _knownFileIds.length;
+
+  /// Whether a tree is stored for [fileId], without decoding it.
+  ///
+  /// Deliberately not `get(...) != null`: that decodes the tree and pushes it
+  /// through the LRU. Callers that sweep every file (the blob GC) would decode
+  /// the whole vault and evict the working set to answer a yes/no question.
+  bool has(String fileId) => _knownFileIds.contains(fileId);
 
   // ---------------------------------------------------------------------------
   // Reads
@@ -96,7 +140,7 @@ class FugueStore {
     }
     final Fugue<String> seq;
     try {
-      seq = _codec.decode(record.payload);
+      seq = _decodePayload(record.payload);
     } catch (_) {
       // Corrupt row — the next save for this fileId rewrites it.
       return null;
@@ -221,11 +265,10 @@ class FugueStore {
       _knownFileIds.remove(fileId);
       return;
     }
-    final payload = _codec.encode(state)! as Map<String, Object?>;
     await _writeWithRetry(
       collection: _storeCol,
       id: fileId,
-      payload: payload.cast<String, dynamic>(),
+      payload: _encodePayload(state),
     );
     _knownFileIds.add(fileId);
   }

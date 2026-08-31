@@ -57,17 +57,25 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
     _checkAlive();
     if (blobIds.isEmpty) return {};
 
+    // Ids already in flight join their existing call; the rest go out as ONE
+    // new call. Splitting them this way keeps the hub's dedup — two callers
+    // wanting the same blob still share a fetch — while a caller that asked
+    // for many blobs at once pays for one round trip instead of many.
     final joined = <String, _DownloadTask>{};
+    final fresh = <_DownloadTask>[];
     for (final id in blobIds) {
       var task = _downloads[id];
       if (task == null) {
         task = _DownloadTask(id);
         _downloads[id] = task;
-        _scheduleDownload(task);
+        fresh.add(task);
       }
       task.subscribers++;
       joined[id] = task;
     }
+    // After the subscriber counts are up, so a group can never look abandoned
+    // between being scheduled and being waited on.
+    _scheduleDownloadGroup(fresh);
 
     final callerToken = context?.cancellationToken;
     final result = <String, Uint8List>{};
@@ -166,7 +174,7 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
   /// every pending pool waiter. Idempotent.
   void cancelAll([String reason = 'BlobTransferHub.cancelAll']) {
     for (final task in _downloads.values) {
-      task.internalToken.cancel(reason);
+      task.group?.token.cancel(reason);
     }
     for (final task in _uploads.values) {
       task.batch?.token.cancel(reason);
@@ -191,19 +199,30 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
 
   // ---------------------------------------------------------------- impl
 
-  void _scheduleDownload(_DownloadTask task) {
-    final ctx = RpcContext.withCancellation(task.internalToken);
-    _withSlot(() => inner.download([task.id], context: ctx)).then(
+  /// Fetches every id of [tasks] in ONE call, and settles them all from it.
+  void _scheduleDownloadGroup(List<_DownloadTask> tasks) {
+    if (tasks.isEmpty) return;
+    final group = _DownloadGroup(tasks);
+    for (final task in tasks) {
+      task.group = group;
+    }
+    final ctx = RpcContext.withCancellation(group.token);
+    final ids = [for (final task in tasks) task.id];
+    _withSlot(() => inner.download(ids, context: ctx)).then(
       (got) {
-        _downloads.remove(task.id);
-        if (!task.completer.isCompleted) {
-          task.completer.complete(got[task.id]);
+        for (final task in tasks) {
+          _downloads.remove(task.id);
+          if (!task.completer.isCompleted) {
+            task.completer.complete(got[task.id]);
+          }
         }
       },
       onError: (Object e, StackTrace st) {
-        _downloads.remove(task.id);
-        if (!task.completer.isCompleted) {
-          task.completer.completeError(e, st);
+        for (final task in tasks) {
+          _downloads.remove(task.id);
+          if (!task.completer.isCompleted) {
+            task.completer.completeError(e, st);
+          }
         }
       },
     );
@@ -232,23 +251,16 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
 
   void _detachDownload(_DownloadTask task) {
     task.subscribers--;
-    if (task.subscribers <= 0 &&
-        !task.completer.isCompleted &&
-        !task.internalToken.isCancelled) {
-      task.internalToken.cancel('last subscriber left');
-    }
+    final group = task.group;
+    if (group == null || group.token.isCancelled) return;
+    if (group.abandoned) group.token.cancel('last subscriber left');
   }
 
   void _detachUpload(_UploadTask task) {
     task.subscribers--;
     final batch = task.batch;
-    if (batch == null) return;
-    if (task.subscribers <= 0) {
-      batch.liveTasks--;
-      if (batch.liveTasks <= 0 && !batch.token.isCancelled) {
-        batch.token.cancel('last subscriber left');
-      }
-    }
+    if (batch == null || batch.token.isCancelled) return;
+    if (batch.abandoned) batch.token.cancel('last subscriber left');
   }
 
   Future<T> _withSlot<T>(Future<T> Function() body) async {
@@ -305,8 +317,33 @@ class _DownloadTask {
 
   final String id;
   final Completer<Uint8List?> completer = Completer<Uint8List?>();
-  final RpcCancellationToken internalToken = RpcCancellationToken();
   int subscribers = 0;
+
+  /// The in-flight call carrying this id. Several ids share one, so the token
+  /// that can cancel it lives on the group, not here.
+  _DownloadGroup? group;
+}
+
+/// One `inner.download` call and every id it carries.
+///
+/// The hub used to schedule a call per id, which quietly undid batching done
+/// anywhere above it: a caller asking for eight blobs in one list still paid
+/// eight round trips. Grouping is what makes the list on the wire mean
+/// something.
+class _DownloadGroup {
+  _DownloadGroup(this.tasks);
+
+  final List<_DownloadTask> tasks;
+  final RpcCancellationToken token = RpcCancellationToken();
+
+  /// Nobody is waiting for ANY id in this call any more.
+  ///
+  /// The per-id cancellation this replaced could not survive grouping: one
+  /// caller walking away must not take its neighbours' bytes with it, so the
+  /// call dies only when the last of them has.
+  bool get abandoned => tasks.every(
+        (t) => t.completer.isCompleted || t.subscribers <= 0,
+      );
 }
 
 class _UploadTask {
@@ -320,11 +357,22 @@ class _UploadTask {
 }
 
 class _UploadBatch {
-  _UploadBatch(this.tasks) : liveTasks = tasks.length;
+  _UploadBatch(this.tasks);
 
   final List<_UploadTask> tasks;
   final RpcCancellationToken token = RpcCancellationToken();
-  int liveTasks;
+
+  /// Nobody is waiting for ANY id in this call any more.
+  ///
+  /// Recomputed rather than counted down. A live-task counter cannot be
+  /// decremented safely, because a task at zero subscribers is still in
+  /// `_uploads` until it completes and a later caller can join it — after
+  /// which the counter is permanently one too low, and the batch is cancelled
+  /// out from under someone who IS waiting. Same rule, and the same shape, as
+  /// [_DownloadGroup.abandoned].
+  bool get abandoned => tasks.every(
+        (t) => t.completer.isCompleted || t.subscribers <= 0,
+      );
 }
 
 class _DeleteCall {

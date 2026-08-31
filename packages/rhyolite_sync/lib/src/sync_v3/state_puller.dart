@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
-import 'bounded_parallel.dart';
 
 /// Pull-side transport mechanics for one sync session.
 ///
@@ -37,10 +36,14 @@ class StatePuller {
     required void Function(SyncEngineEvent event) emit,
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
-    required Future<void> Function(String blobRef, {RpcContext? context})
-        prefetchContentFile,
+    required Future<void> Function(
+      List<String> blobRefs, {
+      RpcContext? context,
+      void Function(String manifestHash, int sent, int total)? onFileProgress,
+    }) prefetchFiles,
     required int downloadConcurrency,
     Future<bool> Function(StateRecord record)? shouldPrefetch,
+    Future<String?> Function(StateRecord record)? pathOfRecord,
     String Function()? clientName,
     String clientVersion = '',
     String clientKind = '',
@@ -52,9 +55,10 @@ class StatePuller {
         _emit = emit,
         _isFatalRejection = isFatalRejection,
         _log = log,
-        _prefetchContentFile = prefetchContentFile,
-        _shouldPrefetch = shouldPrefetch ?? ((_) async => true),
+        _prefetchFiles = prefetchFiles,
         _downloadConcurrency = downloadConcurrency,
+        _shouldPrefetch = shouldPrefetch ?? ((_) async => true),
+        _pathOfRecord = pathOfRecord ?? ((_) async => null),
         _clientName = clientName ?? (() => ''),
         _clientVersion = clientVersion,
         _clientKind = clientKind;
@@ -78,11 +82,21 @@ class StatePuller {
   final bool Function(Object error) _isFatalRejection;
   final LogScope _log;
 
-  /// Downloads one file's content (manifest + chunks) into the local blob
-  /// cache. Runs concurrently across files during prefetch so the subsequent
-  /// (serial) apply is an all-cache-hit assemble.
-  final Future<void> Function(String blobRef, {RpcContext? context})
-      _prefetchContentFile;
+  /// Max prefetch groups in flight at once.
+  final int _downloadConcurrency;
+
+  /// Warms the local blob cache for a whole batch of files at once, so the
+  /// subsequent (serial) apply is an all-cache-hit assemble.
+  ///
+  /// Takes the batch rather than one file because the cost here is round
+  /// trips, not bytes: per file it was a request for the manifest and then
+  /// another for its chunks, and no amount of running four of those in
+  /// parallel changes that 207 files cost 414 requests.
+  final Future<void> Function(
+    List<String> blobRefs, {
+    RpcContext? context,
+    void Function(String manifestHash, int sent, int total)? onFileProgress,
+  }) _prefetchFiles;
 
   /// Whether a record's content is worth pulling down at all — the device's
   /// folder/type filter, asked per record.
@@ -96,8 +110,14 @@ class StatePuller {
   /// that shipped before the filters existed.
   final Future<bool> Function(StateRecord record) _shouldPrefetch;
 
-  /// Max concurrent file prefetches (mirrors the upload worker-pool bound).
-  final int _downloadConcurrency;
+  /// A record's path, for naming a transfer in the UI. Costs a decrypt, so it
+  /// is asked only for files big enough that the silence would read as a hang.
+  final Future<String?> Function(StateRecord record) _pathOfRecord;
+
+  /// Below this, a file finishes before anyone could wonder whether it is
+  /// stuck, and naming it would cost a decrypt per record for nothing.
+  static const int _narrateAboveBytes = 1 << 20; // 1 MiB
+
 
   /// Human-readable device label reported with the head so the
   /// device-management UI can name this device.
@@ -118,7 +138,12 @@ class StatePuller {
   /// (with a surfaced event) rather than blocking the cursor further.
   static const int _maxApplyAttempts = 5;
 
-  Future<void> pull({RpcContext? context}) async {
+  /// Returns the blob ids this pull touched — every record's manifest plus
+  /// its chunks. The caller uses them to sweep just what was staged instead
+  /// of the whole cache: prefetch writes downloaded chunks there to hand them
+  /// to apply, and once apply has written the file the vault holds those bytes
+  /// itself. Empty when the pull applied nothing.
+  Future<Set<String>> pull({RpcContext? context}) async {
     final caller = stateCaller;
 
     final swPullTotal = Stopwatch()..start();
@@ -148,7 +173,7 @@ class StatePuller {
     if (_isEpochAhead(response.epoch, store.serverEpoch)) {
       _log.info('Pull: server epoch ahead, forcing restore');
       await _handleEpochMismatch(response.epoch);
-      return;
+      return const {};
     }
 
     if (response.records.isEmpty) {
@@ -164,7 +189,7 @@ class StatePuller {
       }
       // Pull was a no-op — don't flash the indicator; SyncPulling was
       // never emitted in this path.
-      return;
+      return const {};
     }
 
     // Real download starts here. Emit SyncPulling so the indicator
@@ -217,6 +242,43 @@ class StatePuller {
     String? maxFilePath;
     var fileIdx = 0;
     final failedFileIds = <String>{};
+    final applyYielder = TimeBudgetYielder();
+
+    // Files whose records have not been applied yet. A file leaves only on a
+    // successful apply, so a failed one keeps holding the cursor back — which
+    // is what makes an early commit safe.
+    final unapplied = Set<String>.from(fileIds);
+
+    /// Commits the progress made so far.
+    ///
+    /// The cursor may advance to just below the smallest serverSeq still
+    /// unapplied — never to the batch's own max, because [fileIds] is ordered
+    /// by size rather than by seq and a later batch can hold a smaller one.
+    ///
+    /// Why per batch at all: the cursor used to be committed once, after the
+    /// whole loop, while `throwIfCancelled` sits inside it and a pull is
+    /// preemptible by design. An interactive edit arriving mid-pull therefore
+    /// threw away every batch's progress even though the files were applied
+    /// and persisted — and the next pull re-downloaded the identical records,
+    /// which on a big vault is what "the counter resets and sync starts over"
+    /// looked like. Cheap now that the meta row no longer carries a map per
+    /// file.
+    Future<void> commitProgress() async {
+      int? minUnapplied;
+      for (final fid in unapplied) {
+        for (final r in byFile[fid]!) {
+          if (minUnapplied == null || r.serverSeq < minUnapplied) {
+            minUnapplied = r.serverSeq;
+          }
+        }
+      }
+      final safe = minUnapplied == null ? response.cursor : minUnapplied - 1;
+      // Monotone. Nothing here may walk the cursor backwards: an applied file
+      // has left [unapplied], so the bound only ever rises.
+      if (safe <= store.serverCursor) return;
+      store.setServerCursor(safe);
+      await store.persistMeta();
+    }
 
     // Interleaved pipeline: for each batch of fileIds, prefetch only that
     // batch's blobs, then apply the batch, then move on. UI sees the first
@@ -257,7 +319,6 @@ class StatePuller {
 
       swApplyTotal.start();
       for (final fileId in batchFileIds) {
-        context?.cancellationToken?.throwIfCancelled();
         fileIdx += 1;
         _log.info(
           'Pull: applying file $fileIdx/$totalFiles '
@@ -266,15 +327,24 @@ class StatePuller {
         );
         final swFile = Stopwatch()..start();
         try {
+          // Inside the try, so a preemption arriving mid-batch reaches the
+          // handler below and commits what this batch already applied.
+          context?.cancellationToken?.throwIfCancelled();
           await _applyFile(fileId, byFile[fileId]!, resolver, context: context);
           // Success ends any prior failure streak for this file.
           _applyAttempts.remove(fileId);
+          unapplied.remove(fileId);
         } catch (e) {
           // Preemption/cancellation aborts the WHOLE pull — it must not be
           // recorded as a per-file failure (that would advance-past or
           // hold-retry a file we simply chose to defer). Re-throw so the
-          // engine's triggerPull catches it and re-schedules the pull.
-          if (e is RpcCancelledException) rethrow;
+          // engine's triggerPull catches it and re-schedules the pull, but
+          // bank the progress first: discarding it is what made a preempted
+          // pull re-download everything it had already applied.
+          if (e is RpcCancelledException) {
+            await commitProgress();
+            rethrow;
+          }
           // A fatal policy/auth rejection means every subsequent record
           // will fail the same way. Bubble it out so the top-level start()
           // catch can emit a typed event and stop the engine — without
@@ -298,9 +368,15 @@ class StatePuller {
         // main thread with Obsidian; without this every fileId's compute
         // chain (decode + reconcile + materialise) runs back-to-back and
         // freezes the UI for the duration of the pull.
-        await Future<void>.delayed(Duration.zero);
+        //
+        // Budgeted, not per file: this used to pay a clamped setTimeout for
+        // every record, including the ones that applied in microseconds
+        // because disk already held them — which on a full-vault pull is
+        // thousands of timers bought for nothing.
+        await applyYielder.maybeYield();
       }
       swApplyTotal.stop();
+      await commitProgress();
     }
 
     if (totalMissing > 0) {
@@ -323,12 +399,16 @@ class StatePuller {
       await Future<void>.delayed(Duration.zero);
       final stillFailed = <String>{};
       for (final fid in failedFileIds) {
-        context?.cancellationToken?.throwIfCancelled();
         try {
+          context?.cancellationToken?.throwIfCancelled();
           await _applyFile(fid, byFile[fid]!, resolver, context: context);
           _applyAttempts.remove(fid);
+          unapplied.remove(fid);
         } catch (e) {
-          if (e is RpcCancelledException) rethrow;
+          if (e is RpcCancelledException) {
+            await commitProgress();
+            rethrow;
+          }
           if (_isFatalRejection(e)) rethrow;
           stillFailed.add(fid);
           _log.warning('In-pull retry still failing $fid: $e');
@@ -388,7 +468,10 @@ class StatePuller {
       }
     }
 
-    store.setServerCursor(effectiveCursor);
+    // Never below what the batches already committed — see [commitProgress].
+    if (effectiveCursor > store.serverCursor) {
+      store.setServerCursor(effectiveCursor);
+    }
     _adoptEpoch(response.epoch);
     // Persist cursor + ownContext + recorded LCAs now, at the pull's
     // convergence point. Register rows are persisted per-file (persistOne),
@@ -431,6 +514,13 @@ class StatePuller {
     // device has caught up; reporting the held (lower) cursor is the
     // conservative choice.
     unawaited(_reportHistoryHead(effectiveCursor));
+
+    return <String>{
+      for (final r in response.records) ...[
+        if (r.blobRef.isNotEmpty) r.blobRef,
+        ...r.chunks,
+      ],
+    };
   }
 
   Future<void> _reportHistoryHead(int headSeq) async {
@@ -453,7 +543,20 @@ class StatePuller {
   /// Number of fileIds whose blobs are prefetched and applied together
   /// inside [pull]. See the interleaved pipeline block in [pull] for the
   /// trade-off (UI feedback vs per-batch atomicity).
-  static const int _pullFileBatchSize = 8;
+  /// Files per interleaved prefetch+apply step.
+  ///
+  /// Raised from 8 once prefetch started batching: the round trips a step
+  /// costs no longer scale with it (one request for the step's manifests, one
+  /// for its chunks, spread over [_prefetchGroupSize] concurrent groups), so a
+  /// small step just meant more sequential steps. It still bounds how much
+  /// work is done before the first files appear.
+  static const int _pullFileBatchSize = 32;
+
+  /// Files per prefetch REQUEST inside a step. The step is fetched as several
+  /// of these at once: batching alone made each request fatter and therefore
+  /// slower, and with only one in flight that lost more than it saved —
+  /// measured, 255 blobs went from 39 s to 74 s. Fat requests AND overlap.
+  static const int _prefetchGroupSize = 8;
 
   /// Counts how many distinct blobRefs from [records] are not yet in the
   /// local cache. Used by [pull] to emit a stable progress total across
@@ -501,40 +604,88 @@ class StatePuller {
 
     final interleaved = progressTotal != null;
     final total = progressTotal ?? refs.length;
-    final concurrency = _downloadConcurrency.clamp(1, refs.length);
     if (!interleaved) {
-      _log.info(
-          'Pull: prefetching ${refs.length} file(s) (x$concurrency parallel)…');
+      _log.info('Pull: prefetching ${refs.length} file(s)…');
       _emit(SyncBlobDownloadProgress(completed: 0, total: total));
     }
     final swatch = Stopwatch()..start();
 
-    var done = 0;
-    await boundedParallel(refs, concurrency, (ref) async {
+    // Each group is one request for its manifests and one for its chunks;
+    // several groups run at once. Both halves matter: batching cuts the number
+    // of round trips, overlap keeps the link busy while any one of them is in
+    // flight. Progress steps per group rather than per file — the round trips
+    // saved are what the user was actually waiting on.
+    final list = refs.toList();
+    final groups = <List<String>>[
+      for (var i = 0; i < list.length; i += _prefetchGroupSize)
+        list.sublist(
+          i,
+          i + _prefetchGroupSize > list.length
+              ? list.length
+              : i + _prefetchGroupSize,
+        ),
+    ];
+    // Records by the blob they carry, so a progress report keyed by manifest
+    // hash can be named. Only consulted above [_narrateAboveBytes].
+    final recordOfRef = <String, StateRecord>{
+      for (final r in records)
+        if (r.blobRef.isNotEmpty) r.blobRef: r,
+    };
+    final namedRefs = <String, String>{};
+    final concurrency = _downloadConcurrency.clamp(1, groups.length);
+    await boundedParallel(groups, concurrency, (group) async {
       context?.cancellationToken?.throwIfCancelled();
       try {
-        await _prefetchContentFile(ref, context: context);
+        await _prefetchFiles(
+          group,
+          context: context,
+          onFileProgress: (ref, sent, total) {
+            if (total < _narrateAboveBytes) return;
+            final known = namedRefs[ref];
+            if (known != null) {
+              _emitTransfer(known, sent, total);
+              return;
+            }
+            final record = recordOfRef[ref];
+            if (record == null) return;
+            // Fire-and-forget: the decrypt must not hold up the transfer it
+            // is describing, and a later report for the same file will find
+            // the name cached.
+            unawaited(_pathOfRecord(record).then((path) {
+              if (path == null || path.isEmpty) return;
+              namedRefs[ref] = path;
+              _emitTransfer(path, sent, total);
+            }, onError: (_) {}));
+          },
+        );
       } catch (e) {
         // A preempted pull must abort so the lane frees for the push; every
-        // other failure stays best-effort — the file's apply hold-and-retries.
+        // other failure stays best-effort — each file's apply hold-and-retries.
         if (e is RpcCancelledException) rethrow;
-        _log.warning('Pull: prefetch failed for ${ref.substring(0, 8)}...: $e');
+        _log.warning('Pull: prefetch failed for ${group.length} file(s): $e');
       }
-      done += 1;
-      _emit(SyncBlobDownloadProgress(
-        completed: (progressOffset + done).clamp(0, total),
-        total: total,
-      ));
     });
+    _emit(SyncBlobDownloadProgress(
+      completed: (progressOffset + refs.length).clamp(0, total),
+      total: total,
+    ));
 
     if (!interleaved) {
       _emit(SyncBlobDownloadDone(
           totalDownloaded: refs.length, elapsed: swatch.elapsed));
       _log.info('Pull: prefetched ${refs.length} file(s) in '
-          '${swatch.elapsed.inSeconds}s (x$concurrency)');
+          '${swatch.elapsed.inSeconds}s');
     }
     return refs.length;
   }
+
+  void _emitTransfer(String path, int sent, int total) => _emit(SyncBlobTransfer(
+        path: path,
+        upload: false,
+        sentBytes: sent,
+        totalBytes: total,
+        done: false,
+      ));
 
   bool _isEpochAhead(int serverEpoch, int? localEpoch) =>
       localEpoch != null && serverEpoch > localEpoch;

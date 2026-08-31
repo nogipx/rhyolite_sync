@@ -119,7 +119,7 @@ class RemoteApplier {
     final swApply = Stopwatch()..start();
     final swDecodeSum = Stopwatch();
     final tagged = <TaggedValue<FileState>>[];
-    var decodedSinceYield = 0;
+    final decodeYielder = TimeBudgetYielder();
     for (final r in records) {
       try {
         swDecodeSum.start();
@@ -134,8 +134,8 @@ class RemoteApplier {
         // file-write/delete primitive on every other device.
         if (!isSafeVaultRelPath(decoded.value.path)) {
           _log.warning(
-            'Rejecting record with unsafe path fileId=${r.fileId} '
-            'path="${decoded.value.path}"',
+            'Rejecting record with unsafe path fileId=${r.fileId}',
+            data: {'path': LogPath(decoded.value.path)},
           );
           _emit(
             SyncRecordSkipped(
@@ -185,11 +185,9 @@ class RemoteApplier {
           ),
         );
       }
-      decodedSinceYield += 1;
-      if (decodedSinceYield >= 4) {
-        decodedSinceYield = 0;
-        await Future<void>.delayed(Duration.zero);
-      }
+      // Decode is sync compute proportional to the record's size, so a fixed
+      // stride is the wrong unit here too.
+      await decodeYielder.maybeYield();
     }
     if (tagged.isEmpty) {
       swApply.stop();
@@ -239,8 +237,8 @@ class RemoteApplier {
     // question.
     if (knownPath.isNotEmpty && store.get(fileId) != null) {
       _log.info(
-        'apply preReconcile begin fileId=${fileId.substring(0, 8)} '
-        'path=$knownPath',
+        'apply preReconcile begin fileId=${fileId.substring(0, 8)}',
+        data: {'path': LogPath(knownPath)},
       );
       swPreReconcile.start();
       try {
@@ -250,7 +248,10 @@ class RemoteApplier {
         // rejection here will fire on every file in the batch, freezing
         // the host with hundreds of redundant attempts. Bail.
         if (_isFatalRejection(e)) rethrow;
-        _log.warning('Pre-join reconcile failed for $fileId ($knownPath): $e');
+        _log.warning(
+          'Pre-join reconcile failed for $fileId: $e',
+          data: {'path': LogPath(knownPath)},
+        );
       }
       swPreReconcile.stop();
       _log.info(
@@ -283,12 +284,13 @@ class RemoteApplier {
     if (joined.values.isEmpty) {
       swApply.stop();
       _log.info(
-        'apply fileId=$fileId path=$knownPath records=${records.length} '
+        'apply fileId=$fileId records=${records.length} '
         'tagged=${tagged.length} '
         'decode=${swDecodeSum.elapsedMilliseconds}ms '
         'preReconcile=${swPreReconcile.elapsedMilliseconds}ms '
         'applyRemote=${swApplyRemote.elapsedMilliseconds}ms '
         'total=${swApply.elapsedMilliseconds}ms result=empty',
+        data: {'path': LogPath(knownPath)},
       );
       return;
     }
@@ -310,8 +312,9 @@ class RemoteApplier {
       _emit(SyncFileOutOfScope(path: scopedPath));
       swApply.stop();
       _log.info(
-        'apply fileId=$fileId path=$scopedPath records=${records.length} '
+        'apply fileId=$fileId records=${records.length} '
         'total=${swApply.elapsedMilliseconds}ms result=out-of-scope',
+        data: {'path': LogPath(scopedPath)},
       );
       return;
     }
@@ -326,13 +329,14 @@ class RemoteApplier {
       // grep `apply ` → find the file that ate the most ms → drill into
       // its `fugue materialise ...` line for decode/project split.
       _log.info(
-        'apply fileId=$fileId path=$knownPath records=${records.length} '
+        'apply fileId=$fileId records=${records.length} '
         'tagged=${tagged.length} '
         'decode=${swDecodeSum.elapsedMilliseconds}ms '
         'preReconcile=${swPreReconcile.elapsedMilliseconds}ms '
         'applyRemote=${swApplyRemote.elapsedMilliseconds}ms '
         'materialise=${swMaterialise.elapsedMilliseconds}ms '
         'total=${swApply.elapsedMilliseconds}ms result=single',
+        data: {'path': LogPath(knownPath)},
       );
       return;
     }
@@ -376,7 +380,7 @@ class RemoteApplier {
       swResolve.stop();
       swApply.stop();
       _log.info(
-        'apply fileId=$fileId path=$conflictPath records=${records.length} '
+        'apply fileId=$fileId records=${records.length} '
         'tagged=${tagged.length} '
         'decode=${swDecodeSum.elapsedMilliseconds}ms '
         'preReconcile=${swPreReconcile.elapsedMilliseconds}ms '
@@ -384,6 +388,7 @@ class RemoteApplier {
         'resolveText=${swResolve.elapsedMilliseconds}ms '
         'total=${swApply.elapsedMilliseconds}ms '
         'result=${selfEcho ? 'self-echo' : 'text-conflict'}',
+        data: {'path': LogPath(conflictPath)},
       );
       return;
     }
@@ -396,13 +401,14 @@ class RemoteApplier {
     swResolveBinary.stop();
     swApply.stop();
     _log.info(
-      'apply fileId=$fileId path=$conflictPath records=${records.length} '
+      'apply fileId=$fileId records=${records.length} '
       'tagged=${tagged.length} '
       'decode=${swDecodeSum.elapsedMilliseconds}ms '
       'preReconcile=${swPreReconcile.elapsedMilliseconds}ms '
       'applyRemote=${swApplyRemote.elapsedMilliseconds}ms '
       'resolveBinary=${swResolveBinary.elapsedMilliseconds}ms '
       'total=${swApply.elapsedMilliseconds}ms result=binary-conflict',
+      data: {'path': LogPath(conflictPath)},
     );
   }
 
@@ -786,6 +792,10 @@ class RemoteApplier {
     // whose extension the user excluded on this device. Record it as synced so
     // it isn't re-attempted every pull; the register metadata is applied, just
     // no local file. Re-including the type re-fetches via "Download from server".
+    // The authoritative download gate. A record for one of ours should never
+    // exist — nothing uploads them — but a peer on an older build could have
+    // made one before this rule existed, and it must not land on disk here.
+    if (isNeverSynced(state.path)) return null;
     final excluded = _excludedExtensions();
     if (excluded.isNotEmpty && state.blobRef.isNotEmpty) {
       final ext = FileTypeDetector.extensionOf(state.path);

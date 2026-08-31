@@ -181,7 +181,9 @@ class CausalStabilityGc {
             if (nowMs - ts.hlc.millis < backfillMinAgeMs) continue;
             seq = store.serverCursor;
             store.recordServerSeq(fileId, seq);
-            metaDirty = true;
+            // serverSeq lives on the file's own row now, so this is what makes
+            // the backfill durable — persistMeta no longer carries it.
+            await store.persistOne(fileId);
           }
           if (seq > minSafeHead) continue;
           store.remove(fileId);

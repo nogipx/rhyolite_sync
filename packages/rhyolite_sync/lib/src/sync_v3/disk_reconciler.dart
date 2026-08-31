@@ -40,7 +40,14 @@ import '../frontmatter/frontmatter_split.dart';
 class DiskReconciler {
   /// Only files at least this big emit [SyncBlobTransfer] events — small notes
   /// would flash through the active-transfers monitor as noise.
-  static const int _transferMonitorMinBytes = 256 * 1024;
+  ///
+  /// Public so [StateStartupDiff] narrates from the same threshold: it uploads
+  /// the same files on the startup and re-upload paths, and two copies of this
+  /// number would drift into "the monitor shows a file when you edit it but
+  /// not when you re-upload the vault".
+  static const int transferMonitorMinBytes = 256 * 1024;
+
+  static const int _transferMonitorMinBytes = transferMonitorMinBytes;
 
   DiskReconciler({
     required this.vaultPath,
@@ -189,6 +196,11 @@ class DiskReconciler {
       return false;
     }
 
+    // Ours, and never the server's — a diagnostic report lives in the vault
+    // only so the user can share it. Unconditional, so no filter setting can
+    // let it through, and ahead of every other admission test.
+    if (isNeverSynced(relPath)) return false;
+
     // Type admission (per-device denylist): a file whose extension the user
     // excluded ON THIS DEVICE is never read/chunked/uploaded. Cheap (extension
     // string only). Takes precedence over the size check. A denylist change
@@ -277,9 +289,10 @@ class DiskReconciler {
     final lastRef = store.lastSyncedBlobRefFor(state.fileId);
     if (state.blobRef.isNotEmpty && state.blobRef == lastRef) {
       _log.info(
-        'disk write path=${state.path} bytes=0 '
+        'disk write bytes=0 '
         'download=0ms compare=0ms write=0ms total=0ms '
         'result=skipped-already-synced',
+        data: {'path': LogPath(state.path)},
       );
       return true;
     }
@@ -316,11 +329,15 @@ class DiskReconciler {
         // "download failed", and the file retried forever with nothing to
         // explain why.
         _log.error(
-          'Refusing to write ${state.path}: $e — update this client',
+          'Refusing to write: $e — update this client',
+          data: {'path': LogPath(state.path)},
         );
         _emit(SyncFileFormatUnsupported(path: state.path));
       } catch (e) {
-        _log.warning('Chunked download failed for ${state.path}: $e');
+        _log.warning(
+          'Chunked download failed: $e',
+          data: {'path': LogPath(state.path)},
+        );
       } finally {
         if (monitor) {
           _emit(SyncBlobTransfer(
@@ -338,7 +355,10 @@ class DiskReconciler {
       final tag = state.blobRef.length < 8
           ? state.blobRef
           : state.blobRef.substring(0, 8);
-      _log.warning('Blob not available: $tag for ${state.path}');
+      _log.warning(
+        'Blob not available: $tag',
+        data: {'path': LogPath(state.path)},
+      );
       return false;
     }
 
@@ -377,11 +397,12 @@ class DiskReconciler {
       bytes = Uint8List.fromList(utf8.encode(fugue.values.join()));
       swProject.stop();
       _log.info(
-        'fugue materialise path=${state.path} '
+        'fugue materialise '
         'elements=${fugue.elementCount} '
         'decode=${swDecode.elapsedMilliseconds}ms '
         'project=${swProject.elapsedMilliseconds}ms '
         'projected=${bytes.length}B',
+        data: {'path': LogPath(state.path)},
       );
     } else if (kind == BlobKind.legacySequence) {
       // A pre-Fugue Sequence blob from a not-yet-upgraded peer. Its bytes
@@ -389,7 +410,8 @@ class DiskReconciler {
       // without advancing the LCA so a reseed (from this device's own
       // reconcile-from-disk, or an upgraded peer) replaces it.
       _log.warning(
-        'Skipping legacy Sequence blob for ${state.path} — awaiting reseed',
+        'Skipping legacy Sequence blob — awaiting reseed',
+        data: {'path': LogPath(state.path)},
       );
       return false;
     } else if (kind == BlobKind.unknownTagged) {
@@ -401,8 +423,9 @@ class DiskReconciler {
       // Not advancing the LCA is deliberate: an updated client re-materialises
       // it later without any repair step.
       _log.error(
-        'Refusing to write ${state.path}: blob is in an unsupported format '
+        'Refusing to write: blob is in an unsupported format '
         '(written by a newer client) — update this client',
+        data: {'path': LogPath(state.path)},
       );
       _emit(SyncFileFormatUnsupported(path: state.path));
       return false;
@@ -426,12 +449,13 @@ class DiskReconciler {
           skippedIdentical = true;
           swWriteTotal.stop();
           _log.info(
-            'disk write path=${state.path} bytes=${bytes.length} '
+            'disk write bytes=${bytes.length} '
             'download=${swDownload.elapsedMilliseconds}ms '
             'compare=${swCompare.elapsedMilliseconds}ms '
             'write=0ms '
             'total=${swWriteTotal.elapsedMilliseconds}ms '
             'result=skipped-identical',
+            data: {'path': LogPath(state.path)},
           );
           return true;
         }
@@ -469,9 +493,10 @@ class DiskReconciler {
       if (lastRef == null && !everRead) {
         swWriteTotal.stop();
         _log.warning(
-          'Not overwriting ${state.path}: it holds content this device never '
+          'Not overwriting: it holds content this device never '
           'synced (${bytes.length}B incoming). Kept on disk so the next pass '
           'merges it instead of replacing it.',
+          data: {'path': LogPath(state.path)},
         );
         _emit(SyncFileKeptUnsynced(fileId: state.fileId, path: state.path));
         return false;
@@ -491,12 +516,13 @@ class DiskReconciler {
     _emit(SyncFilePulled(fileId: state.fileId, nodeCount: 0, path: state.path));
     swWriteTotal.stop();
     _log.info(
-      'disk write path=${state.path} bytes=${bytes.length} '
+      'disk write bytes=${bytes.length} '
       'download=${swDownload.elapsedMilliseconds}ms '
       'compare=${swCompare.elapsedMilliseconds}ms '
       'write=${swWrite.elapsedMilliseconds}ms '
       'total=${swWriteTotal.elapsedMilliseconds}ms '
       'result=${skippedIdentical ? 'unreachable' : 'written'}',
+      data: {'path': LogPath(state.path)},
     );
     return true;
   }
@@ -534,10 +560,11 @@ class DiskReconciler {
       if (fugue != null) {
         if (swDl.elapsedMilliseconds + swDecode.elapsedMilliseconds > 500) {
           _log.info(
-            'seed $relPath: fugue blob bytes=${bytes.length} '
+            'seed fugue blob bytes=${bytes.length} '
             'dl=${swDl.elapsedMilliseconds}ms '
             'decode=${swDecode.elapsedMilliseconds}ms '
             'elements=${fugue.elementCount}',
+            data: {'path': LogPath(relPath)},
           );
         }
         return fugue;
@@ -546,7 +573,10 @@ class DiskReconciler {
       // from its raw bytes would produce garbage. Return empty so the caller
       // reseeds from the current disk content instead.
       if (kind == BlobKind.legacySequence) {
-        _log.info('seed path=$relPath legacy Sequence blob — reseed from disk');
+        _log.info(
+          'seed legacy Sequence blob — reseed from disk',
+          data: {'path': LogPath(relPath)},
+        );
         return Fugue<String>();
       }
       // A format this build cannot read. Unlike the legacy case there is no
@@ -565,9 +595,10 @@ class DiskReconciler {
       final seeded = FugueTextSync.seedFromText(text);
       swSeed.stop();
       _log.info(
-        'seed path=$relPath plain-text chars=${text.length} '
+        'seed plain-text chars=${text.length} '
         'dl=${swDl.elapsedMilliseconds}ms '
         'seed=${swSeed.elapsedMilliseconds}ms',
+        data: {'path': LogPath(relPath)},
       );
       return seeded;
     } on UnsupportedBlobFormatException {
@@ -575,7 +606,7 @@ class DiskReconciler {
       // is exactly the overwrite the throw exists to prevent.
       rethrow;
     } catch (e) {
-      _log.warning('Fugue seed failed for $relPath: $e');
+      _log.warning('Fugue seed failed: $e', data: {'path': LogPath(relPath)});
       return Fugue<String>();
     }
   }
@@ -689,7 +720,10 @@ class DiskReconciler {
 
     final chunkedIO = _chunkedIOBuilder();
     if (chunkedIO == null) {
-      _log.warning('Chunked IO unavailable (no remote storage) for $relPath');
+      _log.warning(
+        'Chunked IO unavailable (no remote storage)',
+        data: {'path': LogPath(relPath)},
+      );
       return false;
     }
 
@@ -758,7 +792,8 @@ class DiskReconciler {
     // path the server never heard of needs no delete.
     if (!await io.fileExists(absPath)) {
       _log.info(
-        'Abandoning reconcile of $relPath: gone from disk during upload',
+        'Abandoning reconcile: gone from disk during upload',
+        data: {'path': LogPath(relPath)},
       );
       return false;
     }
@@ -799,7 +834,7 @@ class DiskReconciler {
     }
 
     final swTotal = Stopwatch()..start();
-    _log.info('text reconcile begin path=$relPath');
+    _log.info('text reconcile begin', data: {'path': LogPath(relPath)});
     final bytes = await io.readFile(absPath);
 
     // Skip empty new/tombstoned files — see _reconcileBinary. No Fugue seed
@@ -809,7 +844,10 @@ class DiskReconciler {
     }
 
     final newText = utf8.decode(bytes, allowMalformed: true);
-    _log.info('text reconcile read path=$relPath chars=${newText.length}');
+    _log.info(
+      'text reconcile read chars=${newText.length}',
+      data: {'path': LogPath(relPath)},
+    );
 
     final swSeed = Stopwatch()..start();
     final ({FmState? fm, Fugue<String> body}) document;
@@ -821,7 +859,10 @@ class DiskReconciler {
       // local edits stay on disk and reach the vault once the client is
       // updated. Returning false leaves the state untouched, exactly as an
       // unavailable blob does.
-      _log.error('Skipping text reconcile for $relPath: $e');
+      _log.error(
+        'Skipping text reconcile: $e',
+        data: {'path': LogPath(relPath)},
+      );
       _emit(SyncFileFormatUnsupported(path: relPath));
       return false;
     }
@@ -839,10 +880,11 @@ class DiskReconciler {
     final split = splitFrontmatter(newText);
 
     _log.info(
-      'text reconcile seed-done path=$relPath '
+      'text reconcile seed-done '
       'elements=${oldSequence.elementCount} '
       'fm=$withFm '
       'seed=${swSeed.elapsedMilliseconds}ms',
+      data: {'path': LogPath(relPath)},
     );
 
     // Raise the local edit clock above every dot already in this file, so
@@ -896,7 +938,10 @@ class DiskReconciler {
       if (barrier != null && seq != null && seq <= barrier) {
         final pruned = pruneFmTombstones(newFm);
         if (!identical(pruned, newFm)) {
-          _log.info('fm gc path=$relPath seq=$seq barrier=$barrier');
+          _log.info(
+            'fm gc seq=$seq barrier=$barrier',
+            data: {'path': LogPath(relPath)},
+          );
           newFm = pruned;
         }
       }
@@ -904,9 +949,10 @@ class DiskReconciler {
     }
     swDiff.stop();
     _log.info(
-      'text reconcile diff-done path=$relPath '
+      'text reconcile diff-done '
       'newElements=${newSequence.elementCount} '
       'diff=${swDiff.elapsedMilliseconds}ms',
+      data: {'path': LogPath(relPath)},
     );
     // Unchanged content is a no-op for any TRACKED file. `current` is null
     // when the register is a multi-value conflict (store.get collapses to
@@ -921,7 +967,7 @@ class DiskReconciler {
     }
 
     final swUpload = Stopwatch()..start();
-    _log.info('text reconcile upload-begin path=$relPath');
+    _log.info('text reconcile upload-begin', data: {'path': LogPath(relPath)});
     final upload = await _uploadSequenceBlob(
       newSequence,
       fm: newFm,
@@ -929,22 +975,27 @@ class DiskReconciler {
     );
     swUpload.stop();
     _log.info(
-      'text reconcile upload-done path=$relPath '
+      'text reconcile upload-done '
       'upload=${swUpload.elapsedMilliseconds}ms',
+      data: {'path': LogPath(relPath)},
     );
     if (upload == null) {
-      _log.warning('Chunked IO unavailable (no remote storage) for $relPath');
+      _log.warning(
+        'Chunked IO unavailable (no remote storage)',
+        data: {'path': LogPath(relPath)},
+      );
       return false;
     }
     swTotal.stop();
     _log.info(
-      'text reconcile path=$relPath chars=${newText.length} '
+      'text reconcile chars=${newText.length} '
       'elements=${newSequence.elementCount} '
       'blob=${upload.blobSize}B '
       'seed=${swSeed.elapsedMilliseconds}ms '
       'diff=${swDiff.elapsedMilliseconds}ms '
       'upload=${swUpload.elapsedMilliseconds}ms '
       'total=${swTotal.elapsedMilliseconds}ms',
+      data: {'path': LogPath(relPath)},
     );
 
     // Last check before any persist — typing during upload aborts
@@ -976,7 +1027,8 @@ class DiskReconciler {
     // path the server never heard of needs no delete.
     if (!await io.fileExists(absPath)) {
       _log.info(
-        'Abandoning reconcile of $relPath: gone from disk during upload',
+        'Abandoning reconcile: gone from disk during upload',
+        data: {'path': LogPath(relPath)},
       );
       return false;
     }
@@ -1080,6 +1132,16 @@ class DiskReconciler {
       bytes,
       _knownChunks(),
       context: context,
+      // These bytes ARE the tree, which [_persistDocument] writes a few lines
+      // below — BEFORE the FileState that names this blob. So no persisted
+      // state ever references a blobRef whose tree is missing, which is what
+      // makes regeneration a complete substitute for caching them here.
+      //
+      // Mirroring them would store the tree twice until the next sweep, and
+      // the sweep runs once a session: a day of editing accumulates a second
+      // copy of everything touched. Note the copy would live in the SAME
+      // database as the tree, so it was never independent redundancy either.
+      cacheLocally: false,
     );
     return (
       manifestHash: result.manifestHash,

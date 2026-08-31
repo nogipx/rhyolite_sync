@@ -27,6 +27,10 @@ export 'src/contract/vault_registry_contract.dart';
 export 'src/changes/i_change_provider.dart';
 export 'src/platform/i_platform_io.dart';
 
+// --- Logging ------------------------------------------------------------
+export 'src/logging/log_path.dart';
+export 'src/sync_v3/never_synced.dart';
+
 // --- Auth + transport interceptor --------------------------------------
 export 'src/auth/auth_keys.dart';
 export 'src/auth/bearer_token_interceptor.dart';
@@ -62,7 +66,7 @@ export 'src/remote/i_vault_meta_storage.dart';
 export 'src/remote/remote_blob_storage_builder.dart';
 export 'src/remote/encrypted_blob_storage.dart';
 export 'src/remote/gzip_blob_storage.dart';
-export 'src/remote/gzip_codec.dart' show gzipBackendName;
+export 'src/remote/gzip_codec.dart' show gzipBackendName, gzipEncode;
 export 'src/remote/remote_blob_storage.dart';
 export 'src/remote/external_blob_config.dart';
 export 'src/remote/http_blob_auth.dart';
@@ -79,6 +83,7 @@ export 'src/engine/sync_engine_event.dart';
 export 'src/engine/vault_config.dart';
 export 'src/sync_v3/blob_classifier.dart';
 export 'src/sync_v3/bounded_parallel.dart';
+export 'src/sync_v3/time_budget_yielder.dart';
 export 'src/sync_v3/blob_janitor.dart';
 export 'src/sync_v3/byo_blob_janitor.dart';
 export 'src/sync_v3/chunked_blob_io.dart';

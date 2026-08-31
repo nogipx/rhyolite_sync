@@ -8,6 +8,14 @@ const kDebug = bool.fromEnvironment('RHYOLITE_DEBUG', defaultValue: false);
 /// `--dart-define=RHYOLITE_LOG_URI=wss://host:port`.
 const kDefaultLogUri = String.fromEnvironment('RHYOLITE_LOG_URI');
 
+/// Where the bug-report modal's "Open Telegram" button goes. The support
+/// channel's direct-message inbox, so reports land where support is already
+/// answered rather than in a personal chat that only scales to one person.
+const kSupportUrl = String.fromEnvironment(
+  'RHYOLITE_SUPPORT_URL',
+  defaultValue: 'https://t.me/rhyolite_sync?direct',
+);
+
 class RhyoliteEnvironment {
   const RhyoliteEnvironment({
     required this.accountServiceUrl,

@@ -29,14 +29,21 @@ import 'package:rpc_dart/rpc_dart.dart';
 /// `"<profile>/appearance.json"`); this layer is profile-agnostic.
 class SettingsSync {
   SettingsSync({
-    required IStateSyncContract remote,
+    /// Resolved per call, never captured.
+    ///
+    /// The engine rebuilds its connection on its own — a reconnect, a
+    /// re-upload, a restore — and a caller bound to the endpoint that existed
+    /// at construction keeps talking to a socket nobody is listening on. That
+    /// failed silently: settings stopped arriving from other devices while
+    /// notes kept syncing, and the only symptom was a retry loop in the log.
+    required IStateSyncContract Function() remote,
     required SettingsStore store,
     required IVaultCipher cipher,
     required this.vaultId,
     required SettingsCrdtKind? Function(String resourceId) kindOf,
     String scope = '',
     void Function(String message)? log,
-  }) : _remote = remote,
+  }) : _remoteOf = remote,
        _scope = scope,
        _store = store,
        _cipher = cipher,
@@ -47,7 +54,9 @@ class SettingsSync {
            cipher is VaultCipher ? cipher.deriveRecordIdKey() : null,
        _log = log;
 
-  final IStateSyncContract _remote;
+  final IStateSyncContract Function() _remoteOf;
+
+  IStateSyncContract get _remote => _remoteOf();
   final SettingsStore _store;
   final IVaultCipher _cipher;
   final Uint8List? _recordIdKey;

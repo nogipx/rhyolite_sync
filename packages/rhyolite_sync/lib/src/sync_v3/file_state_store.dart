@@ -56,6 +56,39 @@ class FileStateStore {
   final Map<String, MvRegister<FileState>> _registers = {};
   final Map<String, String> _lastSyncedBlobRef = {};
 
+  /// Signature of the record this device last got the server to accept, per
+  /// file. Answers "does the server already hold this?", which is a DIFFERENT
+  /// question from [_lastSyncedBlobRef]'s "what is the convergence point with
+  /// other devices" — conflating them is what made every startup re-push every
+  /// file this device had authored.
+  ///
+  /// Push cannot advance the LCA (two devices pushing concurrently would each
+  /// seed their own blob as the merge base and diverge), so a file authored
+  /// here and never pulled back had no record of having been sent. The server
+  /// skips the insert when the HLC already matches, so nothing came back to
+  /// apply, and the loop had no exit.
+  ///
+  /// Lives on the per-file row rather than in the meta row: it is per-file
+  /// data, [persistOne] already writes that row right after a successful push,
+  /// and `wipeAll` drops the whole collection — so a vault reset clears these
+  /// without any separate bookkeeping.
+  final Map<String, String> _lastPushedSignature = {};
+
+  /// Files whose per-file row already carries the LCA and serverSeq.
+  ///
+  /// The migration is lazy and self-healing: a row is rewritten by the
+  /// persistOne that already follows every write of these values, and the id
+  /// then leaves this set, so the meta row shrinks on its own. Nothing
+  /// enumerates the vault to convert it, and there is no version flag —
+  /// correct at every intermediate point, because a value is read from the row
+  /// when the row has it and from meta otherwise.
+  ///
+  /// Order matters and is enforced in [_persistOneInner]: the row is written
+  /// FIRST, the id leaves this set after. A crash in between leaves the value
+  /// in both places, and the row wins — harmless. The reverse order would lose
+  /// it.
+  final Set<String> _migratedIds = {};
+
   /// fileId → the max serverSeq at which this device has pulled a record for
   /// the file. The causal-stability boundary for tombstone GC: a tombstone is
   /// safe to drop only once every active device's pull cursor (headSeq) has
@@ -160,6 +193,17 @@ class FileStateStore {
       _registers[fileId]?.allValues ?? const [];
 
   String? lastSyncedBlobRefFor(String fileId) => _lastSyncedBlobRef[fileId];
+
+  /// The record this device last got the server to accept for [fileId], or
+  /// null if it has never had one accepted.
+  String? lastPushedSignatureFor(String fileId) =>
+      _lastPushedSignature[fileId];
+
+  /// Records that the server accepted [signature] for [fileId]. Call before
+  /// [persistOne], which is what writes it down.
+  void recordPushedSignature(String fileId, String signature) {
+    _lastPushedSignature[fileId] = signature;
+  }
 
   /// The max serverSeq this device has pulled for [fileId], or null if it has
   /// never pulled a record for it (e.g. a locally-created tombstone not yet
@@ -333,6 +377,8 @@ class FileStateStore {
     _registers.remove(fileId);
     _lastSyncedBlobRef.remove(fileId);
     _serverSeq.remove(fileId);
+    _lastPushedSignature.remove(fileId);
+    _migratedIds.remove(fileId);
   }
 
   void recordSyncedBlobRef(String fileId, String blobRef) {
@@ -360,6 +406,20 @@ class FileStateStore {
         if (reg.values.isEmpty) continue;
         final fileId = reg.values.first.value.fileId;
         _registers[fileId] = reg;
+        // Absent on rows written before this existed: the file is then treated
+        // as never pushed, costing one redundant push apiece, once.
+        final signature = r.payload[_pushedSignatureKey];
+        if (signature is String) _lastPushedSignature[fileId] = signature;
+
+        // A row carrying the LCA key has been migrated, and is authoritative
+        // even when the value is empty — empty means "no LCA", not "unknown".
+        final lca = r.payload[_lcaKey];
+        if (lca is String) {
+          _migratedIds.add(fileId);
+          if (lca.isNotEmpty) _lastSyncedBlobRef[fileId] = lca;
+          final seq = r.payload[_serverSeqKey];
+          if (seq is int) _serverSeq[fileId] = seq;
+        }
       } catch (_) {
         // Skip corrupt rows; they get rewritten on next put for that file.
       }
@@ -377,19 +437,25 @@ class FileStateStore {
       _ownContext = ctxStr == null
           ? const CausalContext.empty()
           : CausalContext.unpack(ctxStr);
-      _lastSyncedBlobRef.clear();
+      // Whatever has not migrated yet. A row that carries the values already
+      // supplied them above and wins, so meta is consulted only for the rest —
+      // which is what lets the two coexist while the vault drains.
       final lsbr = meta.payload['lastSyncedBlobRef'] as Map?;
       if (lsbr != null) {
         for (final e in lsbr.entries) {
-          _lastSyncedBlobRef[e.key as String] = e.value as String;
+          final id = e.key as String;
+          if (_migratedIds.contains(id)) continue;
+          final v = e.value;
+          if (v is String && v.isNotEmpty) _lastSyncedBlobRef[id] = v;
         }
       }
-      _serverSeq.clear();
       final ss = meta.payload['serverSeq'] as Map?;
       if (ss != null) {
         for (final e in ss.entries) {
+          final id = e.key as String;
+          if (_migratedIds.contains(id)) continue;
           final v = e.value;
-          if (v is int) _serverSeq[e.key as String] = v;
+          if (v is int) _serverSeq[id] = v;
         }
       }
     } else {
@@ -457,11 +523,25 @@ class FileStateStore {
       } catch (_) {}
       return;
     }
+    final signature = _lastPushedSignature[fileId];
+    final seq = _serverSeq[fileId];
     await _writeWithRetry(
       collection: _storeCol,
       id: fileId,
-      payload: _encodeRegister(reg),
+      payload: {
+        ..._encodeRegister(reg),
+        // Siblings of the register's own keys. MvRegisterCodec.decode reads
+        // `v` and `values` and ignores the rest, so these ride along without a
+        // format change or extra rows to keep in step.
+        if (signature != null) _pushedSignatureKey: signature,
+        // Always written, empty included — see [_lcaKey].
+        _lcaKey: _lastSyncedBlobRef[fileId] ?? '',
+        if (seq != null) _serverSeqKey: seq,
+      },
     );
+    // Only after the row is safely written. Until then meta must keep its copy,
+    // or a crash here would lose the value entirely.
+    _migratedIds.add(fileId);
   }
 
   Future<void> persistMeta() => _serialise('meta', () => _persistMetaInner());
@@ -473,8 +553,17 @@ class FileStateStore {
       if (_deviceId != null) 'deviceId': _deviceId,
       'ownContext': _ownContext.pack(),
       'fugueCounter': _fugueClock?.value ?? 0,
-      'lastSyncedBlobRef': _lastSyncedBlobRef,
-      'serverSeq': _serverSeq,
+      // Only what has not moved to a per-file row yet. This shrinks to nothing
+      // as the vault is touched, which is the point: it used to hold every
+      // file's entry and was re-read and rewritten whole on every call.
+      'lastSyncedBlobRef': {
+        for (final e in _lastSyncedBlobRef.entries)
+          if (!_migratedIds.contains(e.key)) e.key: e.value,
+      },
+      'serverSeq': {
+        for (final e in _serverSeq.entries)
+          if (!_migratedIds.contains(e.key)) e.key: e.value,
+      },
     };
     await _writeWithRetry(collection: _metaCol, id: _metaId, payload: payload);
   }
@@ -543,6 +632,8 @@ class FileStateStore {
     _registers.clear();
     _lastSyncedBlobRef.clear();
     _serverSeq.clear();
+    _lastPushedSignature.clear();
+    _migratedIds.clear();
     _serverCursor = 0;
     _serverEpoch = null;
     _ownContext = const CausalContext.empty();
@@ -562,6 +653,19 @@ class FileStateStore {
   /// Codec for the per-fileId register row. Schema versioning is owned
   /// by `convergent` (envelope `"v"`); payload-level `FileState`
   /// versioning lives in [FileState.toJson] / [FileState.fromJson].
+  /// Key for [_lastPushedSignature] inside a per-file row.
+  static const _pushedSignatureKey = 'pushedSig';
+
+  /// Keys for the two per-file facts that used to live in the meta row.
+  ///
+  /// [_lcaKey] is written on EVERY persistOne, empty string included, because
+  /// its presence is what marks a row as migrated. Without that marker a file
+  /// that simply has no LCA would be indistinguishable from one not yet moved,
+  /// and the meta fallback would keep resurrecting a value the row had
+  /// deliberately cleared.
+  static const _lcaKey = 'lca';
+  static const _serverSeqKey = 'srvSeq';
+
   static const _registerCodec = MvRegisterCodec<FileState>(FileStateCodec());
 
   Map<String, dynamic> _encodeRegister(MvRegister<FileState> reg) =>

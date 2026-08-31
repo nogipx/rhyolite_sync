@@ -91,6 +91,11 @@ import 'self_host_modal.dart';
   // this device's debug logs to a collector URL for support/debugging.
   required DiagnosticsPrefs Function() diagnosticsPrefs,
   required Future<void> Function(DiagnosticsPrefs next) onDiagnosticsChanged,
+  // Opens the bug-report flow. Also reachable from the command palette, which
+  // is the path that still works when boot failed before this tab was built.
+  required Future<void> Function() onCreateBugReport,
+  // Erases the on-device diagnostic logs. Logging continues afterwards.
+  required Future<void> Function() onClearLogs,
   // Per-device sync filters (folders + file types this device skips, both
   // uploading and downloading). Device-local; default empty (sync all).
   // Applying them restarts the engine — see [addDeviceFiltersSection].
@@ -412,6 +417,23 @@ import 'self_host_modal.dart';
     void addDiagnosticsSection(PluginSettingsTab t) {
       final prefs = diagnosticsPrefs();
       t.addSection(S.diagnosticsSection);
+      // First in the section, above the collector rows: this is the one thing
+      // here an ordinary user is ever meant to press. The collector below it
+      // is a developer tool that happens to live under the same heading.
+      t.addButton(
+        name: S.bugReportSettingName,
+        description: S.bugReportSettingDescription,
+        buttonText: S.bugReportCreate,
+        onClick: onCreateBugReport,
+      );
+      // Next to the report button: the two are the same subject — the logs
+      // this device keeps — seen from opposite ends.
+      t.addButton(
+        name: S.clearLogsName,
+        description: S.clearLogsDescription,
+        buttonText: S.clearLogsButton,
+        onClick: onClearLogs,
+      );
       t.addText(
         name: S.logCollectorUrl,
         description: S.logCollectorDescription,

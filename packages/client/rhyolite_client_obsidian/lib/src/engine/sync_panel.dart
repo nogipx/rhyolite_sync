@@ -578,6 +578,17 @@ class SyncPanel {
   int _connectAttempt = 0;
   _Blocker _blocker = _Blocker.none;
   bool _activity = false;
+
+  /// The engine says it is inside work the user must not interrupt.
+  ///
+  /// Distinct from [_activity], which is a 3 s idle debounce over whatever
+  /// events happen to arrive: that made the indicator depend on how densely a
+  /// phase reports progress. When the pull's prefetch started batching, its
+  /// progress spread from every ~150 ms to roughly every 5 s and the debounce
+  /// began lapsing mid-download — showing "up to date" while 47 seconds of
+  /// transfer were still to come. Someone who believes that and quits loses
+  /// the rest of it.
+  bool _busy = false;
   Timer? _activityTimer;
   Timer? _errorTimer;
 
@@ -839,11 +850,15 @@ class SyncPanel {
         _everStarted = false;
         _connected = false;
         _connecting = false;
+        _busy = false;
         _clearActivity();
       case SyncDisconnected():
         _connected = false;
         _connecting = false;
+        _busy = false;
         _clearActivity();
+      case SyncBusy(:final busy):
+        _busy = busy;
       case SyncPushing():
       case SyncPulling():
         _bumpActivity();
@@ -1825,7 +1840,10 @@ class SyncPanel {
       case _Blocker.none:
         break;
     }
-    if (_activity) return _Status.syncing;
+    // Before the connection checks: the engine being mid-operation outranks
+    // both "connecting" and "up to date", and unlike the debounce it does not
+    // go quiet just because a phase reports progress sparsely.
+    if (_busy || _activity) return _Status.syncing;
     if (_connected) return _hasPending ? _Status.pending : _Status.ready;
     if (_connecting || _resuming) return _Status.connecting;
     if (_everStarted) return _Status.offline;

@@ -166,6 +166,27 @@ class SyncPulling extends SyncEngineEvent {
   SyncPulling();
 }
 
+/// Whether the engine is inside an operation the user must not interrupt.
+///
+/// A UI cannot infer this from the other events. Hosts previously kept a short
+/// idle debounce and called anything within it "syncing" — which made the
+/// indicator depend on how densely a phase happens to report progress, not on
+/// whether it is running. Batching the pull's prefetch spread its progress
+/// events from every ~150 ms to roughly every 5 s, and the indicator started
+/// falling back to "up to date" in the middle of a 47-second download. A user
+/// who believes that and closes the app loses the rest of it.
+///
+/// So the engine states it. Emitted only on the transition, and guaranteed
+/// from a `finally` on every exit — success, failure, and cancellation alike.
+/// The failure mode is deliberately "stuck busy" rather than "stuck idle":
+/// telling someone work is still going when it is not costs them a wait,
+/// while the reverse costs them their edits.
+class SyncBusy extends SyncEngineEvent {
+  SyncBusy({required this.busy});
+
+  final bool busy;
+}
+
 /// Emitted on the boolean transition between "fully synced" and
 /// "has local edits the engine has not yet pushed". Indicator paints
 /// idle differently while pending so the user can tell their work

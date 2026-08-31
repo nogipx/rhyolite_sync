@@ -125,6 +125,97 @@ void main() {
     });
   });
 
+  group('FugueStore payload encoding', () {
+    // A realistic note: Cyrillic, where the old encoding was at its worst —
+    // every character cost a quoted, comma-separated JSON entry of 5 bytes.
+    String _note() => List.generate(
+      120,
+      (i) => 'Строка $i — заметка про синхронизацию и разрешение конфликтов.\n',
+    ).join();
+
+    test('a row written before the switch is still read', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+
+      // encodeForBlob IS the old local format — plant one row in it.
+      await env.client.create(
+        collection: '${_vault}_fugue_store',
+        id: 'legacy',
+        payload: FugueStore.encodeForBlob(_seedABCD()) as Map<String, dynamic>,
+      );
+
+      final store = await _newStore(env.client);
+      expect((await store.get('legacy'))?.values.join(), 'abcd',
+          reason: 'upgrading must not orphan every tree already on disk');
+    });
+
+    test('a legacy row rewrites itself in the compact form once edited',
+        () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      await env.client.create(
+        collection: '${_vault}_fugue_store',
+        id: 'legacy',
+        payload: FugueStore.encodeForBlob(_seedABCD()) as Map<String, dynamic>,
+      );
+
+      final store = await _newStore(env.client);
+      final loaded = (await store.get('legacy'))!;
+      store.set('legacy', loaded);
+      await store.persistOne('legacy');
+
+      final row = await env.client.get(
+        collection: '${_vault}_fugue_store',
+        id: 'legacy',
+      );
+      expect(row!.payload['enc'], 'fz1');
+      expect(row.payload.containsKey('b'), isFalse,
+          reason: 'the JSON block array must be gone, not merely ignored');
+
+      // And the rewritten row still decodes to the same tree.
+      final fresh = await _newStore(env.client);
+      expect((await fresh.get('legacy'))?.values.join(), 'abcd');
+    });
+
+    test('the compact row is materially smaller than the JSON it replaced',
+        () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+
+      final text = _note();
+      final tree = FugueTextSync.seedFromText(text);
+      store.set('big', tree);
+      await store.persistOne('big');
+
+      // Both measured the way sqlite stores them: jsonEncode into a TEXT
+      // column. That is the number that lands on the user's disk.
+      final legacy = utf8
+          .encode(jsonEncode(FugueStore.encodeForBlob(tree)))
+          .length;
+      final row = await env.client.get(
+        collection: '${_vault}_fugue_store',
+        id: 'big',
+      );
+      final compact = utf8.encode(jsonEncode(row!.payload)).length;
+      final plain = utf8.encode(text).length;
+
+      // ignore: avoid_print
+      print(
+        'text=${plain}B  legacy=${legacy}B (${(legacy / plain).toStringAsFixed(1)}x)  '
+        'compact=${compact}B (${(compact / plain).toStringAsFixed(1)}x)  '
+        'saved=${(100 - compact / legacy * 100).toStringAsFixed(0)}%',
+      );
+
+      expect(compact, lessThan(legacy),
+          reason: 'the whole point of the change');
+      expect(compact / legacy, lessThan(0.75),
+          reason: 'base64 over the binary codec should beat JSON by a lot, '
+              'not by a rounding error — if this regresses, the store went '
+              'back to writing JSON somewhere');
+    });
+  });
+
   group('FugueStore wire codec', () {
     test('encodeForBlob → decodeFromBlob round-trips the tree (JSON)', () {
       final original = FugueTextSync.seedFromText('round trip');

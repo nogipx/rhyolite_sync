@@ -19,11 +19,13 @@ class RpcAccountClient {
     RpcCallerEndpoint endpoint, {
     Duration unauthRetryDelay = const Duration(seconds: 30),
   }) : _auth = AuthContractCaller(endpoint),
+       _reports = ReportContractCaller(endpoint),
        _vault = VaultContractCaller(endpoint),
        _subscription = SubscriptionContractCaller(endpoint),
        _unauthRetryDelay = unauthRetryDelay;
 
   final AuthContractCaller _auth;
+  final ReportContractCaller _reports;
   final VaultContractCaller _vault;
   final SubscriptionContractCaller _subscription;
 
@@ -148,6 +150,31 @@ class RpcAccountClient {
       context: await _authContext(),
     );
     return res.code;
+  }
+
+  /// Uploads a diagnostic archive for the current user, returning the short
+  /// id they can quote in a conversation.
+  ///
+  /// Requires an active session: the account is both the identity and the
+  /// storage key. A user whose sign-in is broken cannot use this and keeps the
+  /// local archive to attach by hand — which is also the only path on
+  /// self-hosted servers, where there is no account service at all.
+  Future<String> submitReport({
+    required String archiveBase64,
+    required String description,
+    required String pluginVersion,
+    required String platform,
+  }) async {
+    final res = await _reports.submitReport(
+      SubmitReportRequest(
+        archiveBase64: archiveBase64,
+        description: description,
+        pluginVersion: pluginVersion,
+        platform: platform,
+      ),
+      context: await _authContext(),
+    );
+    return res.reportId;
   }
 
   /// Exchange the stored refresh token for a fresh session.

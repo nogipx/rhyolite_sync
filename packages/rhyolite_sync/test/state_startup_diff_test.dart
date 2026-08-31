@@ -160,6 +160,25 @@ Uint8List _randomBytes(int length, int seed) {
   return out;
 }
 
+/// Fails exactly the calls whose index is in [failCalls]; everything else
+/// uploads. Lets a test put a transient in the middle of a run.
+class _FailsSpecificCallsRemote extends _MemRemote {
+  _FailsSpecificCallsRemote({required this.failCalls});
+
+  final Set<int> failCalls;
+  int calls = 0;
+
+  @override
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    covariant Object? context,
+  }) async {
+    final n = calls++;
+    if (failCalls.contains(n)) throw StateError('transient $n');
+    return super.upload(blobs, context: context);
+  }
+}
+
 /// Uploads normally until [failAfter] blobs have gone through, then refuses
 /// every later call — standing in for the server's sustained rate limit, which
 /// does not relent while the client keeps pushing.
@@ -168,11 +187,16 @@ class _FailsPartWayRemote extends _MemRemote {
 
   final int failAfter;
 
+  /// How many upload CALLS were attempted, refused ones included — the
+  /// success counter cannot show that a pass gave up early.
+  int calls = 0;
+
   @override
   Future<void> upload(
     List<(Uint8List, String)> blobs, {
     covariant Object? context,
   }) async {
+    calls++;
     if (uploads >= failAfter) throw StateError('rate limit exceeded');
     return super.upload(blobs, context: context);
   }
@@ -578,10 +602,11 @@ void main() {
     }
 
     test('the rows reach the database, not just memory', () async {
-      // 24 files = three groups of eight. A group uploads 16 blobs — one
-      // chunk and one manifest per file — so 32 lets two groups through and
-      // kills the third.
-      final f = await fixtureWith(_FailsPartWayRemote(failAfter: 32), 24);
+      // 64 files = eight groups of eight. A group uploads 16 blobs (one
+      // chunk and one manifest per file), so 32 lets two groups through and
+      // the remaining six fail — enough for the five-in-a-row guard to end
+      // the pass rather than carry on to the end.
+      final f = await fixtureWith(_FailsPartWayRemote(failAfter: 32), 64);
       await expectLater(f.diff.call(), throwsA(isA<StateError>()));
 
       // A FRESH store on the same database — this is the restart. Reading
@@ -593,7 +618,7 @@ void main() {
       expect(
         reopened.fileIds.length,
         16,
-        reason: 'the two groups that finished must survive the third failing',
+        reason: 'the two groups that finished must survive the rest failing',
       );
       for (final id in reopened.fileIds) {
         final state = reopened.get(id);
@@ -609,7 +634,7 @@ void main() {
       // its own — but `_ownContext` comes from the meta row and nowhere else,
       // and `upsert` advances it per file. Persisting rows without it leaves a
       // restart claiming to have seen less than it has already written.
-      final f = await fixtureWith(_FailsPartWayRemote(failAfter: 32), 24);
+      final f = await fixtureWith(_FailsPartWayRemote(failAfter: 32), 64);
       await expectLater(f.diff.call(), throwsA(isA<StateError>()));
 
       final reopened = FileStateStore(client: f.client, vaultId: _vaultId);
@@ -622,19 +647,63 @@ void main() {
       );
     });
 
+    test('one bad group is skipped, the rest still land', () async {
+      // A single group failing is a transient — a rate-limited batch, a lost
+      // chunk upload. Ending the whole pass over it throws away every other
+      // group's work, which is what a failed first sync could not afford.
+      // Call 0 is the first group's chunk upload; the group is lost, the two
+      // that follow are not.
+      final remote = _FailsSpecificCallsRemote(failCalls: {0});
+      final f = await fixtureWith(remote, 24);
+      final result = await f.diff.call();
+
+      expect(result.skippedGroups, 1);
+      expect(
+        result.newFiles,
+        16,
+        reason: 'the two healthy groups must still be recorded',
+      );
+
+      final reopened = FileStateStore(client: f.client, vaultId: _vaultId);
+      await reopened.load();
+      expect(reopened.fileIds.length, 16);
+    });
+
+    test('a run of failures ends the pass instead of grinding', () async {
+      // Systemic, not transient: a refused token or a server that is down
+      // fails every group identically. Carrying on would work through
+      // thousands of them to reach the same answer, freezing the host — the
+      // per-record grind this codebase has met before.
+      final remote = _FailsPartWayRemote(failAfter: 0);
+      final f = await fixtureWith(remote, 64);
+
+      await expectLater(f.diff.call(), throwsA(isA<StateError>()));
+      expect(remote.uploads, 0);
+      // Eight groups, and the guard stops at five in a row — so the pass ends
+      // early rather than working through every one of them to reach the same
+      // answer. That grind is what freezes the host.
+      // Exactly the threshold: eight groups are available and it attempts
+      // five before giving up. Pinned as an equality rather than an upper
+      // bound, because "fewer than eight" is also satisfied by aborting on the
+      // very first failure — which is the behaviour this guard replaced.
+      expect(remote.calls, 5,
+          reason: 'five in a row ends the pass; it neither grinds through all '
+              'eight nor bails on the first');
+    });
+
     test('the next run skips what the failed one banked', () async {
       // The point of persisting: the fast path compares disk against the
       // stored chunk list, so a surviving row is what stops the file being
       // read, chunked and uploaded all over again.
       final remote = _FailsPartWayRemote(failAfter: 32);
-      final f = await fixtureWith(remote, 24);
+      final f = await fixtureWith(remote, 64);
       await expectLater(f.diff.call(), throwsA(isA<StateError>()));
 
       final healthy = _MemRemote()..store.addAll(remote.store);
       final reopened = FileStateStore(client: f.client, vaultId: _vaultId);
       await reopened.load();
       final io = _MemIo();
-      for (var i = 0; i < 24; i++) {
+      for (var i = 0; i < 64; i++) {
         io.files['$_vaultPath/f$i.bin'] = _randomBytes(512, i + 1);
       }
       final result = await StateStartupDiff(
@@ -652,12 +721,12 @@ void main() {
 
       expect(
         result.newFiles,
-        8,
-        reason: 'only the eight the first run never reached',
+        48,
+        reason: 'only the forty-eight the first run never reached',
       );
       expect(
         reopened.fileIds.length,
-        24,
+        64,
         reason: 'the second run completes the set rather than redoing it',
       );
     });

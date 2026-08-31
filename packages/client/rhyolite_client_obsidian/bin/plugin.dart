@@ -2465,6 +2465,24 @@ $kSyncPanelCss
               if (e is SyncConnected) {
                 selfHealOnline = true;
                 _cancelSelfHeal();
+              } else if (e is SyncStartupBlobUploadProgress &&
+                  e.completed > 0) {
+                // An attempt that MOVED is not a wasted attempt.
+                //
+                // The cap exists to stop pointless retrying against a server
+                // that is down, where ten identical failures are enough to
+                // conclude. It was written when a startup that failed banked
+                // nothing, so every attempt really was worth the same as the
+                // last. Now each pass persists the groups it uploads, so a
+                // large first sync can legitimately need more than ten passes
+                // and each one leaves the next with less to do.
+                //
+                // Only the counter is reset, not the pending timer: this pass
+                // may still fail, and if it does the ladder should carry on —
+                // just with a budget that reflects progress rather than
+                // punishing it. "Ten attempts" now means ten in a row that
+                // achieved nothing.
+                _selfHealAttempt = 0;
               } else if (e is SyncDisconnected) {
                 selfHealOnline = false;
                 scheduleHeal();

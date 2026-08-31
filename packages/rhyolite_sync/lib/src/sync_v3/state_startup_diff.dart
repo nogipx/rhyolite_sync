@@ -26,6 +26,12 @@ class StateStartupDiffResult {
   /// [PathScope]. The engine emits [SyncFileOutOfScope] for each.
   final List<String> outOfScope;
 
+  /// Upload groups this pass gave up on and carried past.
+  ///
+  /// Non-zero means some files are still unsynced despite the pass finishing:
+  /// they stay pending and the next pass retries them.
+  final int skippedGroups;
+
   /// How many files the scan actually saw on disk.
   ///
   /// The one signal that separates "the user deleted things" from "the vault
@@ -41,6 +47,7 @@ class StateStartupDiffResult {
     this.excluded = const [],
     this.outOfScope = const [],
     this.diskFileCount = 0,
+    this.skippedGroups = 0,
   });
 }
 
@@ -180,9 +187,16 @@ class StateStartupDiff {
   /// (pre-signature behavior).
   final StatSigStore? sigStore;
 
+  /// Consecutive group failures that end a pass.
+  ///
+  /// One is a transient; a run of them is systemic and every remaining group
+  /// would fail identically.
+  static const int _maxConsecutiveGroupFailures = 5;
+
   Future<StateStartupDiffResult> call() async {
     var newFiles = 0;
     var modifiedFiles = 0;
+    var skippedGroups = 0;
 
     final diskFiles = await io.listFiles(vaultPath);
     final diskRelPaths = <String>{};
@@ -645,6 +659,8 @@ class StateStartupDiff {
       onUploadProgress?.call(0, totalFiles);
       final swatch = Stopwatch()..start();
       var nextIndex = 0;
+      var consecutiveFailures = 0;
+      Object? lastGroupError;
 
       // Bounded-concurrency worker pool. CPU work (CDC chunker, encrypt,
       // Fugue diff) is single-threaded on dart2js, but each job spends most
@@ -654,9 +670,36 @@ class StateStartupDiff {
         while (true) {
           final i = nextIndex++;
           if (i >= jobs.length) return;
-          // Progress is credited per file from inside the job, so a group
-          // advances the bar eight times rather than once at the end.
-          await jobs[i]();
+          try {
+            // Progress is credited per file from inside the job, so a group
+            // advances the bar eight times rather than once at the end.
+            await jobs[i]();
+            consecutiveFailures = 0;
+          } catch (e) {
+            // A preemption is not a group failure — it aborts the whole run
+            // by design, and swallowing it would keep working after the host
+            // asked us to stop.
+            if (e is RpcCancelledException) rethrow;
+            skippedGroups++;
+            consecutiveFailures++;
+            lastGroupError = e;
+            log.warning('StartupDiff: group $i failed, continuing: $e');
+            // One group failing is a transient — a rate-limited batch, a
+            // dropped chunk upload — and the run should carry on and bank
+            // everything else. A RUN of them is systemic: a refused token or
+            // a server that is down fails every group identically, and
+            // grinding through thousands of them would freeze the host to
+            // reach the same answer. Abort and keep what is banked; the
+            // host's self-heal retries later, and by then the diff has less
+            // to do than it did.
+            if (consecutiveFailures >= _maxConsecutiveGroupFailures) {
+              log.error(
+                'StartupDiff: $consecutiveFailures groups failed in a row — '
+                'stopping this pass',
+              );
+              throw e;
+            }
+          }
         }
       }
 
@@ -664,7 +707,9 @@ class StateStartupDiff {
       await Future.wait(List.generate(workerCount, (_) => worker()));
       log.info(
         'StartupDiff: processing of $totalFiles file(s) done in '
-        '${swatch.elapsed.inSeconds}s',
+        '${swatch.elapsed.inSeconds}s'
+        '${skippedGroups > 0 ? ', $skippedGroups group(s) skipped '
+            '(last: $lastGroupError)' : ''}',
       );
     }
 
@@ -685,6 +730,7 @@ class StateStartupDiff {
       excluded: excluded,
       outOfScope: outOfScope,
       diskFileCount: diskRelPaths.length,
+      skippedGroups: skippedGroups,
     );
   }
 

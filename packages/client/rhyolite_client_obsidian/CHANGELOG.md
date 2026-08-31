@@ -1,3 +1,20 @@
+## [3.16.2] - 2026-08-31
+
+**A large first sync now finishes on its own.**
+A batch that fails is carried past instead of ending the whole pass, and a sync
+that is still making progress is no longer given up on after a fixed number of
+attempts. A vault that needs several sessions to upload completes across them
+without anything being pressed.
+
+### Bug Fixes
+
+- a first sync that is making progress is not given up on (obsidian)
+- one bad upload group no longer ends the whole first sync (core)
+
+### Other
+
+- bump plugin to 3.16.2 (obsidian)
+
 ## [3.16.1] - 2026-08-31
 
 **An interrupted first sync keeps what it already uploaded.**

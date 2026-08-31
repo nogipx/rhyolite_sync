@@ -3,25 +3,29 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:test/test.dart';
 
 StateRecord _rec(String fileId, {int seq = 1}) => StateRecord(
-      fileId: fileId,
-      encryptedState: 'enc-$fileId-$seq',
-      blobRef: 'ref-$fileId-$seq',
-      hlcPacked: 'h$seq',
-      contextPacked: '',
-      serverSeq: seq,
-      tombstone: false,
-    );
+  fileId: fileId,
+  encryptedState: 'enc-$fileId-$seq',
+  blobRef: 'ref-$fileId-$seq',
+  hlcPacked: 'h$seq',
+  contextPacked: '',
+  serverSeq: seq,
+  tombstone: false,
+);
 
-FileState _fs(String path, String blobRef,
-        {bool tombstone = false, int size = 10, int ms = 1}) =>
-    FileState(
-      fileId: 'id',
-      path: path,
-      blobRef: blobRef,
-      sizeBytes: size,
-      hlc: Hlc(ms, 0, 'x'),
-      tombstone: tombstone,
-    );
+FileState _fs(
+  String path,
+  String blobRef, {
+  bool tombstone = false,
+  int size = 10,
+  int ms = 1,
+}) => FileState(
+  fileId: 'id',
+  path: path,
+  blobRef: blobRef,
+  sizeBytes: size,
+  hlc: Hlc(ms, 0, 'x'),
+  tombstone: tombstone,
+);
 
 BackupEntry _byPath(BackupInspection i, String path) =>
     i.entries.firstWhere((e) => e.path == path);
@@ -34,7 +38,10 @@ void main() {
       _rec('deleted'), // absent from current → restores it
       _rec('gone', seq: 1), // tombstone in the snapshot
       _rec('mv', seq: 1),
-      _rec('mv', seq: 2), // concurrent binary versions → LWW resolves, not conflict
+      _rec(
+        'mv',
+        seq: 2,
+      ), // concurrent binary versions → LWW resolves, not conflict
     ];
     final byEnvelope = <String, FileState>{
       'enc-same-1': _fs('a/same.md', 'ref-same-1'),
@@ -58,12 +65,22 @@ void main() {
       currentLiveBlobByPath: current,
     )();
 
-    expect(_byPath(inspection, 'a/same.md').status, BackupEntryStatus.identical);
-    expect(_byPath(inspection, 'a/changed.md').status, BackupEntryStatus.changed);
-    expect(_byPath(inspection, 'b/deleted.md').status,
-        BackupEntryStatus.restoresDeleted);
     expect(
-        _byPath(inspection, 'gone.md').status, BackupEntryStatus.deletedInBackup);
+      _byPath(inspection, 'a/same.md').status,
+      BackupEntryStatus.identical,
+    );
+    expect(
+      _byPath(inspection, 'a/changed.md').status,
+      BackupEntryStatus.changed,
+    );
+    expect(
+      _byPath(inspection, 'b/deleted.md').status,
+      BackupEntryStatus.restoresDeleted,
+    );
+    expect(
+      _byPath(inspection, 'gone.md').status,
+      BackupEntryStatus.deletedInBackup,
+    );
     // Concurrent versions resolve to the max-HLC winner (ref-mv-NEW), which
     // differs from the current ref-mv-OLD → changed, NOT "conflict".
     expect(_byPath(inspection, 'img.png').status, BackupEntryStatus.changed);
@@ -75,8 +92,13 @@ void main() {
     expect(inspection.deletedInBackup, 1);
     expect(inspection.differing, 3);
 
-    expect(inspection.entries.map((e) => e.path).toList(),
-        ['a/changed.md', 'a/same.md', 'b/deleted.md', 'gone.md', 'img.png']);
+    expect(inspection.entries.map((e) => e.path).toList(), [
+      'a/changed.md',
+      'a/same.md',
+      'b/deleted.md',
+      'gone.md',
+      'img.png',
+    ]);
     expect(_byPath(inspection, 'a/changed.md').blobRef, 'ref-changed-1');
   });
 

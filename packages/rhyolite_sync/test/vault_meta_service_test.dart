@@ -43,10 +43,11 @@ void main() {
 
     test('saves and reloads, normalising case and leading dots', () async {
       await service.saveForcedBinaryExtensions({'.Excalidraw', 'FOO', 'bar'});
-      expect(
-        await service.loadForcedBinaryExtensions(),
-        {'excalidraw', 'foo', 'bar'},
-      );
+      expect(await service.loadForcedBinaryExtensions(), {
+        'excalidraw',
+        'foo',
+        'bar',
+      });
     });
 
     test('empty set clears the slot', () async {
@@ -99,12 +100,14 @@ void main() {
     test('reads a legacy bare-ExternalBlobConfig payload', () async {
       // Pre-policy clients stored the config map directly (no wrapper key).
       final legacy = base64Encode(
-        utf8.encode(jsonEncode(<String, dynamic>{
-          'type': 'webdav',
-          'endpoint': 'https://dav.example.com',
-          'username': 'u',
-          'password': 'p',
-        })),
+        utf8.encode(
+          jsonEncode(<String, dynamic>{
+            'type': 'webdav',
+            'endpoint': 'https://dav.example.com',
+            'username': 'u',
+            'password': 'p',
+          }),
+        ),
       );
       await storage.setEncryptedMeta(vaultId, legacy);
 
@@ -113,11 +116,13 @@ void main() {
       expect(await service.loadForcedBinaryExtensions(), isEmpty);
     });
 
-    test('a policy-only payload has no type, so old clients see no BYO',
-        () async {
-      await service.saveForcedBinaryExtensions({'foo'});
-      // ExternalBlobConfig.fromJson keys off `type`; a policy-only map lacks it.
-      expect(await service.loadExternalBlobConfig(), isNull);
-    });
+    test(
+      'a policy-only payload has no type, so old clients see no BYO',
+      () async {
+        await service.saveForcedBinaryExtensions({'foo'});
+        // ExternalBlobConfig.fromJson keys off `type`; a policy-only map lacks it.
+        expect(await service.loadExternalBlobConfig(), isNull);
+      },
+    );
   });
 }

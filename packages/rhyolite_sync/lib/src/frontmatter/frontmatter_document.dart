@@ -110,10 +110,10 @@ class FmEntry {
   final String lead;
 
   FmEntry copyWith({String? key, FmValue? value, String? lead}) => FmEntry(
-        key: key ?? this.key,
-        value: value ?? this.value,
-        lead: lead ?? this.lead,
-      );
+    key: key ?? this.key,
+    value: value ?? this.value,
+    lead: lead ?? this.lead,
+  );
 
   @override
   bool operator ==(Object other) =>

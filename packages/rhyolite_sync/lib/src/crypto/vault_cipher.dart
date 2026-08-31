@@ -73,7 +73,9 @@ class VaultCipher implements IVaultCipher {
   /// Creates a verification token — encrypt a known constant so the passphrase
   /// can be validated later without storing the raw key.
   Future<String> createVerificationToken() async {
-    final bytes = await encrypt(Uint8List.fromList(utf8.encode(_verifyPlaintext)));
+    final bytes = await encrypt(
+      Uint8List.fromList(utf8.encode(_verifyPlaintext)),
+    );
     return base64Encode(bytes);
   }
 
@@ -108,7 +110,9 @@ class VaultCipher implements IVaultCipher {
   /// Argon2id output, so it is a sound PRK for a single-block expansion.
   Uint8List deriveBlobIdKey() {
     final info = <int>[...utf8.encode('rhyolite/blob-id/v1'), 0x01];
-    return Uint8List.fromList(pc.Hmac(pc.sha256, _keyBytes).convert(info).bytes);
+    return Uint8List.fromList(
+      pc.Hmac(pc.sha256, _keyBytes).convert(info).bytes,
+    );
   }
 
   /// A SEPARATE HMAC subkey used to KEY record ids (`fileId` for notes,
@@ -124,16 +128,19 @@ class VaultCipher implements IVaultCipher {
   /// deterministic and consistent across devices.
   Uint8List deriveRecordIdKey() {
     final info = <int>[...utf8.encode('rhyolite/record-id/v1'), 0x01];
-    return Uint8List.fromList(pc.Hmac(pc.sha256, _keyBytes).convert(info).bytes);
+    return Uint8List.fromList(
+      pc.Hmac(pc.sha256, _keyBytes).convert(info).bytes,
+    );
   }
 
   /// A keyed, server-opaque record id: `HMAC-SHA256(recordIdKey, "vaultId|path")`
   /// as hex. The server knows vaultId but not [recordIdKey] (derived from the
   /// vault key it never sees), so it cannot compute the id for a guessed path.
   static String recordId(List<int> recordIdKey, String vaultId, String path) =>
-      pc.Hmac(pc.sha256, recordIdKey)
-          .convert(utf8.encode('$vaultId|$path'))
-          .toString();
+      pc.Hmac(
+        pc.sha256,
+        recordIdKey,
+      ).convert(utf8.encode('$vaultId|$path')).toString();
 
   @override
   Future<Uint8List> encrypt(Uint8List plaintext) async {

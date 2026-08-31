@@ -394,6 +394,12 @@ abstract class AppStrings {
   String get externalStorageSection;
   String get connected;
   String get disconnectStorage;
+
+  // ── Storage switch / re-upload ───────────────────────────────────────────
+  /// Shown right after a backend is connected. What is already synced lives in
+  /// the OLD storage and nothing moves it.
+  String get storageSwitchedTitle;
+  String get storageSwitchedBody;
   String get disconnectStorageDescription;
   String get externalStorageDisconnected;
   String couldNotDisconnectStorage(Object error);
@@ -535,6 +541,12 @@ abstract class AppStrings {
   String get blockedLockedHint;
   String get blockedNoServer;
   String get blockedNoServerHint;
+
+  /// The blob backend refused this device. Not a failure that scrolls past —
+  /// a precondition, like being signed out.
+  String get blockedStorageRefused;
+  String get blockedStorageRefusedHint;
+  String get blockedStorageRefusedAction;
 
   /// Boot-time notice, shown once when sync could not start at all.
   String syncNotStartedNotice(String reason);

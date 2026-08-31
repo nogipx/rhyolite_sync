@@ -147,13 +147,13 @@ class FmStore {
   }
 
   Future<void> remove(String fileId) => _serialise(fileId, () async {
-        _cache.remove(fileId);
-        _accessOrder.remove(fileId);
-        _knownFileIds.remove(fileId);
-        try {
-          await _client.delete(collection: _storeCol, id: fileId);
-        } catch (_) {}
-      });
+    _cache.remove(fileId);
+    _accessOrder.remove(fileId);
+    _knownFileIds.remove(fileId);
+    try {
+      await _client.delete(collection: _storeCol, id: fileId);
+    } catch (_) {}
+  });
 
   Future<void> wipeAll() async {
     _cache.clear();

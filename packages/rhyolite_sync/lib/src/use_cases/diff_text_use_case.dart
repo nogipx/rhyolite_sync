@@ -33,8 +33,9 @@ class DiffTextUseCase {
     // insertions, not a spurious blank-line delete.
     List<String> splitLines(String text) {
       if (text.isEmpty) return const [];
-      final body =
-          text.endsWith('\n') ? text.substring(0, text.length - 1) : text;
+      final body = text.endsWith('\n')
+          ? text.substring(0, text.length - 1)
+          : text;
       return body.split('\n');
     }
 

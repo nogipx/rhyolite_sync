@@ -17,7 +17,8 @@ Hlc at(String node) => Hlc(++_wall, 0, node);
 
 FmState build(String region, {String node = 'device-a', FmState? onto}) =>
     applyDiskFrontmatter(
-      onto ?? FmMapState(entries: const {}, fmHlc: at(node), trailHlc: at(node)),
+      onto ??
+          FmMapState(entries: const {}, fmHlc: at(node), trailHlc: at(node)),
       parseFrontmatterRegion(region),
       at(node),
     );
@@ -36,8 +37,10 @@ void main() {
         '# trail\n',
       );
       final decoded = decodeFmState(encodeFmState(state));
-      expect(renderRegion(materializeFm(decoded)),
-          renderRegion(materializeFm(state)));
+      expect(
+        renderRegion(materializeFm(decoded)),
+        renderRegion(materializeFm(state)),
+      );
     });
 
     test('tombstones survive the trip — a delete that did not would undo', () {
@@ -52,7 +55,9 @@ void main() {
       expect(decoded.entries['x']!.isLive, isFalse);
       // And it still beats a peer that never saw the delete.
       expect(
-        (materializeFm(joinFm(decoded, base)) as FmMap).entries.map((e) => e.key),
+        (materializeFm(joinFm(decoded, base)) as FmMap).entries.map(
+          (e) => e.key,
+        ),
         ['y'],
       );
     });
@@ -69,7 +74,11 @@ void main() {
     test('node-id order in the pool does not leak into the bytes', () {
       // Same logical state, but the two devices wrote in the opposite order,
       // so each meets the node ids in a different sequence.
-      final ab = build('b: 2\n', node: 'zzz-device', onto: build('a: 1\n', node: 'aaa-device'));
+      final ab = build(
+        'b: 2\n',
+        node: 'zzz-device',
+        onto: build('a: 1\n', node: 'aaa-device'),
+      );
       final ba = decodeFmState(encodeFmState(ab));
       expect(encodeFmState(ba), encodeFmState(ab));
 
@@ -86,10 +95,16 @@ void main() {
       final bytes = encodeFmState(state);
       // Six keys and three items carry ~20 clocks. Written out in full that is
       // 20 x 36 bytes of device id alone; the pool holds it once.
-      expect(bytes.length, lessThan(600),
-          reason: 'encoded ${bytes.length} bytes — interning is not working');
-      expect(utf8.decode(bytes, allowMalformed: true).split(device).length - 1, 1,
-          reason: 'the device id must appear exactly once');
+      expect(
+        bytes.length,
+        lessThan(600),
+        reason: 'encoded ${bytes.length} bytes — interning is not working',
+      );
+      expect(
+        utf8.decode(bytes, allowMalformed: true).split(device).length - 1,
+        1,
+        reason: 'the device id must appear exactly once',
+      );
     });
 
     test('a version this build does not know is refused, not guessed', () {
@@ -127,8 +142,11 @@ void main() {
       final tailed = blobOf(note, build('tags:\n  - work\n'));
 
       expect(FugueStore.tryDecodeBlob(plain)!.values.join(), note);
-      expect(FugueStore.tryDecodeBlob(tailed)!.values.join(), note,
-          reason: 'same text, tail or no tail');
+      expect(
+        FugueStore.tryDecodeBlob(tailed)!.values.join(),
+        note,
+        reason: 'same text, tail or no tail',
+      );
       expect(tailed.length, greaterThan(plain.length));
     });
 
@@ -144,7 +162,10 @@ void main() {
     test('round-trips the state', () {
       final fm = build('title: Note\ntags:\n  - work\n  - home\n');
       final read = readFmTail(blobOf('---\nx\n---\n', fm));
-      expect(renderRegion(materializeFm(read!)), renderRegion(materializeFm(fm)));
+      expect(
+        renderRegion(materializeFm(read!)),
+        renderRegion(materializeFm(fm)),
+      );
     });
 
     test('a blob without a tail answers null, not an error', () {
@@ -171,7 +192,10 @@ void main() {
         ...blob,
         ...future,
         ...len.buffer.asUint8List(),
-        0x00, 0x66, 0x6D, 0x31,
+        0x00,
+        0x66,
+        0x6D,
+        0x31,
       ]);
       expect(readFmTail(bytes), isNull, reason: 'degrade, never throw');
       // And the note is still readable, which is the point.

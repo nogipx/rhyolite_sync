@@ -1413,4 +1413,20 @@ class RuStrings extends AppStrings {
   String get paymentNotConfirmedBody =>
       'Не удалось подтвердить платёж за 5 минут. Если вы завершили оплату, '
       'перезапустите Obsidian. Если проблема остаётся — напишите в поддержку.';
+  @override
+  String get storageSwitchedTitle => 'Хранилище переключено';
+  @override
+  String get storageSwitchedBody =>
+      'Всё, что синхронизировалось раньше, лежит в прежнем хранилище — новое '
+      'о нём не знает, и само ничего не переносится.\n\n'
+      'Всё, что вы измените дальше, попадёт уже в новое хранилище. Остальное '
+      'останется доступным только там, где оно лежит сейчас.';
+  @override
+  String get blockedStorageRefused => 'Хранилище отклоняет запросы';
+  @override
+  String get blockedStorageRefusedHint =>
+      'Ваше хранилище не принимает файлы — обычно это неверный логин, пароль '
+      'или путь. Пока это не исправлено, изменения не отправляются.';
+  @override
+  String get blockedStorageRefusedAction => 'Открыть настройки';
 }

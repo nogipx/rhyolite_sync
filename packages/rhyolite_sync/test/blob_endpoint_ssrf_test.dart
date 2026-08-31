@@ -38,14 +38,22 @@ void main() {
 
   group('isPrivateLanHost', () {
     test('RFC-1918 ranges are private', () {
-      for (final h in const ['10.0.0.1', '172.16.0.1', '172.31.255.255',
-        '192.168.0.1']) {
+      for (final h in const [
+        '10.0.0.1',
+        '172.16.0.1',
+        '172.31.255.255',
+        '192.168.0.1',
+      ]) {
         expect(isPrivateLanHost(h), isTrue, reason: h);
       }
     });
     test('public + out-of-range 172 are not private', () {
-      for (final h in const ['s3.example.com', '203.0.113.7', '172.15.0.1',
-        '172.32.0.1']) {
+      for (final h in const [
+        's3.example.com',
+        '203.0.113.7',
+        '172.15.0.1',
+        '172.32.0.1',
+      ]) {
         expect(isPrivateLanHost(h), isFalse, reason: h);
       }
     });
@@ -54,17 +62,23 @@ void main() {
   group('credentials over plaintext http (#7)', () {
     WebDavBlobConfig dav(String endpoint, {required bool ssl}) =>
         WebDavBlobConfig(
-            endpoint: endpoint, username: 'u', password: 'p', useSSL: ssl);
+          endpoint: endpoint,
+          username: 'u',
+          password: 'p',
+          useSSL: ssl,
+        );
     S3BlobConfig s3(String endpoint, {required bool ssl}) => S3BlobConfig(
-        endpoint: endpoint,
-        bucket: 'b',
-        accessKey: 'ak',
-        secretKey: 'sk',
-        useSSL: ssl);
+      endpoint: endpoint,
+      bucket: 'b',
+      accessKey: 'ak',
+      secretKey: 'sk',
+      useSSL: ssl,
+    );
 
     test('WebDAV Basic over http:// to a PUBLIC host is refused', () {
       expect(
-        () => dav('dav.example.com', ssl: false).createBlobStorage(vaultId: 'v'),
+        () =>
+            dav('dav.example.com', ssl: false).createBlobStorage(vaultId: 'v'),
         throwsArgumentError,
       );
     });
@@ -77,17 +91,25 @@ void main() {
     });
 
     test('https to a public host is allowed', () {
-      expect(dav('dav.example.com', ssl: true).createBlobStorage(vaultId: 'v'),
-          isNotNull);
-      expect(s3('s3.example.com', ssl: true).createBlobStorage(vaultId: 'v'),
-          isNotNull);
+      expect(
+        dav('dav.example.com', ssl: true).createBlobStorage(vaultId: 'v'),
+        isNotNull,
+      );
+      expect(
+        s3('s3.example.com', ssl: true).createBlobStorage(vaultId: 'v'),
+        isNotNull,
+      );
     });
 
     test('http to a private-LAN host is allowed (self-hosted)', () {
-      expect(dav('192.168.1.10:8080', ssl: false).createBlobStorage(vaultId: 'v'),
-          isNotNull);
-      expect(s3('10.0.0.9:9000', ssl: false).createBlobStorage(vaultId: 'v'),
-          isNotNull);
+      expect(
+        dav('192.168.1.10:8080', ssl: false).createBlobStorage(vaultId: 'v'),
+        isNotNull,
+      );
+      expect(
+        s3('10.0.0.9:9000', ssl: false).createBlobStorage(vaultId: 'v'),
+        isNotNull,
+      );
     });
   });
 }

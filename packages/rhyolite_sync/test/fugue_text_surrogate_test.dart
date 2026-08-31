@@ -60,8 +60,11 @@ void main() {
 
   test('a Fugue element must never be half a surrogate pair', () {
     final seeded = FugueTextSync.seedFromText(base);
-    expect(loneSurrogateElements(seeded), 0,
-        reason: 'seedFromText splits by runes, so this should hold');
+    expect(
+      loneSurrogateElements(seeded),
+      0,
+      reason: 'seedFromText splits by runes, so this should hold',
+    );
   });
 
   test('edits adjacent to emoji keep the projection valid UTF-16', () async {
@@ -91,8 +94,7 @@ void main() {
     expect(failures, 0);
   });
 
-  test('fuzz: random code-unit-boundary edits, then a two-device join',
-      () async {
+  test('fuzz: random code-unit-boundary edits, then a two-device join', () async {
     final seeded = FugueTextSync.seedFromText(base);
     final rnd = Random(20260821);
     var valid = 0;
@@ -111,8 +113,8 @@ void main() {
 
       // A real editor never hands us half a surrogate pair; only count the
       // cases where the INPUT is valid UTF-16, or we are testing the fuzzer.
-      if (loneSurrogates(aText).isNotEmpty ||
-          loneSurrogates(bText).isNotEmpty) continue;
+      if (loneSurrogates(aText).isNotEmpty || loneSurrogates(bText).isNotEmpty)
+        continue;
       valid++;
 
       final ta = await edit(seeded, aText, 'device-A');
@@ -126,7 +128,8 @@ void main() {
       final lone = loneSurrogates(out);
       if (lone.isNotEmpty) {
         badJoin++;
-        firstBad ??= 'trial $trial: ${lone.length} lone surrogate(s)\n'
+        firstBad ??=
+            'trial $trial: ${lone.length} lone surrogate(s)\n'
             '  around: ${out.substring(max(0, lone.first - 40), min(out.length, lone.first + 40))}';
       }
     }

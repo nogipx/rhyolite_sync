@@ -68,6 +68,8 @@ import 'self_host_modal.dart';
   required Future<void> Function(ExternalBlobConfig config)
   onSaveExternalBlobConfig,
   required Future<void> Function() onClearExternalBlobConfig,
+  /// Re-uploads content the CURRENT backend lacks, from this device. Returns
+  /// (uploaded, unhealable), or null when sync is not running.
   required SettingsSyncPrefs Function() settingsSyncPrefs,
   required Future<void> Function(SettingsSyncPrefs next) onSettingsSyncChanged,
   // Whether the storage backing this vault can hold a plugin set, and how much
@@ -880,6 +882,25 @@ void _addExternalStorageSection(
           externalStorageKind: result.kind,
         ));
         showNotice(S.externalStorageConnected('S3'));
+        // Say what switching actually did to what is already synced. Files
+        // uploaded before this moment live in the OLD storage; the new one has
+        // none of them, and nothing moves them. Saying nothing left a vault
+        // whose records pointed at content the current backend did not hold,
+        // discovered later as a wall of "missing on server" in a background
+        // verify.
+        await _showActionConfirmation(
+          t.plugin,
+          title: S.storageSwitchedTitle,
+          body: S.storageSwitchedBody,
+          confirmText: S.ok,
+          destructive: false,
+        );
+        // Redraw. Nothing did, so the section kept showing the state from
+        // before the save — the user had just connected storage and the screen
+        // still said they had not. It also reads `config`, which is the
+        // snapshot captured when the tab was built, so only a rebuild shows
+        // the new value at all.
+        t.show();
       } catch (e) {
         showNotice(S.couldNotSaveStorage(e));
       }
@@ -899,6 +920,25 @@ void _addExternalStorageSection(
           externalStorageKind: result.kind,
         ));
         showNotice(S.externalStorageConnected('WebDAV'));
+        // Say what switching actually did to what is already synced. Files
+        // uploaded before this moment live in the OLD storage; the new one has
+        // none of them, and nothing moves them. Saying nothing left a vault
+        // whose records pointed at content the current backend did not hold,
+        // discovered later as a wall of "missing on server" in a background
+        // verify.
+        await _showActionConfirmation(
+          t.plugin,
+          title: S.storageSwitchedTitle,
+          body: S.storageSwitchedBody,
+          confirmText: S.ok,
+          destructive: false,
+        );
+        // Redraw. Nothing did, so the section kept showing the state from
+        // before the save — the user had just connected storage and the screen
+        // still said they had not. It also reads `config`, which is the
+        // snapshot captured when the tab was built, so only a rebuild shows
+        // the new value at all.
+        t.show();
       } catch (e) {
         showNotice(S.couldNotSaveStorage(e));
       }

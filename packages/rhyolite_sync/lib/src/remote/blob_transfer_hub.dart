@@ -5,6 +5,21 @@ import 'package:rpc_dart/rpc_dart.dart';
 
 import 'i_blob_storage.dart';
 
+/// Thrown by a hub that has been disposed.
+///
+/// A distinct type rather than a `StateError` so callers can tell it from a
+/// transient. It never means "this operation failed" — it means the session
+/// that owned this hub is gone, so every later operation on it will fail the
+/// same way. A caller that retries or carries on is doing work for a session
+/// that no longer exists; one that matched on the message string would be one
+/// reworded exception away from doing exactly that.
+class BlobTransferHubDisposed implements Exception {
+  const BlobTransferHubDisposed();
+
+  @override
+  String toString() => 'BlobTransferHub has been disposed';
+}
+
 /// Central coordinator for all blob IO.
 ///
 /// Wraps an inner [IBlobStorage] and gives callers three guarantees:
@@ -22,10 +37,8 @@ import 'i_blob_storage.dart';
 /// subscribers exist, and only fires its own cancel when the last
 /// subscriber leaves.
 class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
-  BlobTransferHub({
-    required this.inner,
-    this.maxConcurrent = 3,
-  }) : assert(maxConcurrent > 0);
+  BlobTransferHub({required this.inner, this.maxConcurrent = 3})
+    : assert(maxConcurrent > 0);
 
   final IBlobStorage inner;
   final int maxConcurrent;
@@ -160,10 +173,7 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
   }
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     _checkAlive();
     if (blobIds.isEmpty) return;
 
@@ -202,9 +212,7 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
       call.internalToken.cancel(reason);
     }
     while (_waiters.isNotEmpty) {
-      _waiters.removeFirst().completeError(
-        RpcCancelledException(reason),
-      );
+      _waiters.removeFirst().completeError(RpcCancelledException(reason));
     }
   }
 
@@ -305,16 +313,12 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
   ) async {
     if (callerToken == null) return taskFuture;
     if (callerToken.isCancelled) {
-      throw RpcCancelledException(
-        callerToken.reason ?? 'caller cancelled',
-      );
+      throw RpcCancelledException(callerToken.reason ?? 'caller cancelled');
     }
     return await Future.any<T>([
       taskFuture,
       callerToken.cancelled.then<T>((_) {
-        throw RpcCancelledException(
-          callerToken.reason ?? 'caller cancelled',
-        );
+        throw RpcCancelledException(callerToken.reason ?? 'caller cancelled');
       }),
     ]);
   }
@@ -325,9 +329,7 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
   }
 
   void _checkAlive() {
-    if (_disposed) {
-      throw StateError('BlobTransferHub has been disposed');
-    }
+    if (_disposed) throw const BlobTransferHubDisposed();
   }
 }
 
@@ -360,9 +362,8 @@ class _DownloadGroup {
   /// The per-id cancellation this replaced could not survive grouping: one
   /// caller walking away must not take its neighbours' bytes with it, so the
   /// call dies only when the last of them has.
-  bool get abandoned => tasks.every(
-        (t) => t.completer.isCompleted || t.subscribers <= 0,
-      );
+  bool get abandoned =>
+      tasks.every((t) => t.completer.isCompleted || t.subscribers <= 0);
 }
 
 class _UploadTask {
@@ -389,9 +390,8 @@ class _UploadBatch {
   /// which the counter is permanently one too low, and the batch is cancelled
   /// out from under someone who IS waiting. Same rule, and the same shape, as
   /// [_DownloadGroup.abandoned].
-  bool get abandoned => tasks.every(
-        (t) => t.completer.isCompleted || t.subscribers <= 0,
-      );
+  bool get abandoned =>
+      tasks.every((t) => t.completer.isCompleted || t.subscribers <= 0);
 }
 
 class _DeleteCall {

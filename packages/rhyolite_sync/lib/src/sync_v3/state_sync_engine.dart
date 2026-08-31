@@ -248,11 +248,28 @@ class StateSyncEngine implements ISyncEngine {
   @override
   Stream<SyncEngineEvent> get events => _eventsController.stream;
 
+  /// The last numbers this engine managed to read, kept for after it stops.
+  ///
+  /// `stop()` nulls the store, so a stopped engine could answer nothing at
+  /// all — and a bug report is written about a stopped engine almost by
+  /// definition. One arrived with its whole sync-state section blank: no file
+  /// count, no cursor, nothing to reason from, in the report that existed to
+  /// carry exactly that.
+  VaultStats? _lastStats;
+  DateTime? _lastStatsAt;
+
   @override
   VaultStats? statsSnapshot() {
     final store = _store;
-    if (store == null) return null;
-    return VaultStatsUseCase(store).call();
+    if (store == null) {
+      // Stale, and says so through [VaultStats.capturedAt] rather than being
+      // silently indistinguishable from live numbers.
+      final last = _lastStats;
+      final at = _lastStatsAt;
+      return (last == null || at == null) ? last : last.staleAt(at);
+    }
+    _lastStatsAt = DateTime.now();
+    return _lastStats = VaultStatsUseCase(store).call();
   }
 
   @override
@@ -490,6 +507,7 @@ class StateSyncEngine implements ISyncEngine {
         emit: _emit,
         handleEpochMismatch: _handleEpochMismatch,
         clearPending: _clearPending,
+        pendingFileIds: () => _pendingFileIds,
         log: _log,
       );
       // Attach the file-change listener BEFORE the (potentially slow)
@@ -580,6 +598,26 @@ class StateSyncEngine implements ISyncEngine {
         // Fugue blob hash), bumping every text file's HLC and flooding
         // putStates — which starved the server's per-vault seq allocator.
         reconcileText: (relPath) => _reconciler!.reconcileWithDisk(relPath),
+        // The same work, split either side of the network, so the startup pass
+        // can upload a group of notes in one pair of requests. Text used to
+        // pay two requests per FILE while binaries paid two per eight.
+        planTextReconcile: (relPath) => _reconciler!.planTextReconcile(relPath),
+        commitTextReconcile: (plan, manifestHash, chunkHashes) =>
+            _reconciler!.commitTextReconcile(
+              plan,
+              manifestHash: manifestHash,
+              chunkHashes: chunkHashes,
+            ),
+        // A heartbeat through the scan. Without it the engine goes silent for
+        // as long as the walk takes — a minute on a large vault — and silence
+        // is exactly what the host's recovery reads as death.
+        onScanProgress: (scanned, total) =>
+            _emit(SyncStartupScanProgress(scanned: scanned, total: total)),
+        // Publish what has landed, every so often, instead of holding it all
+        // until the diff ends. Counted in files rather than time so the
+        // cadence follows the work.
+        onProgressPublished: _pushStartupProgress,
+        publishInterval: startupPublishInterval,
         onUploadProgress: (completed, total) {
           lastTotal = total;
           if (completed == 0) uploadStart.start();
@@ -611,6 +649,15 @@ class StateSyncEngine implements ISyncEngine {
       _log.info(
         'Startup diff: ${diff.newFiles} new, ${diff.modifiedFiles} modified, ${diff.missingFileIds.length} missing',
       );
+
+      // A backend that refuses this device is a missing precondition, not an
+      // error to report and move past: the engine below will go on pulling on
+      // schedule and looking perfectly well while every upload is refused. Say
+      // so before any of that starts, and keep starting — the host needs a live
+      // engine to accept the corrected credentials.
+      if (diff.storageRefused != null) {
+        _emit(SyncStorageRefused(diff.storageRefused!));
+      }
 
       // Surface files skipped for exceeding the size limit and seed the shared
       // blocked-set so the reconciler can later emit SyncFileSizeUnblocked when
@@ -1122,7 +1169,48 @@ class StateSyncEngine implements ISyncEngine {
   Future<void> _push({RpcContext? context}) async {
     final pusher = _pusher;
     if (pusher == null) return;
-    await pusher.push(context: context);
+    // In a finally, because a push that FAILS is exactly when the answer
+    // changes and matters: the files stay unsent, and an indicator that only
+    // updates on success would keep showing the state before the attempt.
+    try {
+      await pusher.push(context: context);
+    } finally {
+      // The push is what drains the store's unsent set, and that set is half
+      // of what "are there unsent changes" means. Without this the indicator
+      // only ever heard about the half that file events fill.
+      _emitPendingIfChanged();
+    }
+  }
+
+  /// True while a push is running, so the startup diff's periodic hook cannot
+  /// start a second one on top of it.
+  bool _pushInFlight = false;
+
+  /// Publishes what the startup diff has uploaded SO FAR.
+  ///
+  /// The states used to wait for the whole diff. On a large vault that is an
+  /// hour in which the server learns nothing: one report showed 780 blob
+  /// uploads and not a single state record, so every byte was on the server
+  /// and no other device could see one file. An interruption anywhere in that
+  /// hour left it exactly as empty.
+  ///
+  /// It needs no list of what to send. The store tracks what it has written
+  /// since the server last accepted it, and that is precisely the files the
+  /// diff has finished — so this is the ordinary push, run early.
+  ///
+  /// Best-effort by design: a refusal here must not end the diff, which is
+  /// still uploading and still banking. The push at the end of startup, and
+  /// the retry after it, are what actually have to succeed.
+  Future<void> _pushStartupProgress() async {
+    if (_pushInFlight || !_running) return;
+    _pushInFlight = true;
+    try {
+      await _push();
+    } catch (e) {
+      _log.warning('Startup progress push failed (will retry later): $e');
+    } finally {
+      _pushInFlight = false;
+    }
   }
 
   /// FileIds whose latest local state hasn't yet been acknowledged by
@@ -1160,25 +1248,45 @@ class StateSyncEngine implements ISyncEngine {
     }
   }
 
+  // Both of these ask unconditionally now. The guards used to skip the emit
+  // when this set had not changed, which was fine while it was the only input;
+  // it is not, because the store's unsent set can change on its own — a push
+  // draining it is the commonest case, and that is exactly the transition the
+  // indicator has to see.
   void _markPending(String fileId) {
     if (!_running) return;
-    final added = _pendingFileIds.add(fileId);
-    if (added) _emitPendingIfChanged();
+    _pendingFileIds.add(fileId);
+    _emitPendingIfChanged();
   }
 
   void _clearPending(Iterable<String> fileIds) {
     if (!_running) return;
-    final before = _pendingFileIds.length;
     _pendingFileIds.removeAll(fileIds);
-    if (_pendingFileIds.length != before) _emitPendingIfChanged();
+    _emitPendingIfChanged();
   }
 
   void _emitPendingIfChanged() {
-    final has = _pendingFileIds.isNotEmpty;
+    final has = _pendingFileIds.isNotEmpty || _hasUnsentState;
     if (has == _lastEmittedHasPending) return;
     _lastEmittedHasPending = has;
     _emit(SyncPending(hasPending: has));
   }
+
+  /// Whether the STORE still holds files the server has not accepted.
+  ///
+  /// [_pendingFileIds] alone cannot answer this. It is filled by file-change
+  /// events and by nothing else, so the thousands of files a startup pass
+  /// creates never enter it — and it lives in memory, so a restart empties it.
+  /// A vault with nine thousand unsynced files therefore reported no pending
+  /// changes, and the indicator, which paints idle-without-pending green,
+  /// said the sync was finished. A user reported exactly that: a green dot
+  /// with about two thousand files still to go.
+  ///
+  /// The store's set is the durable answer. It is a conservative superset
+  /// until the first push classifies it, which is harmless here: while that
+  /// push is outstanding the engine is busy, and the indicator shows busy
+  /// rather than idle.
+  bool get _hasUnsentState => _store?.owedFileIds.isNotEmpty ?? false;
 
   // ---------------------------------------------------------------------------
   // File events
@@ -1326,10 +1434,7 @@ class StateSyncEngine implements ISyncEngine {
         _clearPending([fileId]);
       }
     } on RpcCancelledException catch (_) {
-      _log.info(
-        'Reconcile/push superseded',
-        data: {'path': LogPath(relPath)},
-      );
+      _log.info('Reconcile/push superseded', data: {'path': LogPath(relPath)});
     } on TimeoutException catch (e) {
       // Push hung — almost always a silently-dead WebSocket after a resume.
       // Surface as SyncError so the host's visibilitychange handler rebuilds
@@ -1339,11 +1444,27 @@ class StateSyncEngine implements ISyncEngine {
         data: {'path': LogPath(relPath)},
       );
       _emit(SyncError('sync timed out — connection may be stale'));
+    } on BlobStorageRefused catch (e) {
+      // Not a failed upload — a storage that will refuse everything until its
+      // settings change. It used to land here as an ordinary warning, so the
+      // engine carried on pulling every sixteen seconds and looked perfectly
+      // healthy while every edit was being dropped on the floor.
+      _log.error(
+        'Storage refused this device: $e',
+        data: {'path': LogPath(relPath)},
+      );
+      // The file is unsent and stays that way, so it must be visible as unsent
+      // rather than quietly forgotten until it happens to change again.
+      _markPending(fileId);
+      _emit(SyncStorageRefused('$e'));
     } catch (e) {
       _log.warning(
         'Reconcile/push failed: $e',
         data: {'path': LogPath(relPath)},
       );
+      // Whatever went wrong, this file did not reach the server. Saying so is
+      // the difference between "unsent changes" and a green dot.
+      _markPending(fileId);
     }
   }
 
@@ -1393,6 +1514,12 @@ class StateSyncEngine implements ISyncEngine {
               delay: retryDelay,
             );
           }
+        } on BlobStorageRefused catch (e) {
+          // Housekeeping is the quietest thing the engine does, so this is
+          // where a refusal is most likely to be seen first and least likely
+          // to be noticed. Report it in the same voice as everywhere else.
+          _log.error('background task "$key": $e');
+          _emit(SyncStorageRefused('$e'));
         } catch (e) {
           _log.warning('background task "$key" failed: $e');
         }
@@ -1503,6 +1630,39 @@ class StateSyncEngine implements ISyncEngine {
     )(context: context);
     if (!verify.isClean) _log.info('Blob verify: $verify');
     return verify;
+  }
+
+  /// Pushes every live file's content to the CURRENT blob backend, whether or
+  /// not it claims to have it.
+  ///
+  /// For a host offering a migration after a backend switch. Nothing migrates
+  /// on its own: the sync records keep pointing at the same content-addressed
+  /// blobs, and a newly connected backend has none of them.
+  ///
+  /// No UI calls this today — the Obsidian button that did was withdrawn. Kept
+  /// because the operation is real and the alternatives are wrong in ways that
+  /// took a while to establish; a host that wants it should not have to
+  /// rediscover them.
+  ///
+  /// Not [runVerifyBlobs], which was doing this job and is the wrong shape for
+  /// it — see [ReuploadStorageUseCase] for the three ways they differ. Nor the
+  /// re-upload in Troubleshooting, which wipes the server vault and makes every
+  /// other device replace its copy; here the records are correct and only their
+  /// content is in the wrong place.
+  Future<ReuploadStorageResult?> runStorageReupload({
+    RpcContext? context,
+    void Function(int done, int total)? onProgress,
+  }) async {
+    final store = _store;
+    final remote = _getRemoteBlobStorage();
+    if (store == null || remote == null) return null;
+    return ReuploadStorageUseCase(
+      store: store,
+      blobStorage: remote,
+      regenerate: _regenerateBlobs,
+      onProgress: onProgress,
+      logger: _log,
+    )(context: context);
   }
 
   /// Sweeps the local blob cache now, rather than on the maintenance tier.
@@ -2014,6 +2174,14 @@ class StateSyncEngine implements ISyncEngine {
   /// pin the lifecycle lane.
   static const Duration _kStartupMetaTimeout = Duration(seconds: 12);
 
+  /// How many times the backend question is asked before a failure is treated
+  /// as an answer. Three attempts, 0s/1s/2s apart.
+  static const int _kStorageResolveAttempts = 3;
+
+  /// How far behind the server may fall during a startup pass. Overridable so
+  /// a test can drive the publishing without waiting on a wall clock.
+  Duration startupPublishInterval = const Duration(seconds: 10);
+
   Future<void> _checkExternalBlobConfig({Duration? timeout}) async {
     // Secret already in memory (session fallback from migration, or applied on
     // a prior discovery) — the backend is already correct, nothing to fetch.
@@ -2042,23 +2210,72 @@ class StateSyncEngine implements ISyncEngine {
       return;
     }
 
+    final service = VaultMetaService(
+      storage: storage,
+      vaultId: config.vaultId,
+      cipher: c,
+    );
+    Future<ExternalBlobConfig?> ask() {
+      final load = service.loadExternalBlobConfig();
+      return timeout == null ? load : load.timeout(timeout);
+    }
+
     ExternalBlobConfig? remote;
-    try {
-      final load = VaultMetaService(
-        storage: storage,
-        vaultId: config.vaultId,
-        cipher: c,
-      ).loadExternalBlobConfig();
-      remote = timeout == null ? await load : await load.timeout(timeout);
-    } catch (e) {
-      if (isByo) {
-        throw StateError(
-          'could not load external storage credentials: $e — refusing to sync '
-          'to the managed backend',
+    Object? lastError;
+    // Asked more than once before concluding anything. A single timeout is not
+    // evidence about where a vault's files belong, and deciding on one is
+    // asymmetric — see the refusal below.
+    for (var attempt = 0; attempt < _kStorageResolveAttempts; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(Duration(seconds: 1 << (attempt - 1)));
+        _log.info(
+          'External blob config: retrying (attempt ${attempt + 1} of '
+          '$_kStorageResolveAttempts)',
         );
       }
-      _log.warning('External blob config check failed: $e');
+      try {
+        remote = await ask();
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+
+    if (lastError != null) {
+      if (isByo) {
+        throw StateError(
+          'could not load external storage credentials: $lastError — refusing '
+          'to sync to the managed backend',
+        );
+      }
+      // Never answered, ever. "No BYO marker" used to mean both "the server
+      // said managed" and "we could not ask", and treating the second as the
+      // first is how a vault that had asked for its own storage filled a
+      // gigabyte of ours instead.
+      //
+      // Refusing costs a retry. Guessing costs putting a user's files where
+      // they did not choose, and their quota with them. A vault that HAS been
+      // answered before keeps working through an outage — that is what the
+      // stored resolution is for.
+      if (!_store!.storageResolved) {
+        throw StateError(
+          'cannot determine where this vault stores its files ($lastError) — '
+          'refusing to guess the managed backend',
+        );
+      }
+      _log.warning(
+        'External blob config check failed: $lastError — proceeding on the '
+        'previously confirmed managed backend',
+      );
       return;
+    }
+
+    // A definite answer, either way. Recorded so a later failure to ask falls
+    // back on a fact rather than an assumption.
+    if (!_store!.storageResolved) {
+      _store!.markStorageResolved();
+      await _store!.persistMeta();
     }
 
     if (remote != null) {

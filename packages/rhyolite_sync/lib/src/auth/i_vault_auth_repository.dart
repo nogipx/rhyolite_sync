@@ -8,6 +8,14 @@ import 'package:rpc_dart/rpc_dart.dart';
 /// - self-host binds it to a local registry in the same database (one
 ///   instance, no external account service).
 abstract interface class IVaultAuthRepository {
-  Future<bool> userOwnsVault(String userId, String vaultId, {RpcContext? context});
-  Future<void> createVaultForUser(String userId, String vaultId, {RpcContext? context});
+  Future<bool> userOwnsVault(
+    String userId,
+    String vaultId, {
+    RpcContext? context,
+  });
+  Future<void> createVaultForUser(
+    String userId,
+    String vaultId, {
+    RpcContext? context,
+  });
 }

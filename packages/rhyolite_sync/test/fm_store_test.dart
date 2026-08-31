@@ -21,14 +21,14 @@ int _wall = 9000;
 Hlc at(String node) => Hlc(++_wall, 0, node);
 
 FmState build(String region) => applyDiskFrontmatter(
-      FmMapState(
-        entries: const {},
-        fmHlc: at('device-a'),
-        trailHlc: at('device-a'),
-      ),
-      parseFrontmatterRegion(region),
-      at('device-a'),
-    );
+  FmMapState(
+    entries: const {},
+    fmHlc: at('device-a'),
+    trailHlc: at('device-a'),
+  ),
+  parseFrontmatterRegion(region),
+  at('device-a'),
+);
 
 String show(FmState s) => renderRegion(materializeFm(s));
 
@@ -54,22 +54,24 @@ void main() {
     expect(show((await reopened.get('file-1'))!), show(state));
   });
 
-  test('persisting the same file twice overwrites rather than failing',
-      () async {
-    // A plain create throws on the second write; the store has to
-    // create-or-update. Every edit of a note takes this path.
-    final f = await fixture();
-    f.store.set('file-1', build('x: 1\n'));
-    await f.store.persistOne('file-1');
+  test(
+    'persisting the same file twice overwrites rather than failing',
+    () async {
+      // A plain create throws on the second write; the store has to
+      // create-or-update. Every edit of a note takes this path.
+      final f = await fixture();
+      f.store.set('file-1', build('x: 1\n'));
+      await f.store.persistOne('file-1');
 
-    final second = build('x: 2\n');
-    f.store.set('file-1', second);
-    await f.store.persistOne('file-1');
+      final second = build('x: 2\n');
+      f.store.set('file-1', second);
+      await f.store.persistOne('file-1');
 
-    final reopened = FmStore(client: f.client, vaultId: _vaultId);
-    await reopened.load();
-    expect(show((await reopened.get('file-1'))!), show(second));
-  });
+      final reopened = FmStore(client: f.client, vaultId: _vaultId);
+      await reopened.load();
+      expect(show((await reopened.get('file-1'))!), show(second));
+    },
+  );
 
   test('an unknown file is null, not an error', () async {
     final f = await fixture();
@@ -87,21 +89,25 @@ void main() {
     expect(await reopened.get('file-1'), isNull);
   });
 
-  test('a row this build cannot decode reads as absent, never as garbage',
-      () async {
-    // Written by a newer client, or bit-rotted. Null means "no prior state",
-    // which makes the caller rebuild from the blob — the correct recovery,
-    // since the blob is authoritative and this is only a cache.
-    final f = await fixture();
-    await f.client.create(
-      collection: '${_vaultId}_fm_store',
-      id: 'file-1',
-      payload: {'fm': Uint8List.fromList([0xFF, 0xFF, 0xFF])},
-    );
-    final store = FmStore(client: f.client, vaultId: _vaultId);
-    await store.load();
-    expect(await store.get('file-1'), isNull);
-  });
+  test(
+    'a row this build cannot decode reads as absent, never as garbage',
+    () async {
+      // Written by a newer client, or bit-rotted. Null means "no prior state",
+      // which makes the caller rebuild from the blob — the correct recovery,
+      // since the blob is authoritative and this is only a cache.
+      final f = await fixture();
+      await f.client.create(
+        collection: '${_vaultId}_fm_store',
+        id: 'file-1',
+        payload: {
+          'fm': Uint8List.fromList([0xFF, 0xFF, 0xFF]),
+        },
+      );
+      final store = FmStore(client: f.client, vaultId: _vaultId);
+      await store.load();
+      expect(await store.get('file-1'), isNull);
+    },
+  );
 
   test('losing the store loses nothing: the blob rebuilds it', () async {
     // The property that makes a local wipe survivable — db_recovery in the
@@ -109,8 +115,10 @@ void main() {
     // without saying so.
     final f = await fixture();
     final state = build('title: Note\ntags:\n  - work\n');
-    final blob =
-        appendFmTail(FugueStore.encodeBlob(seedFugueText('body\n')), state);
+    final blob = appendFmTail(
+      FugueStore.encodeBlob(seedFugueText('body\n')),
+      state,
+    );
 
     f.store.set('file-1', state);
     await f.store.persistOne('file-1');

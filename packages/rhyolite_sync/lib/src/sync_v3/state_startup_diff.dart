@@ -39,6 +39,16 @@ class StateStartupDiffResult {
   /// acting on the second would broadcast a mass delete to every device.
   final int diskFileCount;
 
+  /// Set when the blob backend refused this device outright.
+  ///
+  /// Carried out rather than thrown, so everything the pass banked before the
+  /// refusal still counts and the engine still starts. But it must leave the
+  /// pass SOMEHOW: a refusal is not a skipped group, it is every future group
+  /// skipped, and swallowing it is how a vault with a mistyped storage
+  /// password went on pulling on schedule, showing a green dot, while not one
+  /// byte it wrote ever left the device.
+  final String? storageRefused;
+
   const StateStartupDiffResult({
     required this.newFiles,
     required this.modifiedFiles,
@@ -48,6 +58,7 @@ class StateStartupDiffResult {
     this.outOfScope = const [],
     this.diskFileCount = 0,
     this.skippedGroups = 0,
+    this.storageRefused,
   });
 }
 
@@ -83,6 +94,46 @@ class StateStartupDiff {
   /// event so the UI can show a counter without polling.
   final void Function(int completed, int total)? onUploadProgress;
 
+  /// How long the server may be left behind what has actually been uploaded.
+  ///
+  /// A time budget, not a file count. Files are not comparable: two hundred
+  /// notes is a couple of seconds and two hundred PDFs is ten minutes, so a
+  /// count says nothing about the thing that matters — how stale the server
+  /// is allowed to get. This codebase has made that mistake before and fixed
+  /// it in the cooperative yielder for the same reason; the comment on the
+  /// scan's yield still explains why.
+  ///
+  /// Ten seconds costs at most six round trips a minute during a pass, and
+  /// bounds what an interruption throws away to the last ten seconds of work
+  /// rather than the whole hour.
+  final Duration publishInterval;
+
+  /// Called at most once per [publishInterval], so the states of what has been
+  /// uploaded can be published while the rest is still going.
+  ///
+  /// The engine used to push only after this whole pass returned. On a large
+  /// vault that is an hour in which the server learns nothing — one report
+  /// showed 780 blob uploads and not one state record — and an interruption
+  /// anywhere in it left the server exactly as empty as before.
+  ///
+  /// Awaited, so a slow publish paces the pass rather than piling up behind
+  /// it. Failures are the engine's to swallow: this pass must not end because
+  /// a push was refused.
+  final Future<void> Function()? onProgressPublished;
+
+  /// Reports the DISK SCAN's progress, before any upload begins.
+  ///
+  /// The scan walks every file and hashes the ones whose signature moved. On a
+  /// large vault that is a minute of work during which the engine emitted
+  /// nothing at all — so the UI could say nothing true, and the host's health
+  /// check, which reads silence as death, tore the engine down mid-scan and
+  /// made the next attempt start the same minute over.
+  ///
+  /// Fired on a time budget rather than per file: the point is a heartbeat,
+  /// and one event per file on a 9000-file vault is thousands of no-ops
+  /// competing for the thread the scan is already saturating.
+  final void Function(int scanned, int total)? onScanProgress;
+
   /// Reports ONE file's upload as its chunks go out, so the active-transfers
   /// list can name what is moving.
   ///
@@ -91,7 +142,7 @@ class StateStartupDiff {
   /// interactive reconcile has narrated large files all along — this path,
   /// which is the one a re-upload of the whole vault takes, did not.
   final void Function(String relPath, int sent, int total, bool done)?
-      onFileTransfer;
+  onFileTransfer;
 
   /// Files per upload request-pair. The round trips a group costs no longer
   /// scale with its size, so a small group only means more of them; this is
@@ -114,6 +165,21 @@ class StateStartupDiff {
   /// unchanged, so an unedited text file produces no push. Null falls back
   /// to the legacy raw path (binary-style), kept for tests / no-engine use.
   final Future<bool> Function(String relPath)? reconcileText;
+
+  /// The two halves of [reconcileText], so a group of notes can share one pair
+  /// of upload requests instead of paying two each.
+  ///
+  /// Supplied together or not at all; without them this falls back to
+  /// [reconcileText] one file at a time, which is what an offline run or a
+  /// test with no remote storage gets.
+  final Future<TextReconcileOutcome> Function(String relPath)?
+  planTextReconcile;
+  final Future<bool> Function(
+    TextReconcilePlan plan,
+    String manifestHash,
+    List<String> chunkHashes,
+  )?
+  commitTextReconcile;
 
   /// Per-vault blob-id HMAC subkey (null → raw sha256 for the no-engine / test
   /// path). Used BOTH for the binary fast-path change detection AND for the
@@ -143,9 +209,14 @@ class StateStartupDiff {
     required this.writeClock,
     this.remoteBlobStorage,
     this.onUploadProgress,
+    this.onScanProgress,
+    this.onProgressPublished,
+    this.publishInterval = const Duration(seconds: 10),
     this.onFileTransfer,
     this.uploadConcurrency = 4,
     this.reconcileText,
+    this.planTextReconcile,
+    this.commitTextReconcile,
     this.sigStore,
     Uint8List? blobIdKey,
     Uint8List? recordIdKey,
@@ -154,15 +225,15 @@ class StateStartupDiff {
     PathScope Function()? pathScope,
     Set<String> Function()? forcedBinaryExtensions,
     LogScope? logger,
-  })  : _blobIdKey = blobIdKey,
-        _recordIdKey = recordIdKey,
-        _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
-        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
-        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
-        _pathScope = pathScope ?? (() => PathScope.everything),
-        _forcedBinaryExtensions =
-            forcedBinaryExtensions ?? (() => const <String>{}),
-        log = logger ?? LogScope.noop;
+  }) : _blobIdKey = blobIdKey,
+       _recordIdKey = recordIdKey,
+       _hasher = ChunkedBlobIO.hasherFor(blobIdKey),
+       _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
+       _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
+       _pathScope = pathScope ?? (() => PathScope.everything),
+       _forcedBinaryExtensions =
+           forcedBinaryExtensions ?? (() => const <String>{}),
+       log = logger ?? LogScope.noop;
 
   /// Live per-device denylist of extensions (no dot) not synced on this device.
   final Set<String> Function() _excludedExtensions;
@@ -187,6 +258,16 @@ class StateStartupDiff {
   /// (pre-signature behavior).
   final StatSigStore? sigStore;
 
+  /// Per-file scan lines kept before the rest are counted instead of logged.
+  static const int _maxScanSamples = 20;
+
+  /// How often the scan reports where it has got to.
+  ///
+  /// A heartbeat, not a progress bar: often enough that nothing watching can
+  /// mistake the scan for a hang, rare enough to cost nothing on the thread
+  /// the scan is already saturating.
+  static const Duration _scanHeartbeat = Duration(milliseconds: 500);
+
   /// Consecutive group failures that end a pass.
   ///
   /// One is a transient; a run of them is systemic and every remaining group
@@ -197,6 +278,7 @@ class StateStartupDiff {
     var newFiles = 0;
     var modifiedFiles = 0;
     var skippedGroups = 0;
+    String? refused;
 
     final diskFiles = await io.listFiles(vaultPath);
     final diskRelPaths = <String>{};
@@ -205,8 +287,26 @@ class StateStartupDiff {
       '${store.fileIds.length} tracked',
     );
 
+    // Per-file scan diagnostics are SAMPLED.
+    //
+    // They used to be unconditional, and on a first sync every file is new —
+    // so one report's log was 40322 of these lines out of 40988, 98% of
+    // everything the device had recorded. That is not a cost in disk alone:
+    // it pushed whole sessions out of the rotation, and two other faults in
+    // that same report could not be diagnosed because the segment holding
+    // them had been evicted by this line. A diagnostic that destroys the
+    // diagnosis is worse than none.
+    //
+    // A sample keeps what the line was for — seeing WHICH files, with sizes —
+    // while the summary at the end of the scan carries the counts, which is
+    // the part that was ever true in bulk.
+    var scanSamples = 0;
+    bool sampleScanLine() => ++scanSamples <= _maxScanSamples;
+
     final swScan = Stopwatch()..start();
     final scanYielder = TimeBudgetYielder();
+    final scanBeat = Stopwatch()..start();
+    var scanned = 0;
     var shaSkipped = 0;
 
     // Per-category pending counters, to surface the "text files always
@@ -217,8 +317,9 @@ class StateStartupDiff {
     var pendingNew = 0;
     var pendingTombstoneRevive = 0;
     var pendingMissingChunks = 0;
-    final typeDetector =
-        FileTypeDetector(extraBinaryExtensions: _forcedBinaryExtensions());
+    final typeDetector = FileTypeDetector(
+      extraBinaryExtensions: _forcedBinaryExtensions(),
+    );
     final blocked = <({String path, int sizeBytes, int limitBytes})>[];
     final excluded = <({String path, String extension})>[];
     final outOfScope = <String>[];
@@ -243,8 +344,16 @@ class StateStartupDiff {
       // Measured in time, not files: the 16 this used to count was one guess
       // covering both a file skipped on its signature and one hashed in full.
       await scanYielder.maybeYield();
+      scanned++;
+      if (onScanProgress != null &&
+          (scanBeat.elapsed >= _scanHeartbeat || scanned == diskFiles.length)) {
+        scanBeat.reset();
+        onScanProgress!(scanned, diskFiles.length);
+      }
 
-      final relPath = normalizeVaultPath(absPath.substring(vaultPath.length + 1));
+      final relPath = normalizeVaultPath(
+        absPath.substring(vaultPath.length + 1),
+      );
       if (_isHidden(relPath)) continue;
       diskRelPaths.add(relPath);
 
@@ -297,12 +406,12 @@ class StateStartupDiff {
           final reason = current == null
               ? (store.hasConflict(fileId) ? 'conflict' : 'no-state')
               : current.tombstone
-                  ? 'tombstone'
-                  : stat == null
-                      ? 'no-stat'
-                      : stat.sizeBytes != sig.sizeBytes
-                          ? 'size disk=${stat.sizeBytes} sig=${sig.sizeBytes}'
-                          : 'mtime disk=${stat.mtimeMs} sig=${sig.mtimeMs}';
+              ? 'tombstone'
+              : stat == null
+              ? 'no-stat'
+              : stat.sizeBytes != sig.sizeBytes
+              ? 'size disk=${stat.sizeBytes} sig=${sig.sizeBytes}'
+              : 'mtime disk=${stat.mtimeMs} sig=${sig.mtimeMs}';
           log.info(
             'StartupDiff: text re-delegated reason=$reason',
             data: {'path': LogPath(relPath)},
@@ -335,6 +444,43 @@ class StateStartupDiff {
 
       final fileId = _deterministicFileId(relPath);
       final current = store.get(fileId);
+
+      // Cross-restart skip for BINARIES, the same one text has had.
+      //
+      // Without it every tracked binary is READ IN FULL on every scan, and a
+      // multi-chunk one is re-chunked on top of that, purely to conclude it
+      // has not changed. That cost is paid by tracked files, so the scan gets
+      // slower the more of the vault is synced — one report shows it climbing
+      // from 24s to 46s as the tracked count went from 392 to 6560, on a scan
+      // that runs at every single start.
+      //
+      // mtime+size is a weaker signal than re-hashing, and knowingly so: it is
+      // the trust the reconciler's own short-circuit and the text path above
+      // already run on. A file edited without its mtime moving is missed here
+      // and caught by the next real change to it.
+      // Cross-restart skip for BINARIES, the same one text has had.
+      //
+      // Without it every tracked binary is READ IN FULL on every scan, and a
+      // multi-chunk one is re-chunked on top of that, purely to conclude it
+      // has not changed. That cost is paid by tracked files, so the scan gets
+      // slower the more of the vault is synced — one report shows it climbing
+      // from 24s to 46s as the tracked count went from 392 to 6560, on a scan
+      // that runs at every single start.
+      //
+      // mtime+size is a weaker signal than re-hashing, and knowingly so: it is
+      // the trust the reconciler's own short-circuit and the text path above
+      // already run on. A file edited without its mtime moving is missed here
+      // and caught by the next real change to it.
+      final binSig = sigStore?.get(fileId);
+      if (binSig != null && current != null && !current.tombstone) {
+        final stat = await io.statFile(absPath);
+        if (stat != null &&
+            stat.mtimeMs == binSig.mtimeMs &&
+            stat.sizeBytes == binSig.sizeBytes) {
+          shaSkipped += 1;
+          continue;
+        }
+      }
 
       final Uint8List bytes;
       try {
@@ -370,9 +516,21 @@ class StateStartupDiff {
       //       attachments) where the previous logic re-uploaded the
       //       whole multi-megabyte file every startup.
       if (current != null && !current.tombstone) {
+        // Whatever the fast path concludes below, this file has just been
+        // read and its stat is what it is — so record it. Without this the
+        // signature only ever existed for text, and every binary paid a full
+        // read on every scan forever.
+        Future<void> rememberSig() async {
+          final store = sigStore;
+          if (store == null) return;
+          final stat = await io.statFile(absPath);
+          if (stat != null) store.set(fileId, stat.mtimeMs, stat.sizeBytes);
+        }
+
         // (a) Empty file.
         if (bytes.isEmpty && current.sizeBytes == 0) {
           shaSkipped += 1;
+          await rememberSig();
           continue;
         }
 
@@ -381,12 +539,15 @@ class StateStartupDiff {
         // (b) Single-chunk.
         if (current.chunks.length == 1 && current.chunks.first == wholeHash) {
           shaSkipped += 1;
+          await rememberSig();
           continue;
         }
 
         // (c) Multi-chunk: re-chunk if size matches.
         if (current.chunks.length > 1 && current.sizeBytes == bytes.length) {
-          final result = await ContentDefinedChunker(blobIdHasher: _hasher)(bytes);
+          final result = await ContentDefinedChunker(blobIdHasher: _hasher)(
+            bytes,
+          );
           final freshHashes = result.manifest.chunks
               .map((c) => c.hash)
               .toList(growable: false);
@@ -400,6 +561,7 @@ class StateStartupDiff {
             }
             if (allMatch) {
               shaSkipped += 1;
+              await rememberSig();
               continue;
             }
           }
@@ -420,20 +582,21 @@ class StateStartupDiff {
         final reason = current.chunks.isEmpty
             ? 'chunks-empty'
             : current.chunks.length == 1 && current.chunks.first != wholeHash
-                ? (isText
-                    ? 'text-blob-hash-vs-content-hash-mismatch'
-                    : 'single-chunk-hash-mismatch')
-                : current.sizeBytes != bytes.length
-                    ? 'size-mismatch'
-                    : 'chunk-list-mismatch';
-        log.info(
-          'StartupDiff: pending isText=$isText reason=$reason '
-          'diskBytes=${bytes.length} diskHash=${wholeHash.substring(0, 8)} '
-          'chunks.len=${current.chunks.length} chunks[0]=$chunkPrev '
-          'state.blobRef=${current.blobRef.length < 8 ? current.blobRef : current.blobRef.substring(0, 8)} '
-          'state.sizeBytes=${current.sizeBytes}',
-          data: {'path': LogPath(relPath)},
-        );
+            ? (isText
+                  ? 'text-blob-hash-vs-content-hash-mismatch'
+                  : 'single-chunk-hash-mismatch')
+            : current.sizeBytes != bytes.length
+            ? 'size-mismatch'
+            : 'chunk-list-mismatch';
+        if (sampleScanLine())
+          log.info(
+            'StartupDiff: pending isText=$isText reason=$reason '
+            'diskBytes=${bytes.length} diskHash=${wholeHash.substring(0, 8)} '
+            'chunks.len=${current.chunks.length} chunks[0]=$chunkPrev '
+            'state.blobRef=${current.blobRef.length < 8 ? current.blobRef : current.blobRef.substring(0, 8)} '
+            'state.sizeBytes=${current.sizeBytes}',
+            data: {'path': LogPath(relPath)},
+          );
       } else {
         // Two distinct sub-cases:
         //   (i)  current == null — store has no entry for this fileId.
@@ -452,11 +615,12 @@ class StateStartupDiff {
         }
         if (current == null) {
           pendingNew++;
-          log.info(
-            'StartupDiff: pending-new isText=$isText '
-            'fileId=$fileId diskBytes=${bytes.length}',
-            data: {'path': LogPath(relPath)},
-          );
+          if (sampleScanLine())
+            log.info(
+              'StartupDiff: pending-new isText=$isText '
+              'fileId=$fileId diskBytes=${bytes.length}',
+              data: {'path': LogPath(relPath)},
+            );
         } else {
           // Tombstoned but on disk.
           pendingTombstoneRevive++;
@@ -482,6 +646,12 @@ class StateStartupDiff {
       ));
     }
     swScan.stop();
+    if (scanSamples > _maxScanSamples) {
+      log.info(
+        'StartupDiff: ${scanSamples - _maxScanSamples} more per-file line(s) '
+        'withheld — the counts below are the whole picture',
+      );
+    }
     log.info(
       'StartupDiff: scan done in ${swScan.elapsedMilliseconds}ms — '
       '$shaSkipped sha-skipped, ${pending.length} binary-pending '
@@ -518,9 +688,28 @@ class StateStartupDiff {
     // happens to be packed.
     final totalFiles = pending.length + pendingTextPaths.length;
     var doneFiles = 0;
+    var publishedSomething = false;
+    final publishBeat = Stopwatch()..start();
     void creditFile() {
       doneFiles++;
+      publishedSomething = true;
       onUploadProgress?.call(doneFiles, totalFiles);
+    }
+
+    /// Publishes what has landed, if enough has landed since the last time.
+    ///
+    /// Called from BOTH job kinds. It lived in the binary one first, which
+    /// meant a vault of notes — where every file takes the text path —
+    /// published nothing until the pass ended, and the whole point was lost
+    /// for exactly the vaults most likely to be large.
+    Future<void> maybePublish() async {
+      final publish = onProgressPublished;
+      // Nothing new is worth a round trip however long it has been.
+      if (publish == null || !publishedSomething) return;
+      if (publishBeat.elapsed < publishInterval) return;
+      publishedSomething = false;
+      publishBeat.reset();
+      await publish();
     }
 
     final jobs = <Future<void> Function()>[];
@@ -545,8 +734,7 @@ class StateStartupDiff {
               final item = group[index];
               // Same threshold the reconcile path uses, so a file that names
               // itself when edited also names itself on a re-upload.
-              if (item.bytes.length <
-                  DiskReconciler.transferMonitorMinBytes) {
+              if (item.bytes.length < DiskReconciler.transferMonitorMinBytes) {
                 return;
               }
               onFileTransfer?.call(item.relPath, sent, total, false);
@@ -555,8 +743,7 @@ class StateStartupDiff {
           for (var j = 0; j < group.length; j++) {
             final item = group[j];
             final result = results[j];
-            if (item.bytes.length >=
-                DiskReconciler.transferMonitorMinBytes) {
+            if (item.bytes.length >= DiskReconciler.transferMonitorMinBytes) {
               // Retire it from the active list; without this it sits there at
               // whatever fraction the last chunk left it on.
               onFileTransfer?.call(
@@ -615,6 +802,21 @@ class StateStartupDiff {
             // skip this file — that path compares disk against the stored
             // chunk list, so without the row there is nothing to compare to.
             await store.persistOne(item.fileId);
+            // So the next scan skips it on its stat instead of reading it
+            // again. A file uploaded here and never signed would be read in
+            // full on every start for the rest of its life.
+            final sigs = sigStore;
+            if (sigs != null) {
+              final stat = await io.statFile('$vaultPath/${item.relPath}');
+              if (stat != null) {
+                sigs.set(
+                  item.fileId,
+                  stat.mtimeMs,
+                  stat.sizeBytes,
+                  blobRef: result.manifestHash,
+                );
+              }
+            }
             creditFile();
           }
           // The causal context, once per group.
@@ -632,11 +834,67 @@ class StateStartupDiff {
           // today; while it still carried an entry per file this would have
           // been a 1.8 MB rewrite per group.
           await store.persistMeta();
+          await maybePublish();
         });
       }
     }
-    final reconcile = reconcileText;
-    if (reconcile != null) {
+    final planText = planTextReconcile;
+    final commitText = commitTextReconcile;
+    if (chunkedIO != null && planText != null && commitText != null) {
+      // A GROUP per job, exactly as for binaries above. Text used to be one
+      // job per file, and each of those did its own two-request upload: 188
+      // notes cost 376 round trips where 188 binaries cost 48. On the managed
+      // backend the request is cheap and nobody saw it; on a BYO WebDAV a
+      // vault of 188 notes took seven minutes, and the per-file timings said
+      // `upload=4823ms` for a 2 KB blob — queue time, not transfer.
+      for (var i = 0; i < pendingTextPaths.length; i += _uploadGroupSize) {
+        final group = pendingTextPaths.sublist(
+          i,
+          i + _uploadGroupSize > pendingTextPaths.length
+              ? pendingTextPaths.length
+              : i + _uploadGroupSize,
+        );
+        jobs.add(() async {
+          // Plan first: reading, seeding and diffing are local, and most files
+          // settle here without needing the network at all.
+          final plans = <TextReconcilePlan>[];
+          for (final relPath in group) {
+            final outcome = await planText(relPath);
+            final plan = outcome.plan;
+            if (plan == null) {
+              if (outcome.changed) modifiedFiles++;
+              creditFile();
+              continue;
+            }
+            plans.add(plan);
+          }
+          if (plans.isEmpty) {
+            await maybePublish();
+            return;
+          }
+          final results = await chunkedIO.uploadAll(
+            [for (final plan in plans) plan.blobBytes],
+            knownChunks,
+            // These bytes ARE the tree, which the commit writes before the
+            // FileState naming them — so caching a second copy in the same
+            // database buys nothing. Same reason the per-file path passes it.
+            cacheLocally: false,
+          );
+          for (var j = 0; j < plans.length; j++) {
+            final changed = await commitText(
+              plans[j],
+              results[j].manifestHash,
+              results[j].chunkHashes,
+            );
+            if (changed) modifiedFiles++;
+            creditFile();
+          }
+          await maybePublish();
+        });
+      }
+    } else if (reconcileText != null) {
+      // No chunked IO (offline runs, tests): one file at a time, as before.
+      final reconcile = reconcileText!;
       for (final relPath in pendingTextPaths) {
         jobs.add(() async {
           // The reconciler writes its own FileState (Fugue blob) and only
@@ -645,6 +903,7 @@ class StateStartupDiff {
           final changed = await reconcile(relPath);
           if (changed) modifiedFiles++;
           creditFile();
+          await maybePublish();
         });
       }
     }
@@ -660,6 +919,9 @@ class StateStartupDiff {
       final swatch = Stopwatch()..start();
       var nextIndex = 0;
       var consecutiveFailures = 0;
+      // Set once by whichever worker trips the threshold; every worker checks
+      // it, so the pass ends rather than each worker ending separately.
+      var abort = false;
       Object? lastGroupError;
 
       // Bounded-concurrency worker pool. CPU work (CDC chunker, encrypt,
@@ -668,6 +930,7 @@ class StateStartupDiff {
       // BlobTransferHub caps inner RPCs and dedups shared chunk hashes.
       Future<void> worker() async {
         while (true) {
+          if (abort) return;
           final i = nextIndex++;
           if (i >= jobs.length) return;
           try {
@@ -680,6 +943,24 @@ class StateStartupDiff {
             // by design, and swallowing it would keep working after the host
             // asked us to stop.
             if (e is RpcCancelledException) rethrow;
+            // Neither is a disposed hub. It does not say this group failed, it
+            // says the SESSION that owned the transfers is gone: a newer start
+            // replaced this one, or the engine stopped. Every later group will
+            // fail identically, and continuing means doing work for a session
+            // that no longer exists — a real pass burned 26 groups discovering
+            // that one at a time.
+            if (e is BlobTransferHubDisposed) rethrow;
+            // Nor is a refused storage. 401 is not this group's bad luck, it
+            // is the backend declining to hold anything at all: retrying it
+            // 9000 times over produces 9000 identical refusals and one very
+            // busy laptop. Stop, and carry the reason out so the host can say
+            // which credentials to fix — the run keeps whatever it banked.
+            if (e is BlobStorageRefused) {
+              refused ??= '$e';
+              abort = true;
+              log.error('StartupDiff: $e — stopping this pass');
+              return;
+            }
             skippedGroups++;
             consecutiveFailures++;
             lastGroupError = e;
@@ -693,11 +974,18 @@ class StateStartupDiff {
             // host's self-heal retries later, and by then the diff has less
             // to do than it did.
             if (consecutiveFailures >= _maxConsecutiveGroupFailures) {
+              // Shared, because `throw` ends only THIS worker. Without it the
+              // other three carried on pulling jobs and each tripped the
+              // threshold in turn — the log said "stopping this pass" while
+              // the pass visibly continued, four times over.
+              abort = true;
+            }
+            if (abort) {
               log.error(
                 'StartupDiff: $consecutiveFailures groups failed in a row — '
                 'stopping this pass',
               );
-              throw e;
+              rethrow;
             }
           }
         }
@@ -709,7 +997,7 @@ class StateStartupDiff {
         'StartupDiff: processing of $totalFiles file(s) done in '
         '${swatch.elapsed.inSeconds}s'
         '${skippedGroups > 0 ? ', $skippedGroups group(s) skipped '
-            '(last: $lastGroupError)' : ''}',
+                  '(last: $lastGroupError)' : ''}',
       );
     }
 
@@ -731,6 +1019,7 @@ class StateStartupDiff {
       outOfScope: outOfScope,
       diskFileCount: diskRelPaths.length,
       skippedGroups: skippedGroups,
+      storageRefused: refused,
     );
   }
 

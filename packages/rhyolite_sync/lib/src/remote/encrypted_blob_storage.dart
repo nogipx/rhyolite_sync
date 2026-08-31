@@ -7,10 +7,7 @@ import 'package:rpc_dart/rpc_dart.dart';
 ///
 /// When [cipher] is null, data passes through unchanged.
 class EncryptedBlobStorage implements IBlobStorage, IListableBlobStorage {
-  const EncryptedBlobStorage({
-    required this.inner,
-    required this.cipher,
-  });
+  const EncryptedBlobStorage({required this.inner, required this.cipher});
 
   final IBlobStorage inner;
   final IVaultCipher? cipher;
@@ -50,19 +47,13 @@ class EncryptedBlobStorage implements IBlobStorage, IListableBlobStorage {
   }
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) =>
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) =>
       inner.deleteMany(blobIds, context: context);
 
   // Blob ids are content hashes of the plain bytes, unchanged by
   // encryption — presence is a pure passthrough.
   @override
-  Future<Set<String>> exists(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) =>
+  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) =>
       inner.exists(blobIds, context: context);
 
   /// Enumeration passes straight through: blob ids are plaintext content

@@ -99,6 +99,26 @@ class FileStateStore {
   int _serverCursor = 0;
   int? _serverEpoch;
 
+  /// Whether this vault has ever received a DEFINITE answer about where its
+  /// blobs belong — managed, or a specific external backend.
+  ///
+  /// Absence of a BYO marker used to mean two different things at once: "the
+  /// server told us there is no external storage" and "we have never managed
+  /// to ask". The second was treated as the first, so a vault whose config
+  /// lookup timed out uploaded to the managed backend by default. One user
+  /// filled a gigabyte of our storage that way, having asked for their own.
+  ///
+  /// Kept here rather than in [VaultConfig] because losing it is the SAFE
+  /// direction: a reset database re-asks, and until it has an answer it
+  /// refuses rather than guesses. The BYO marker itself stays in the config,
+  /// where it survives a reset, because losing THAT is the unsafe direction.
+  bool _storageResolved = false;
+  bool get storageResolved => _storageResolved;
+
+  /// Records that the backend question has been answered. Call [persistMeta]
+  /// to write it down.
+  void markStorageResolved() => _storageResolved = true;
+
   bool _loadedEmpty = false;
 
   /// [load] found NOTHING persisted: no meta row and no register rows.
@@ -151,6 +171,27 @@ class FileStateStore {
   int? get serverEpoch => _serverEpoch;
 
   Iterable<String> get fileIds => _registers.keys;
+
+  /// Files whose current value the server may not have yet.
+  ///
+  /// A CONSERVATIVE SUPERSET, and deliberately so: it is grown by every write
+  /// to a register and shrunk only when a push is acknowledged or the pusher
+  /// classifies a member as owing nothing. Over-inclusion costs one extra
+  /// comparison; under-inclusion loses a file, so the set is never asked to be
+  /// clever about what "dirty" means. That judgement stays in `_collectDirty`,
+  /// which is the only place it has ever lived.
+  ///
+  /// It exists because the push path had no cheap way to answer "what does the
+  /// server not know about" and so re-derived it by walking every file, every
+  /// time. On a 9121-file vault that ran on each interactive edit — one file
+  /// changes, nine thousand are examined, and the code marking that one file
+  /// pending sits on the line above.
+  Iterable<String> get owedFileIds => _owed;
+
+  /// Drops ids the pusher has determined owe the server nothing.
+  void clearOwed(Iterable<String> fileIds) => _owed.removeAll(fileIds);
+
+  final Set<String> _owed = {};
   int get count => _registers.length;
 
   /// All current single-value file states, skipping conflicting registers.
@@ -196,13 +237,14 @@ class FileStateStore {
 
   /// The record this device last got the server to accept for [fileId], or
   /// null if it has never had one accepted.
-  String? lastPushedSignatureFor(String fileId) =>
-      _lastPushedSignature[fileId];
+  String? lastPushedSignatureFor(String fileId) => _lastPushedSignature[fileId];
 
   /// Records that the server accepted [signature] for [fileId]. Call before
   /// [persistOne], which is what writes it down.
   void recordPushedSignature(String fileId, String signature) {
     _lastPushedSignature[fileId] = signature;
+    // The server has this exact value. A later write re-adds it.
+    _owed.remove(fileId);
   }
 
   /// The max serverSeq this device has pulled for [fileId], or null if it has
@@ -299,6 +341,7 @@ class FileStateStore {
     final existing = _registers[value.fileId] ?? MvRegister<FileState>.empty();
     final updated = existing.set(value, value.hlc, _ownContext);
     _registers[value.fileId] = updated;
+    _owed.add(value.fileId);
     _ownContext = _ownContext.advance(value.hlc);
     if (value.hlc.nodeId == _deviceId) {
       if (_ownLatestHlc == null || value.hlc > _ownLatestHlc!) {
@@ -351,6 +394,11 @@ class FileStateStore {
     final local = _registers[fileId] ?? MvRegister<FileState>.empty();
     final joined = local.join(remote);
     _registers[fileId] = joined;
+    // A remote value usually owes nothing — the server is where it came from.
+    // But the join can leave OUR concurrent value unpublished beside it, and
+    // that one is owed. Cheaper to include and let the classifier decide than
+    // to reason about it here.
+    _owed.add(fileId);
     for (final tv in remoteSet) {
       _ownContext = _ownContext.advance(tv.hlc).merge(tv.context);
     }
@@ -368,8 +416,11 @@ class FileStateStore {
   void replaceRegister(String fileId, MvRegister<FileState> register) {
     if (register.values.isEmpty) {
       _registers.remove(fileId);
+      _owed.remove(fileId);
     } else {
       _registers[fileId] = register;
+      // The resolver seals a NEW value here; nobody has it but us.
+      _owed.add(fileId);
     }
   }
 
@@ -399,6 +450,7 @@ class FileStateStore {
   Future<void> load() async {
     final records = await _client.listAllRecords(collection: _storeCol);
     _registers.clear();
+    _owed.clear();
     _ownLatestHlc = null;
     for (final r in records) {
       try {
@@ -433,6 +485,7 @@ class FileStateStore {
       _serverCursor = (meta.payload['cursor'] as int?) ?? 0;
       _serverEpoch = meta.payload['epoch'] as int?;
       _deviceId = meta.payload['deviceId'] as String?;
+      _storageResolved = (meta.payload['storageResolved'] as bool?) ?? false;
       final ctxStr = meta.payload['ownContext'] as String?;
       _ownContext = ctxStr == null
           ? const CausalContext.empty()
@@ -489,6 +542,15 @@ class FileStateStore {
         }
       }
     }
+    // Everything is a candidate after a load, and it has to be: nothing else
+    // survives a restart. The host's pending set is memory-only, and the
+    // startup diff writes states without telling anyone — so if this set began
+    // empty, a vault with unsent files would upload nothing and report nothing
+    // wrong, which is the failure this set exists to make impossible.
+    //
+    // The first push then classifies them and drops what owes nothing. That is
+    // one full pass per load, which is what every push used to cost.
+    _owed.addAll(_registers.keys);
   }
 
   final Map<String, Future<void>> _persistQueue = {};
@@ -553,6 +615,7 @@ class FileStateStore {
       if (_deviceId != null) 'deviceId': _deviceId,
       'ownContext': _ownContext.pack(),
       'fugueCounter': _fugueClock?.value ?? 0,
+      if (_storageResolved) 'storageResolved': true,
       // Only what has not moved to a per-file row yet. This shrinks to nothing
       // as the vault is touched, which is the point: it used to hold every
       // file's entry and was re-read and rewritten whole on every call.

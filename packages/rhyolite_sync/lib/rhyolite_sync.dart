@@ -75,6 +75,7 @@ export 'src/remote/s3_blob_storage.dart';
 export 'src/remote/vault_meta_service.dart';
 export 'src/local/local_blob_store.dart';
 export 'src/local/local_blob_storage_adapter.dart';
+export 'src/local/serialised_data_client.dart';
 
 // --- Sync engine + state types -----------------------------------------
 export 'src/engine/i_sync_engine.dart';
@@ -122,4 +123,5 @@ export 'src/use_cases/inspect_backup_use_case.dart';
 export 'src/use_cases/repair_vault_use_case.dart';
 export 'src/use_cases/restore_backup_use_case.dart';
 export 'src/use_cases/vault_stats_use_case.dart';
+export 'src/use_cases/reupload_storage_use_case.dart';
 export 'src/use_cases/verify_blobs_use_case.dart';

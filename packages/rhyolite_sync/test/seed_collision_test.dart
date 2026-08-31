@@ -53,16 +53,18 @@ void main() {
       expect(a.join(b), b.join(a)); // converges both orders, no assert
     });
 
-    test('prefix-compatible independent seeds are joinable (no false conflict)',
-        () {
-      // Edge: one seed is a prefix of the other. Same-dot values agree over the
-      // overlap, so the join is prefix-compatible and lossless — the guard must
-      // NOT flag this as a divergent conflict.
-      final a = FugueTextSync.seedFromText('ab');
-      final b = FugueTextSync.seedFromText('abc');
-      expect(RemoteApplier.sharesGenuineHistory([a, b]), isTrue);
-      expect(a.join(b).values.join(), 'abc');
-    });
+    test(
+      'prefix-compatible independent seeds are joinable (no false conflict)',
+      () {
+        // Edge: one seed is a prefix of the other. Same-dot values agree over the
+        // overlap, so the join is prefix-compatible and lossless — the guard must
+        // NOT flag this as a divergent conflict.
+        final a = FugueTextSync.seedFromText('ab');
+        final b = FugueTextSync.seedFromText('abc');
+        expect(RemoteApplier.sharesGenuineHistory([a, b]), isTrue);
+        expect(a.join(b).values.join(), 'abc');
+      },
+    );
 
     test('disjoint trees (no shared dot) are not genuine history', () {
       // Real per-device dots never collide across devices, so two trees with no

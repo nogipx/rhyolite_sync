@@ -50,8 +50,7 @@ class SettingsSync {
        _kindOf = kindOf,
        // Keyed record ids close the path-enumeration oracle (see
        // VaultCipher.deriveRecordIdKey). Null for a non-VaultCipher fake (tests).
-       _recordIdKey =
-           cipher is VaultCipher ? cipher.deriveRecordIdKey() : null,
+       _recordIdKey = cipher is VaultCipher ? cipher.deriveRecordIdKey() : null,
        _log = log;
 
   final IStateSyncContract Function() _remoteOf;
@@ -191,9 +190,11 @@ class SettingsSync {
     // the decode cost.
     sw.reset();
     final changed = await pull();
-    _log?.call('settings start: rows=${_store.resourceIds.length} '
-        'purged=$purged reset=$reset load=${loadMs}ms '
-        'pull=${sw.elapsedMilliseconds}ms');
+    _log?.call(
+      'settings start: rows=${_store.resourceIds.length} '
+      'purged=$purged reset=$reset load=${loadMs}ms '
+      'pull=${sw.elapsedMilliseconds}ms',
+    );
     return changed;
   }
 
@@ -421,7 +422,8 @@ class SettingsSync {
   /// Mirrors the notes "download from server".
   Future<Set<String>> restoreFromServer() async {
     _state.clear();
-    await _store.wipeAll(); // cursor -> 0, so the next pull re-reads all records
+    await _store
+        .wipeAll(); // cursor -> 0, so the next pull re-reads all records
     return pull();
   }
 
@@ -476,9 +478,11 @@ class SettingsSync {
           _rejected[resourceId] = _digestOf(
             sending.firstWhere((i) => i.fileId == e.key).encryptedState,
           );
-          _log?.call('settings: server refused $resourceId '
-              '(${r.code} ${r.current} > ${r.limit}) — NOT synced; it is '
-              'retried when the file changes');
+          _log?.call(
+            'settings: server refused $resourceId '
+            '(${r.code} ${r.current} > ${r.limit}) — NOT synced; it is '
+            'retried when the file changes',
+          );
           continue;
         }
         _rejected.remove(resourceId);
@@ -498,11 +502,13 @@ class SettingsSync {
       // The resourceId (the `.obsidian` path) goes INSIDE the ciphertext; the
       // server key is an opaque uuid, so the settings file structure never
       // leaks in cleartext. The path is recovered from this envelope on pull.
-      final payload = utf8.encode(jsonEncode({
-        't': _envelopeTag,
-        'path': resourceId,
-        's': codec.encodeState(state),
-      }));
+      final payload = utf8.encode(
+        jsonEncode({
+          't': _envelopeTag,
+          'path': resourceId,
+          's': codec.encodeState(state),
+        }),
+      );
       final enc = await _cipher.encrypt(Uint8List.fromList(payload));
       // What actually travels is the base64, which is a third larger than the
       // ciphertext — measuring `enc` would undercount the request by that much.

@@ -58,18 +58,18 @@ class PluginFileRef {
     if (blobRef is! String || blobRef.isEmpty) return null;
     return PluginFileRef(
       blobRef: blobRef,
-      chunks: ((json['c'] as List?) ?? const [])
-          .whereType<String>()
-          .toList(growable: false),
+      chunks: ((json['c'] as List?) ?? const []).whereType<String>().toList(
+        growable: false,
+      ),
       size: (json['s'] as int?) ?? 0,
     );
   }
 
   Map<String, Object?> toJson() => {
-        'b': blobRef,
-        if (chunks.isNotEmpty) 'c': chunks,
-        's': size,
-      };
+    'b': blobRef,
+    if (chunks.isNotEmpty) 'c': chunks,
+    's': size,
+  };
 }
 
 /// One entry of a plugin's version trail.
@@ -96,10 +96,10 @@ class PluginVersionEntry {
   }
 
   Map<String, Object?> toJson() => {
-        'v': version,
-        't': atMs,
-        if (device != null) 'd': device,
-      };
+    'v': version,
+    't': atMs,
+    if (device != null) 'd': device,
+  };
 }
 
 /// The synced state of one plugin directory: which blobs hold its files, plus
@@ -137,16 +137,15 @@ class PluginDirManifest {
     int updatedAtMs = 0,
     String? updatedBy,
     List<PluginVersionEntry> history = const [],
-  }) =>
-      PluginDirManifest(
-        pluginId: pluginId,
-        files: const {},
-        version: version,
-        updatedAtMs: updatedAtMs,
-        updatedBy: updatedBy,
-        history: history,
-        deleted: true,
-      );
+  }) => PluginDirManifest(
+    pluginId: pluginId,
+    files: const {},
+    version: version,
+    updatedAtMs: updatedAtMs,
+    updatedBy: updatedBy,
+    history: history,
+    deleted: true,
+  );
 
   static const schemaVersion = 1;
 
@@ -227,11 +226,13 @@ class PluginDirManifest {
     final trail = <PluginVersionEntry>[...previous.history];
     final prevVersion = previous.version;
     if (prevVersion != null && prevVersion != version) {
-      trail.add(PluginVersionEntry(
-        version: prevVersion,
-        atMs: previous.updatedAtMs,
-        device: previous.updatedBy,
-      ));
+      trail.add(
+        PluginVersionEntry(
+          version: prevVersion,
+          atMs: previous.updatedAtMs,
+          device: previous.updatedBy,
+        ),
+      );
     }
     final trimmed = trail.length <= maxHistoryEntries
         ? trail

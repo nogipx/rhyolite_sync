@@ -62,7 +62,8 @@ void main() {
     expect(
       offenders,
       isEmpty,
-      reason: 'Pass the path as data instead:\n'
+      reason:
+          'Pass the path as data instead:\n'
           "  _log.info('message', data: {'path': LogPath(relPath)});\n"
           'Offending sites:\n${offenders.join('\n')}',
     );

@@ -45,7 +45,8 @@ List<int> loneSurrogates(String s) {
     final isHigh = c >= 0xD800 && c <= 0xDBFF;
     final isLow = c >= 0xDC00 && c <= 0xDFFF;
     if (isHigh) {
-      if (i + 1 >= s.length || s.codeUnitAt(i + 1) < 0xDC00 ||
+      if (i + 1 >= s.length ||
+          s.codeUnitAt(i + 1) < 0xDC00 ||
           s.codeUnitAt(i + 1) > 0xDFFF) {
         out.add(i);
       } else {
@@ -104,23 +105,32 @@ void main() {
     expect(got, edited);
   });
 
-  test('two devices editing around the emoji join without splitting it',
-      () async {
-    final seeded = FugueTextSync.seedFromText(_note);
-    final a = await edit(seeded, _note.replaceFirst('status: 🟦', 'status: 🟩'), 'A');
-    final b = await edit(
-      seeded,
-      _note.replaceFirst('stage: 0. Черновик', 'stage: 1. Согласование'),
-      'B',
-    );
-    final merged = a.join(b).values.join();
-    expect(loneSurrogates(merged), isEmpty,
-        reason: 'a merge must never produce half a surrogate pair');
-    expect(merged.contains('status: 🟩'), isTrue);
-    expect(merged.contains('stage: 1. Согласование'), isTrue);
-    // And the line structure around the emoji must survive.
-    expect(merged.contains('priority: 🇦\ncategory:'), isTrue);
-  });
+  test(
+    'two devices editing around the emoji join without splitting it',
+    () async {
+      final seeded = FugueTextSync.seedFromText(_note);
+      final a = await edit(
+        seeded,
+        _note.replaceFirst('status: 🟦', 'status: 🟩'),
+        'A',
+      );
+      final b = await edit(
+        seeded,
+        _note.replaceFirst('stage: 0. Черновик', 'stage: 1. Согласование'),
+        'B',
+      );
+      final merged = a.join(b).values.join();
+      expect(
+        loneSurrogates(merged),
+        isEmpty,
+        reason: 'a merge must never produce half a surrogate pair',
+      );
+      expect(merged.contains('status: 🟩'), isTrue);
+      expect(merged.contains('stage: 1. Согласование'), isTrue);
+      // And the line structure around the emoji must survive.
+      expect(merged.contains('priority: 🇦\ncategory:'), isTrue);
+    },
+  );
 
   test('deleting the emoji removes exactly it', () async {
     final seeded = FugueTextSync.seedFromText(_note);

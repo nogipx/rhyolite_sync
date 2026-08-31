@@ -30,20 +30,29 @@ class _FakeStateCaller implements IStateSyncContract {
     final records = dataset
         .where((r) => r.serverSeq > request.sinceCursor)
         .toList(growable: false);
-    final maxSeq = dataset.fold<int>(0, (m, r) => r.serverSeq > m ? r.serverSeq : m);
+    final maxSeq = dataset.fold<int>(
+      0,
+      (m, r) => r.serverSeq > m ? r.serverSeq : m,
+    );
     return StateGetResponse(records: records, cursor: maxSeq, epoch: 0);
   }
 
   @override
-  Future<StatePutResponse> putStates(StatePutRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<StatePutResponse> putStates(
+    StatePutRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
 
   @override
-  Future<StateWipeResponse> wipeVault(StateWipeRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<StateWipeResponse> wipeVault(
+    StateWipeRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
   @override
-  Future<StatePurgeResponse> purgeVault(StatePurgeRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<StatePurgeResponse> purgeVault(
+    StatePurgeRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
 }
 
 class _FakeHistoryCaller implements IHistoryContract {
@@ -61,34 +70,44 @@ class _FakeHistoryCaller implements IHistoryContract {
   }
 
   @override
-  Future<HistoryGetResponse> getHistory(HistoryGetRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<HistoryGetResponse> getHistory(
+    HistoryGetRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
   @override
-  Future<HistoryDeleteEventsResponse> deleteEvents(HistoryDeleteEventsRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<HistoryDeleteEventsResponse> deleteEvents(
+    HistoryDeleteEventsRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
   @override
-  Future<GetHistoryHeadsResponse> getHistoryHeads(GetHistoryHeadsRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<GetHistoryHeadsResponse> getHistoryHeads(
+    GetHistoryHeadsRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
   @override
-  Future<ForgetDeviceResponse> forgetDevice(ForgetDeviceRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+  Future<ForgetDeviceResponse> forgetDevice(
+    ForgetDeviceRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
 }
 
 class _NoConflictResolver implements IStateConflictResolver {
   @override
-  Future<StateMergeOutcome> resolve(List<FileState> values, {String? baseRef}) =>
-      throw UnimplementedError();
+  Future<StateMergeOutcome> resolve(
+    List<FileState> values, {
+    String? baseRef,
+  }) => throw UnimplementedError();
 }
 
 StateRecord _rec(String fileId, int seq) => StateRecord(
-      fileId: fileId,
-      encryptedState: '',
-      blobRef: '',
-      hlcPacked: Hlc(seq, 0, 'device-$fileId').pack(),
-      contextPacked: '',
-      serverSeq: seq,
-      tombstone: false,
-    );
+  fileId: fileId,
+  encryptedState: '',
+  blobRef: '',
+  hlcPacked: Hlc(seq, 0, 'device-$fileId').pack(),
+  contextPacked: '',
+  serverSeq: seq,
+  tombstone: false,
+);
 
 typedef _Fx = ({
   StatePuller puller,
@@ -139,177 +158,236 @@ Future<_Fx> _newPuller(
     downloadConcurrency: 1,
   );
 
-  return (puller: puller, store: store, caller: caller, history: history, events: events);
+  return (
+    puller: puller,
+    store: store,
+    caller: caller,
+    history: history,
+    events: events,
+  );
 }
 
 void main() {
   _incrementalCursorTests();
   group('StatePuller — pull persists meta at its convergence point (L1-4)', () {
-    test('cursor + recorded LCA survive a crash before the next push',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      final store = FileStateStore(client: env.client, vaultId: _vaultId);
-      await store.load();
-      final blobStore = LocalBlobStore(InMemoryBlobRepository());
-      final events = <SyncEngineEvent>[];
+    test(
+      'cursor + recorded LCA survive a crash before the next push',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = FileStateStore(client: env.client, vaultId: _vaultId);
+        await store.load();
+        final blobStore = LocalBlobStore(InMemoryBlobRepository());
+        final events = <SyncEngineEvent>[];
 
-      final puller = StatePuller(
-        stateCaller: _FakeStateCaller([_rec(_idA, 1), _rec(_idB, 2)]),
-        historyCaller: _FakeHistoryCaller(),
-        store: store,
-        blobStore: blobStore,
-        vaultId: _vaultId,
-        rpcTimeout: const Duration(seconds: 5),
-        getRemoteBlobStorage: () => null,
-        newResolver: () => _NoConflictResolver(),
-        // A successful apply records a synced LCA for the file — exactly the
-        // in-memory-only state that a crash used to lose.
-        applyFile: (fileId, records, resolver, {context}) async {
-          store.recordSyncedBlobRef(fileId, 'lca-$fileId');
+        final puller = StatePuller(
+          stateCaller: _FakeStateCaller([_rec(_idA, 1), _rec(_idB, 2)]),
+          historyCaller: _FakeHistoryCaller(),
+          store: store,
+          blobStore: blobStore,
+          vaultId: _vaultId,
+          rpcTimeout: const Duration(seconds: 5),
+          getRemoteBlobStorage: () => null,
+          newResolver: () => _NoConflictResolver(),
+          // A successful apply records a synced LCA for the file — exactly the
+          // in-memory-only state that a crash used to lose.
+          applyFile: (fileId, records, resolver, {context}) async {
+            store.recordSyncedBlobRef(fileId, 'lca-$fileId');
+          },
+          handleEpochMismatch: (_) async {},
+          emit: events.add,
+          isFatalRejection: (_) => false,
+          log: LogScope.noop,
+          prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
+          downloadConcurrency: 1,
+        );
+
+        await puller.pull();
+        expect(store.serverCursor, 2);
+
+        // Simulate a crash before any push: a fresh store reloading from the
+        // same backing client sees only what pull() durably persisted. The
+        // register rows are persisted per-file (persistOne); the meta row
+        // (cursor, ownContext, lastSyncedBlobRef) was previously only written
+        // by a later push, so a crash here desynced persisted registers from
+        // stale meta.
+        final reloaded = FileStateStore(client: env.client, vaultId: _vaultId);
+        await reloaded.load();
+
+        expect(
+          reloaded.serverCursor,
+          2,
+          reason:
+              'cursor must be durable right after the pull, not only '
+              'after a later push (else we re-pull the whole batch)',
+        );
+        // Note: for Fugue text the LCA is vestigial (join is conflict-free).
+        // It is the base for the binary/LWW resolver (conflict-vs-fast-forward
+        // and its defensive content 3-way merge), and it must not silently
+        // roll back to a stale value across a crash.
+        expect(
+          reloaded.lastSyncedBlobRefFor(_idA),
+          'lca-$_idA',
+          reason:
+              'lastSyncedBlobRef recorded during pull must survive a '
+              'crash — it is the binary resolver base',
+        );
+      },
+    );
+  });
+
+  group(
+    'StatePuller — failed apply holds the cursor, never silent-skips (L1-3)',
+    () {
+      test(
+        'one failing file holds the cursor below it so a later pull retries',
+        () async {
+          // A(1) ok, B(2) fails, C(3) ok. cursor high-watermark = 3.
+          final f = await _newPuller([
+            _rec(_idA, 1),
+            _rec(_idB, 2),
+            _rec(_idC, 3),
+          ], failFor: (id) => id == _idB);
+
+          await f.puller.pull();
+
+          expect(
+            f.store.serverCursor,
+            1,
+            reason:
+                'cursor must be held at B.seq-1 (1), not advanced to 3 — otherwise '
+                'getStates never re-emits B and it is skipped forever',
+          );
         },
-        handleEpochMismatch: (_) async {},
-        emit: events.add,
-        isFatalRejection: (_) => false,
-        log: LogScope.noop,
-        prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
-    downloadConcurrency: 1,
+      );
+
+      test(
+        'a persistently failing file is skipped past after the attempt cap',
+        () async {
+          final f = await _newPuller([
+            _rec(_idA, 1),
+            _rec(_idB, 2),
+            _rec(_idC, 3),
+          ], failFor: (id) => id == _idB);
+
+          // Pull repeatedly; each pull re-fetches from the held cursor and
+          // retries B. After the cap it gives up and advances past B.
+          for (var i = 0; i < 5; i++) {
+            await f.puller.pull();
+          }
+
+          expect(
+            f.store.serverCursor,
+            3,
+            reason: 'after the retry cap the cursor advances past the bad file',
+          );
+          final skipped = f.events.whereType<SyncRecordSkipped>().toList();
+          expect(
+            skipped,
+            isNotEmpty,
+            reason:
+                'giving up must surface a durable skip, not vanish silently',
+          );
+          expect(skipped.map((e) => e.fileId), contains(_idB));
+        },
+      );
+
+      test(
+        'a transient failure recovers within the same pull (no extra sync)',
+        () async {
+          // Fail B on its first apply, succeed on the in-pull retry — models a
+          // momentary IO error / a race with a just-finished blob write.
+          var bApplyCalls = 0;
+          final f = await _newPuller(
+            [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
+            failFor: (id) {
+              if (id != _idB) return false;
+              bApplyCalls += 1;
+              return bApplyCalls == 1; // only the first attempt fails
+            },
           );
 
-      await puller.pull();
-      expect(store.serverCursor, 2);
+          await f.puller.pull();
 
-      // Simulate a crash before any push: a fresh store reloading from the
-      // same backing client sees only what pull() durably persisted. The
-      // register rows are persisted per-file (persistOne); the meta row
-      // (cursor, ownContext, lastSyncedBlobRef) was previously only written
-      // by a later push, so a crash here desynced persisted registers from
-      // stale meta.
-      final reloaded = FileStateStore(client: env.client, vaultId: _vaultId);
-      await reloaded.load();
-
-      expect(reloaded.serverCursor, 2,
-          reason: 'cursor must be durable right after the pull, not only '
-              'after a later push (else we re-pull the whole batch)');
-      // Note: for Fugue text the LCA is vestigial (join is conflict-free).
-      // It is the base for the binary/LWW resolver (conflict-vs-fast-forward
-      // and its defensive content 3-way merge), and it must not silently
-      // roll back to a stale value across a crash.
-      expect(reloaded.lastSyncedBlobRefFor(_idA), 'lca-$_idA',
-          reason: 'lastSyncedBlobRef recorded during pull must survive a '
-              'crash — it is the binary resolver base');
-    });
-  });
-
-  group('StatePuller — failed apply holds the cursor, never silent-skips (L1-3)',
-      () {
-    test('one failing file holds the cursor below it so a later pull retries',
-        () async {
-      // A(1) ok, B(2) fails, C(3) ok. cursor high-watermark = 3.
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
-        failFor: (id) => id == _idB,
-      );
-
-      await f.puller.pull();
-
-      expect(
-        f.store.serverCursor,
-        1,
-        reason:
-            'cursor must be held at B.seq-1 (1), not advanced to 3 — otherwise '
-            'getStates never re-emits B and it is skipped forever',
-      );
-    });
-
-    test('a persistently failing file is skipped past after the attempt cap',
-        () async {
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
-        failFor: (id) => id == _idB,
-      );
-
-      // Pull repeatedly; each pull re-fetches from the held cursor and
-      // retries B. After the cap it gives up and advances past B.
-      for (var i = 0; i < 5; i++) {
-        await f.puller.pull();
-      }
-
-      expect(f.store.serverCursor, 3,
-          reason: 'after the retry cap the cursor advances past the bad file');
-      final skipped = f.events.whereType<SyncRecordSkipped>().toList();
-      expect(skipped, isNotEmpty,
-          reason: 'giving up must surface a durable skip, not vanish silently');
-      expect(skipped.map((e) => e.fileId), contains(_idB));
-    });
-
-    test('a transient failure recovers within the same pull (no extra sync)',
-        () async {
-      // Fail B on its first apply, succeed on the in-pull retry — models a
-      // momentary IO error / a race with a just-finished blob write.
-      var bApplyCalls = 0;
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
-        failFor: (id) {
-          if (id != _idB) return false;
-          bApplyCalls += 1;
-          return bApplyCalls == 1; // only the first attempt fails
+          expect(
+            f.store.serverCursor,
+            3,
+            reason:
+                'the in-pull retry applied B, so this single pull is correct — '
+                'no cursor hold, no waiting for another sync',
+          );
+          expect(f.events.whereType<SyncRecordSkipped>(), isEmpty);
+          expect(
+            bApplyCalls,
+            greaterThanOrEqualTo(2),
+            reason: 'B was retried within the same pull',
+          );
         },
       );
 
-      await f.puller.pull();
+      test(
+        'a recovering file clears its streak and the cursor advances',
+        () async {
+          var bShouldFail = true;
+          final f = await _newPuller([
+            _rec(_idA, 1),
+            _rec(_idB, 2),
+            _rec(_idC, 3),
+          ], failFor: (id) => id == _idB && bShouldFail);
 
-      expect(f.store.serverCursor, 3,
-          reason:
-              'the in-pull retry applied B, so this single pull is correct — '
-              'no cursor hold, no waiting for another sync');
-      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty);
-      expect(bApplyCalls, greaterThanOrEqualTo(2),
-          reason: 'B was retried within the same pull');
-    });
+          await f.puller.pull();
+          expect(f.store.serverCursor, 1, reason: 'held while B is failing');
 
-    test('a recovering file clears its streak and the cursor advances', () async {
-      var bShouldFail = true;
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
-        failFor: (id) => id == _idB && bShouldFail,
+          // B becomes applyable (e.g. its blob is now reachable).
+          bShouldFail = false;
+          await f.puller.pull();
+
+          expect(
+            f.store.serverCursor,
+            3,
+            reason: 'B applied, cursor advances fully',
+          );
+          expect(
+            f.events.whereType<SyncRecordSkipped>(),
+            isEmpty,
+            reason: 'a recovered file is never reported as skipped',
+          );
+        },
       );
-
-      await f.puller.pull();
-      expect(f.store.serverCursor, 1, reason: 'held while B is failing');
-
-      // B becomes applyable (e.g. its blob is now reachable).
-      bShouldFail = false;
-      await f.puller.pull();
-
-      expect(f.store.serverCursor, 3, reason: 'B applied, cursor advances fully');
-      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty,
-          reason: 'a recovered file is never reported as skipped');
-    });
-  });
+    },
+  );
 
   group('StatePuller — preemption unwinds the pull (not swallowed, not held '
       'like a per-file failure)', () {
-    test('a cancelled context aborts the pull, cursor untouched, nothing skipped',
-        () async {
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2)],
-        failFor: (_) => false,
-      );
-      final token = RpcCancellationToken()..cancel('preempted by edit');
-      final ctx = RpcContext.withCancellation(token);
+    test(
+      'a cancelled context aborts the pull, cursor untouched, nothing skipped',
+      () async {
+        final f = await _newPuller([
+          _rec(_idA, 1),
+          _rec(_idB, 2),
+        ], failFor: (_) => false);
+        final token = RpcCancellationToken()..cancel('preempted by edit');
+        final ctx = RpcContext.withCancellation(token);
 
-      await expectLater(
-        () => f.puller.pull(context: ctx),
-        throwsA(isA<RpcCancelledException>()),
-        reason: 'a preempted pull must unwind so the lane frees for the push',
-      );
-      expect(f.store.serverCursor, 0,
-          reason: 'cursor must NOT advance on preempt — the re-scheduled pull '
-              're-fetches the batch from where it left off');
-      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty,
-          reason: 'cancellation is not a per-file failure — nothing is skipped');
-    });
+        await expectLater(
+          () => f.puller.pull(context: ctx),
+          throwsA(isA<RpcCancelledException>()),
+          reason: 'a preempted pull must unwind so the lane frees for the push',
+        );
+        expect(
+          f.store.serverCursor,
+          0,
+          reason:
+              'cursor must NOT advance on preempt — the re-scheduled pull '
+              're-fetches the batch from where it left off',
+        );
+        expect(
+          f.events.whereType<SyncRecordSkipped>(),
+          isEmpty,
+          reason: 'cancellation is not a per-file failure — nothing is skipped',
+        );
+      },
+    );
 
     test('cancellation raised mid-apply propagates out, not held/skipped like a '
         'transient failure', () async {
@@ -337,11 +415,18 @@ void main() {
         () => f.puller.pull(),
         throwsA(isA<RpcCancelledException>()),
       );
-      expect(f.store.serverCursor, 1,
-          reason: 'A applied before the preemption, so the resumed pull starts '
-              'at B rather than re-downloading A');
-      expect(f.events.whereType<SyncRecordSkipped>(), isEmpty,
-          reason: 'cancellation is not a per-file failure — nothing is skipped');
+      expect(
+        f.store.serverCursor,
+        1,
+        reason:
+            'A applied before the preemption, so the resumed pull starts '
+            'at B rather than re-downloading A',
+      );
+      expect(
+        f.events.whereType<SyncRecordSkipped>(),
+        isEmpty,
+        reason: 'cancellation is not a per-file failure — nothing is skipped',
+      );
     });
   });
 }
@@ -364,22 +449,29 @@ void _incrementalCursorTests() {
         () => f.puller.pull(),
         throwsA(isA<RpcCancelledException>()),
       );
-      expect(f.store.serverCursor, 2,
-          reason: 'A and B landed; only C is left to fetch');
+      expect(
+        f.store.serverCursor,
+        2,
+        reason: 'A and B landed; only C is left to fetch',
+      );
     });
 
     test('it never passes a record that has not been applied', () async {
       // B fails transiently while C succeeds. The cursor must stop below B
       // even though a later record applied — otherwise B is skipped forever.
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
-        failFor: (id) => id == _idB,
-      );
+      final f = await _newPuller([
+        _rec(_idA, 1),
+        _rec(_idB, 2),
+        _rec(_idC, 3),
+      ], failFor: (id) => id == _idB);
 
       await f.puller.pull();
 
-      expect(f.store.serverCursor, 1,
-          reason: 'held below B, whatever else applied after it');
+      expect(
+        f.store.serverCursor,
+        1,
+        reason: 'held below B, whatever else applied after it',
+      );
     });
 
     test('a batch boundary banks the batch that finished', () async {
@@ -411,15 +503,19 @@ void _incrementalCursorTests() {
         () => f.puller.pull(context: RpcContext.withCancellation(token)),
         throwsA(isA<RpcCancelledException>()),
       );
-      expect(f.store.serverCursor, batch,
-          reason: 'the finished batch is banked; the next pull resumes after it');
+      expect(
+        f.store.serverCursor,
+        batch,
+        reason: 'the finished batch is banked; the next pull resumes after it',
+      );
     });
 
     test('a clean pull still ends at the server cursor', () async {
-      final f = await _newPuller(
-        [_rec(_idA, 1), _rec(_idB, 2), _rec(_idC, 3)],
-        failFor: (_) => false,
-      );
+      final f = await _newPuller([
+        _rec(_idA, 1),
+        _rec(_idB, 2),
+        _rec(_idC, 3),
+      ], failFor: (_) => false);
 
       await f.puller.pull();
 

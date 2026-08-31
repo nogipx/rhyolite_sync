@@ -18,8 +18,9 @@ class BasicHttpBlobAuth implements IHttpBlobAuth {
 
   @override
   Map<String, String> sign(String method, Uri uri, Uint8List? body) => {
-        'authorization': 'Basic ${base64Encode(utf8.encode('$username:$password'))}',
-      };
+    'authorization':
+        'Basic ${base64Encode(utf8.encode('$username:$password'))}',
+  };
 }
 
 /// HTTP Bearer token authentication.
@@ -30,8 +31,8 @@ class BearerHttpBlobAuth implements IHttpBlobAuth {
 
   @override
   Map<String, String> sign(String method, Uri uri, Uint8List? body) => {
-        'authorization': 'Bearer $token',
-      };
+    'authorization': 'Bearer $token',
+  };
 }
 
 /// AWS Signature V4 authentication for S3-compatible services.
@@ -101,7 +102,10 @@ class S3HttpBlobAuth implements IHttpBlobAuth {
     String region,
     String service,
   ) {
-    final kDate = _hmacSha256(utf8.encode('AWS4$secretKey'), utf8.encode(dateStamp));
+    final kDate = _hmacSha256(
+      utf8.encode('AWS4$secretKey'),
+      utf8.encode(dateStamp),
+    );
     final kRegion = _hmacSha256(kDate, utf8.encode(region));
     final kService = _hmacSha256(kRegion, utf8.encode(service));
     return _hmacSha256(kService, utf8.encode('aws4_request'));

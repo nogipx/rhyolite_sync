@@ -42,9 +42,8 @@ Options, in order of preference:
 
 const _codec = FugueTextBinaryCodec();
 
-Uint8List _withTail(Uint8List blob, int tailBytes) => Uint8List.fromList(
-      [...blob, ...List.filled(tailBytes, 0xAB)],
-    );
+Uint8List _withTail(Uint8List blob, int tailBytes) =>
+    Uint8List.fromList([...blob, ...List.filled(tailBytes, 0xAB)]);
 
 void main() {
   group('convergent contract: trailing bytes after a Fugue tree', () {
@@ -59,12 +58,18 @@ void main() {
         try {
           decoded = _codec.decode(_withTail(encoded, tailBytes));
         } catch (e) {
-          fail('$_whatToDoIfThisFails\nDecoder threw on a $tailBytes-byte '
-              'tail: $e');
+          fail(
+            '$_whatToDoIfThisFails\nDecoder threw on a $tailBytes-byte '
+            'tail: $e',
+          );
         }
-        expect(decoded.values.join(), note,
-            reason: 'a $tailBytes-byte tail changed the text\n'
-                '$_whatToDoIfThisFails');
+        expect(
+          decoded.values.join(),
+          note,
+          reason:
+              'a $tailBytes-byte tail changed the text\n'
+              '$_whatToDoIfThisFails',
+        );
       }
     });
 
@@ -77,10 +82,21 @@ void main() {
       final plain = _codec.decode(_codec.encode(tree));
       final tailed = _codec.decode(_withTail(_codec.encode(tree), 128));
 
-      expect(tailed.elementCount, plain.elementCount, reason: _whatToDoIfThisFails);
-      expect(tailed.dots.length, plain.dots.length, reason: _whatToDoIfThisFails);
-      expect(_codec.encode(tailed), _codec.encode(plain),
-          reason: 're-encoding must be byte-identical\n$_whatToDoIfThisFails');
+      expect(
+        tailed.elementCount,
+        plain.elementCount,
+        reason: _whatToDoIfThisFails,
+      );
+      expect(
+        tailed.dots.length,
+        plain.dots.length,
+        reason: _whatToDoIfThisFails,
+      );
+      expect(
+        _codec.encode(tailed),
+        _codec.encode(plain),
+        reason: 're-encoding must be byte-identical\n$_whatToDoIfThisFails',
+      );
     });
 
     test('the magic-prefixed blob behaves the same way', () {
@@ -88,8 +104,11 @@ void main() {
       final tree = FugueTextSync.seedFromText(note);
       final blob = FugueStore.encodeBlob(tree);
 
-      expect(FugueStore.tryDecodeBlob(_withTail(blob, 256))?.values.join(), note,
-          reason: _whatToDoIfThisFails);
+      expect(
+        FugueStore.tryDecodeBlob(_withTail(blob, 256))?.values.join(),
+        note,
+        reason: _whatToDoIfThisFails,
+      );
     });
 
     test('the tolerance is specific, not a decoder that never complains', () {
@@ -108,19 +127,24 @@ void main() {
         0,
         _codec.encode(tree).length ~/ 2,
       );
-      expect(() => _codec.decode(truncated), throwsA(isA<Object>()),
-          reason: 'a block that runs past the end must still be refused');
+      expect(
+        () => _codec.decode(truncated),
+        throwsA(isA<Object>()),
+        reason: 'a block that runs past the end must still be refused',
+      );
     });
 
-    test('we append rather than rewrite, so the prefix stays byte-identical',
-        () {
-      // The other half of the contract, and ours to keep: whatever we add must
-      // leave the bytes an old client reads untouched.
-      final tree = FugueTextSync.seedFromText(note);
-      final blob = FugueStore.encodeBlob(tree);
-      final tailed = _withTail(blob, 32);
+    test(
+      'we append rather than rewrite, so the prefix stays byte-identical',
+      () {
+        // The other half of the contract, and ours to keep: whatever we add must
+        // leave the bytes an old client reads untouched.
+        final tree = FugueTextSync.seedFromText(note);
+        final blob = FugueStore.encodeBlob(tree);
+        final tailed = _withTail(blob, 32);
 
-      expect(Uint8List.sublistView(tailed, 0, blob.length), blob);
-    });
+        expect(Uint8List.sublistView(tailed, 0, blob.length), blob);
+      },
+    );
   });
 }

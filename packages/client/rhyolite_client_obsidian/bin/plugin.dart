@@ -8,29 +8,30 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_client_account/rhyolite_client_account.dart'
     hide VaultInfo;
 import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report_modal.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/diagnostic_redactor.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/log_file_store.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/obsidian_log_file_store.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/persistent_log_sink.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_session_state.dart';
 import 'package:rhyolite_client_obsidian/src/engine/backup_modal.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report_modal.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/log_file_store.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/obsidian_log_file_store.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/diagnostic_redactor.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/persistent_log_sink.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
-import 'package:rhyolite_client_obsidian/src/engine/frontmatter_audit_binding.dart';
+import 'package:rhyolite_client_obsidian/src/engine/connection_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
-import 'package:rhyolite_client_obsidian/src/engine/diagnostics_logging.dart';
 import 'package:rhyolite_client_obsidian/src/engine/device_management_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/diagnostics_logging.dart';
 import 'package:rhyolite_client_obsidian/src/engine/file_version_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/frontmatter_audit_binding.dart';
 import 'package:rhyolite_client_obsidian/src/engine/modal_lock.dart';
 import 'package:rhyolite_client_obsidian/src/engine/orphan_sweep_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/plan_status.dart';
 import 'package:rhyolite_client_obsidian/src/engine/plugin_management_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/self_host_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/server_rejections.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_cleanup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_overview_modal.dart';
-import 'package:rhyolite_client_obsidian/src/engine/plan_status.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_panel.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_status_indicator.dart';
 import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
@@ -105,6 +106,7 @@ String _startBlockReason(SyncStartBlock block) => switch (block) {
   SyncStartBlock.noVault => S.blockedNoVault,
   SyncStartBlock.locked => S.blockedLocked,
   SyncStartBlock.noServer => S.blockedNoServer,
+  SyncStartBlock.storageRefused => S.blockedStorageRefused,
 };
 
 /// Best-effort OS label for [DeviceInfo] on the log collector: `desktop`, or
@@ -191,13 +193,13 @@ void _installPersistentLog(PluginHandle plugin) {
   final os = _isMobileHost(plugin) ? _diagnosticsOs(true) : 'desktop';
   unawaited(
     sink.start(
-      banner: 'rhyolite ${_pluginVersion(plugin)} on $os, '
+      banner:
+          'rhyolite ${_pluginVersion(plugin)} on $os, '
           'Obsidian ${_obsidianVersion()}'
           '${kDebug ? ', debug build' : ''}',
     ),
   );
 }
-
 
 /// Tears the local log down on unload, flushing what is buffered.
 ///
@@ -226,7 +228,6 @@ List<BugReportSection> Function()? _reportFacts;
 /// Empty before a vault is connected, when there are no vault paths to hide.
 String _reportPathSalt = '';
 
-
 /// Problems reach back across sessions and are rare, so this can be generous.
 const _kReportProblemLines = 600;
 
@@ -254,8 +255,10 @@ String? _logCompletenessNotice(LogStats stats, {required int fileCount}) {
     );
   }
   if (notes.isEmpty) return null;
-  notes.add('Log segments kept on this device: ${stats.retainedSegments} '
-        '(a segment is a session or a day, whichever ends first).');
+  notes.add(
+    'Log segments kept on this device: ${stats.retainedSegments} '
+    '(a segment is a session or a day, whichever ends first).',
+  );
   return notes.join(' ');
 }
 
@@ -283,15 +286,12 @@ Future<(BugReport, List<(String, String)>)> _buildBugReport(
 
   return (
     BugReport(
-    generatedAt: DateTime.now(),
-    userDescription: description,
-    problems: problems,
-    logNotice: logNotice,
-    pathsRedacted: _reportPathSalt.isNotEmpty,
-    sections: [
-      _environmentSection(plugin),
-      ...?_reportFacts?.call(),
-    ],
+      generatedAt: DateTime.now(),
+      userDescription: description,
+      problems: problems,
+      logNotice: logNotice,
+      pathsRedacted: _reportPathSalt.isNotEmpty,
+      sections: [_environmentSection(plugin), ...?_reportFacts?.call()],
     ),
     logFiles,
   );
@@ -325,7 +325,7 @@ BugReportSection _environmentSection(PluginHandle plugin) {
 /// both the identity and the storage key). In both cases the archive stays a
 /// file to attach by hand, which is the path that worked before this existed.
 Future<String> Function(Uint8List archive, String description)?
-    _reportSubmitter;
+_reportSubmitter;
 
 /// Erases the on-device diagnostic logs, reporting what it freed.
 ///
@@ -392,6 +392,30 @@ StreamSubscription<SyncEngineEvent>? _selfHealSub;
 /// when the OS network stayed up but the server/token dropped.
 Timer? _selfHealTimer;
 int _selfHealAttempt = 0;
+
+/// Set when the blob backend refused this device, cleared when a start gets
+/// past the point where it would have refused again.
+///
+/// Sticky on purpose. A 401 is not a passing condition: every later edit is
+/// dropped the same way, and the whole failure used to live in one log
+/// warning while the engine went on pulling and looking healthy.
+bool _storageRefused = false;
+
+/// Whether the engine says it is busy.
+///
+/// It guarantees this: `SyncBusy(true)` is raised for the whole startup
+/// pipeline and released in a `finally`, and the invariant is to fail toward
+/// stuck-busy rather than stuck-idle. So "busy" is trustworthy as "work is
+/// happening" — which is precisely what the connection probe cannot tell from
+/// "socket is dead".
+bool _engineBusy = false;
+
+/// When the engine last emitted ANY event.
+///
+/// The liveness signal the health check should have been using. An engine
+/// that is emitting is alive whatever a ping says — and unlike the ping it
+/// costs no round trip and cannot be starved by the very work it reports on.
+DateTime? _lastEngineEventAt;
 
 /// Debounce for the auth-rejection -> token-refresh path. A burst of auth.*
 /// rejections (every pending RPC failing at once) must not spawn a refresh
@@ -492,8 +516,7 @@ void _announcePlanOnce(PlanNotice notice) {
   _announcedPlanPeriod = key;
   final date = notice.date == null ? null : formatPlanDay(notice.date!);
   final message = switch (notice.alert) {
-    PlanAlert.ended =>
-      date == null ? S.planEndedNoDate : S.planEndedOn(date),
+    PlanAlert.ended => date == null ? S.planEndedNoDate : S.planEndedOn(date),
     PlanAlert.endingSoon => S.planEndingOn(date ?? ''),
     PlanAlert.none => '',
   };
@@ -509,7 +532,6 @@ void _openSubscriptionPage() {
   if (kEnv.siteUrl.isEmpty) return;
   _openExternalUrl('${kEnv.siteUrl}/account');
 }
-
 
 /// Whether this session talks to a self-hosted server. Held here because the
 /// settings-sync launcher runs from several call sites that no longer have the
@@ -557,7 +579,8 @@ Future<void> _showStorageOverview(
 
 /// Opens plugin management, where a plugin can be dropped from the vault for
 /// every device at once.
-Future<void> _showPluginManagement(PluginHandle plugin) => showPluginManagementModal(
+Future<void> _showPluginManagement(PluginHandle plugin) =>
+    showPluginManagementModal(
       plugin,
       load: _pluginOverview,
       onRemove: (resourceId) async =>
@@ -698,7 +721,8 @@ void _noticeWithButton(
   }
 }
 
-void _showReloadNotice(PluginHandle plugin, String message) => _noticeWithButton(
+void _showReloadNotice(PluginHandle plugin, String message) =>
+    _noticeWithButton(
       message,
       buttonText: 'Reload',
       onClick: () {
@@ -720,16 +744,61 @@ Future<void> _launchConfigSync({
   _stopConfigSync();
   if (!prefs.enabled || engine is! StateSyncEngine) return;
   if (engine.endpoint == null) return;
+  _configSyncLaunching = true;
+  try {
+    await _launchConfigSyncInner(
+      engine: engine,
+      dataClient: dataClient,
+      cipher: cipher,
+      vaultId: vaultId,
+      plugin: plugin,
+      prefs: prefs,
+    );
+  } finally {
+    _configSyncLaunching = false;
+  }
+}
+
+/// True while a launch is between its stop and its start.
+///
+/// Only the AUTOMATIC re-arm consults it. An explicit relaunch — a restart, a
+/// storage change, a settings edit — must always win, because it is rebinding
+/// to something that changed; the re-arm is only there to revive a sync that
+/// nothing else will.
+bool _configSyncLaunching = false;
+
+Future<void> _launchConfigSyncInner({
+  required StateSyncEngine engine,
+  required IDataClient dataClient,
+  required IVaultCipher cipher,
+  required String vaultId,
+  required PluginHandle plugin,
+  required SettingsSyncPrefs prefs,
+}) async {
 
   // Resolved per call, like [BlobDirSync.blobIO] just below and for the same
   // reason: the engine rebuilds its connection on reconnect, and on the
   // re-upload and restore buttons, which stop and start it from inside
   // without the plugin ever hearing about it.
   RpcCallerEndpoint? currentEndpoint() => engine.endpoint;
-  StateSyncContractCaller caller() => StateSyncContractCaller(
-        currentEndpoint()!,
-        serviceNameOverride: StateSyncContractNames.instance('config'),
-      );
+  StateSyncContractCaller caller() {
+    final endpoint = currentEndpoint();
+    // The `!` that used to be here asserted exactly what the comment above
+    // says can stop being true. A restore restarts the engine from inside a
+    // pull — "server epoch ahead, forcing restore" — and settings sync, which
+    // starts alongside it, reached for the endpoint a beat after it was torn
+    // down. That surfaced as `Null check operator used on a null value`, which
+    // says nothing about what happened or what to do.
+    //
+    // Not having a connection is not a fault, it is a moment. Naming it lets
+    // the start below defer instead of reporting a failure, and the
+    // SyncConnected handler re-arms when the engine comes back.
+    if (endpoint == null) throw const _EngineOffline();
+    return StateSyncContractCaller(
+      endpoint,
+      serviceNameOverride: StateSyncContractNames.instance('config'),
+    );
+  }
   // Plugin *code* is the one category whose bytes are measured in hundreds of
   // megabytes, so it is gated on the storage backing this vault as well as on
   // the user's own toggle.
@@ -750,51 +819,52 @@ Future<void> _launchConfigSync({
   final pluginCodeWanted = categories.contains(
     SettingsCategory.communityPluginCode,
   );
-  final pullOnly = pluginCodePullOnly(
-    enabled: categories,
-    availability: gate,
-  );
+  final pullOnly = pluginCodePullOnly(enabled: categories, availability: gate);
   if (pullOnly.isNotEmpty) {
-    _log.info('Plugin code upload paused: ${gate.name} '
-        '(existing plugin records still sync down)');
+    _log.info(
+      'Plugin code upload paused: ${gate.name} '
+      '(existing plugin records still sync down)',
+    );
   }
 
   final pluginCode = BlobDirSync(
     adapter: plugin.app.vault.adapter,
     // Rebuilt per call: the engine swaps remote storage on reconnect and on a
     // BYO-credentials change.
-    blobIO: () => engine.newSiblingBlobIO(
-      maxDownloadBytes: BlobDirSync.maxFileBytes,
-    ),
+    blobIO: () =>
+        engine.newSiblingBlobIO(maxDownloadBytes: BlobDirSync.maxFileBytes),
     isMobile: _isMobileApp(plugin),
     deviceLabel: engine.config.clientName,
     pluginsManagerRaw: jsu.getProperty<Object?>(plugin.appRaw, 'plugins'),
     // Surfaces plugin/theme transfers in the panel's active-transfers view,
     // the same place note content appears. A first sync moves tens of
     // megabytes; without this it is minutes of silence.
-    onTransfer: ({
-      required String path,
-      required bool upload,
-      required int sentBytes,
-      required int totalBytes,
-      required bool done,
-    }) =>
-        engine.reportSiblingTransfer(
-      path: path,
-      upload: upload,
-      sentBytes: sentBytes,
-      totalBytes: totalBytes,
-      done: done,
-    ),
+    onTransfer:
+        ({
+          required String path,
+          required bool upload,
+          required int sentBytes,
+          required int totalBytes,
+          required bool done,
+        }) => engine.reportSiblingTransfer(
+          path: path,
+          upload: upload,
+          sentBytes: sentBytes,
+          totalBytes: totalBytes,
+          done: done,
+        ),
     log: _logController.scope('settings'),
   );
   // Measure what plugins weigh here even when the category is off — that number
   // is exactly what the settings row shows to make the opt-in an informed one.
   // Stat-only, so it costs nothing to keep current.
   unawaited(
-    pluginCode.localTotalBytes(SyncedDirKind.plugin).then((bytes) {
-      _pluginCodeLocalBytes = bytes;
-    }).catchError((Object _) {}),
+    pluginCode
+        .localTotalBytes(SyncedDirKind.plugin)
+        .then((bytes) {
+          _pluginCodeLocalBytes = bytes;
+        })
+        .catchError((Object _) {}),
   );
 
   final sync = SettingsSync(
@@ -825,7 +895,8 @@ Future<void> _launchConfigSync({
     // silently stopped themes from syncing at all. Keyed on what the user
     // enabled, not on the gate: a pull-only category still has to be able to
     // write what it receives to disk.
-    pluginCode: (pluginCodeWanted ||
+    pluginCode:
+        (pluginCodeWanted ||
             categories.contains(SettingsCategory.themesSnippets))
         ? pluginCode
         : null,
@@ -854,9 +925,26 @@ Future<void> _launchConfigSync({
     // The blob GC ran (and refused) before this existed — its live set was
     // incomplete without us. Now that we can answer, let it try again.
     engine.rescheduleLocalBlobGc();
+  } on _EngineOffline {
+    // The engine went down between the check at the top of this function and
+    // the first call needing its connection — a restore is the usual reason.
+    // Left stopped on purpose: SyncConnected re-arms it, and reporting this as
+    // a failure would put an error in front of the user for a state that
+    // resolves itself in seconds.
+    _log.info('Settings sync deferred: the engine is between connections');
+    _stopConfigSync();
   } catch (e, st) {
     _log.error('Settings sync start failed', error: e, stackTrace: st);
   }
+}
+
+/// The engine has no connection right now. Distinct from a failure because
+/// nothing is wrong: something restarted it, and it is coming back.
+class _EngineOffline implements Exception {
+  const _EngineOffline();
+
+  @override
+  String toString() => 'the engine is between connections';
 }
 
 void _stopConfigSync() {
@@ -883,6 +971,50 @@ void _setEngineAuth(ISyncEngine engine, AuthSessionState auth) {
 /// Electron throws a detached-webview error ("getWebContentsId"). Uses
 /// Electron's `shell.openExternal` on desktop, falling back to `window.open`
 /// on mobile (no Electron), where that already opens the system browser.
+/// Writes a tiny object to [extConfig]'s backend, reads it back and removes it.
+///
+/// Throws with a message a user can act on when the backend refuses. This is
+/// the only moment the credentials are checked at all: after this they are
+/// encrypted onto the server and adopted by every device the vault has, so a
+/// mistake here is not one device's problem.
+Future<void> _probeExternalStorage(
+  ExternalBlobConfig extConfig, {
+  required IVaultCipher cipher,
+  required String vaultId,
+}) async {
+  final storage = defaultRemoteBlobStorageBuilder(
+    config: VaultConfig(
+      vaultId: vaultId,
+      vaultName: 'probe',
+      externalBlobConfig: extConfig,
+    ),
+    cipher: cipher,
+    httpClient: ObsidianHttpClient(),
+    endpoint: null,
+  );
+  if (storage == null) {
+    throw StateError('could not build a client for this storage');
+  }
+  final bytes = Uint8List.fromList(utf8.encode('rhyolite connection probe'));
+  final id = ChunkedBlobIO.hasherFor(null)(bytes);
+  try {
+    await storage.upload([(bytes, id)]);
+    final present = await storage.exists([id]);
+    if (!present.contains(id)) {
+      throw StateError(
+        'the storage accepted a test object but did not return it — check the '
+        'bucket or path',
+      );
+    }
+  } finally {
+    // Best effort: a probe left behind is untidy, not broken, and reporting a
+    // cleanup failure over the real one would bury it.
+    try {
+      await storage.deleteMany([id]);
+    } catch (_) {}
+  }
+}
+
 void _openExternalUrl(String url) {
   try {
     final electron = jsu.callMethod<Object?>(jsu.globalThis, 'require', [
@@ -1001,7 +1133,9 @@ Future<void> _requestPersistentStorage() async {
     if (navigator == null) return;
     final storage = jsu.getProperty<Object?>(navigator, 'storage');
     if (storage == null || !jsu.hasProperty(storage, 'persist')) {
-      _log.warning('boot: storage.persist() unavailable — storage is evictable');
+      _log.warning(
+        'boot: storage.persist() unavailable — storage is evictable',
+      );
       return;
     }
     if (jsu.hasProperty(storage, 'persisted') &&
@@ -1026,7 +1160,8 @@ Future<void> _requestPersistentStorage() async {
 void main() {
   RpcGzipCodec.register();
   bootstrapPlugin(
-    extraCss: '''
+    extraCss:
+        '''
       .rhyolite-setting-desc { color: var(--text-muted); font-size: 0.85em; }
       .rhyolite-group-note {
         color: var(--text-muted); font-size: 0.85em;
@@ -1208,8 +1343,10 @@ $kSyncPanelCss
                   // `HTTP 401 from <path>` and an RPC-level refusal arrives
                   // as `unauthenticated: ...`.
                   if (classifyRefreshFailure(e) == RefreshOutcome.refused) {
-                    _log.warning('Stored session refused by the server — '
-                        'cleared: $e');
+                    _log.warning(
+                      'Stored session refused by the server — '
+                      'cleared: $e',
+                    );
                     await configStorage.clearAuthSession();
                   } else {
                     // Offline at boot, or an answer we never got. Keep the
@@ -1224,8 +1361,10 @@ $kSyncPanelCss
                     // session that the in-flight refresh has meanwhile stored —
                     // leaving the client holding a refresh token the server has
                     // already revoked, i.e. a forced logout on the next call.
-                    _log.warning('Boot refresh inconclusive — keeping the '
-                        'stored session: $e');
+                    _log.warning(
+                      'Boot refresh inconclusive — keeping the '
+                      'stored session: $e',
+                    );
                     restoredClient = accountClient;
                   }
                 }
@@ -1400,7 +1539,19 @@ $kSyncPanelCss
           final dataRepository = SqliteDataRepository(
             storage: SqliteDataStorageAdapter.connection(dbConn),
           );
-          final dataClient = IDataClient.repository(repository: dataRepository);
+          // Serialised at the point of construction, so every store the engine
+          // builds and settings sync on top all share one queue.
+          //
+          // They are separate objects over ONE SQLite connection, and a
+          // connection cannot hold two transactions: overlapping callers get
+          // `cannot start a transaction within a transaction` on BEGIN and
+          // then SQL-logic errors on COMMIT as they unwind over each other. No
+          // store can fix that for itself, which is why the wrapper goes here
+          // rather than inside the engine — the engine does not own everything
+          // that writes.
+          final dataClient = SerialisedDataClient(
+            IDataClient.repository(repository: dataRepository),
+          );
           // Database logging removed during logger migration
 
           final blobRepo = SqliteBlobRepository.db(
@@ -1576,27 +1727,38 @@ $kSyncPanelCss
               BugReportSection.compact('Sync state', [
                 ('Engine', _engine != null ? 'built' : 'absent'),
                 ('Paused by user', _syncPaused ? 'yes' : 'no'),
+                // A stopped engine has no store to read, and a report is
+                // written about a stopped engine almost by definition — one
+                // arrived with this whole section blank. It now carries the
+                // last numbers it had, and says when they were true rather
+                // than passing them off as current.
+                ('Numbers as of', stats?.capturedAt?.toUtc().toIso8601String()),
                 ('Files', stats?.totalFiles.toString()),
                 ('Tombstones', stats?.tombstones.toString()),
                 ('Conflicting', stats?.conflicting.toString()),
                 ('Unique blobs', stats?.uniqueBlobs.toString()),
-                ('Total size', stats == null
-                    ? null
-                    : formatBytes(stats.totalSizeBytes)),
+                (
+                  'Total size',
+                  stats == null ? null : formatBytes(stats.totalSizeBytes),
+                ),
                 ('Server cursor', stats?.serverCursor.toString()),
                 ('Server epoch', stats?.serverEpoch?.toString()),
               ]),
               BugReportSection.compact('Settings', [
                 ('Settings sync', settingsPrefs.enabled ? 'on' : 'off'),
-                ('Synced categories', settingsPrefs.enabled
-                    ? settingsPrefs.categories.map((c) => c.name).join(', ')
-                    : null),
-                ('Excluded extensions',
-                    fileFilterPrefs.excludedExtensions.join(', ')),
+                (
+                  'Synced categories',
+                  settingsPrefs.enabled
+                      ? settingsPrefs.categories.map((c) => c.name).join(', ')
+                      : null,
+                ),
+                (
+                  'Excluded extensions',
+                  fileFilterPrefs.excludedExtensions.join(', '),
+                ),
                 ('Sync only paths', folders(scope.include)),
                 ('Excluded paths', folders(scope.exclude)),
-                ('Remote diagnostics',
-                    diagnosticsPrefs.enabled ? 'on' : 'off'),
+                ('Remote diagnostics', diagnosticsPrefs.enabled ? 'on' : 'off'),
               ]),
             ];
           };
@@ -1647,8 +1809,10 @@ $kSyncPanelCss
               // Keep whatever we already know — the cached answer loaded at
               // boot, or a fresher one from earlier this session. Overwriting
               // it with null is what made a slow network look like a downgrade.
-              _log.info('Subscription lookup failed, using last known plan '
-                  '(${_capabilities?.toString() ?? "none cached"}): $e');
+              _log.info(
+                'Subscription lookup failed, using last known plan '
+                '(${_capabilities?.toString() ?? "none cached"}): $e',
+              );
             }
             _refreshPlanNotice();
             await _scheduleBoot((token) => _guardedStart(engine, token));
@@ -1705,7 +1869,9 @@ $kSyncPanelCss
           // panel offer the sign-in it now has.
           accountClient.onSessionRefused = (reason) {
             if (auth.client == null) return; // already handled
-            _log.warning('Session refused by the server — signing out: $reason');
+            _log.warning(
+              'Session refused by the server — signing out: $reason',
+            );
             auth.bindAccount(null);
             _setEngineAuth(engine, auth);
             unawaited(
@@ -1764,6 +1930,9 @@ $kSyncPanelCss
             final token = config?.verificationToken;
             if (token == null || token.isEmpty) return SyncStartBlock.noVault;
             if (engine.cipher == null) return SyncStartBlock.locked;
+            // Last, because everything above is a reason we could not even try.
+            // This one means we tried and the storage said no.
+            if (_storageRefused) return SyncStartBlock.storageRefused;
             return null;
           }
 
@@ -1897,8 +2066,9 @@ $kSyncPanelCss
             ),
             // Self-host has no account to renew, so the strip has no button
             // there — and no plan alert ever reaches it either.
-            onPlanAction:
-                selfHostActive || kEnv.siteUrl.isEmpty ? null : _openSubscriptionPage,
+            onPlanAction: selfHostActive || kEnv.siteUrl.isEmpty
+                ? null
+                : _openSubscriptionPage,
           )..register();
           _syncPanel = syncPanel;
           // The panel is built after the boot lookup may already have run.
@@ -2229,11 +2399,11 @@ $kSyncPanelCss
                 showNotice(
                   result.clean
                       ? 'Frontmatter audit: no disagreements '
-                          '(${result.withFrontmatter} notes). See logs.'
+                            '(${result.withFrontmatter} notes). See logs.'
                       : 'Frontmatter audit: '
-                          '${result.regionDisagreements.length} region, '
-                          '${result.keyDisagreements.length} key '
-                          'disagreement(s). See logs.',
+                            '${result.regionDisagreements.length} region, '
+                            '${result.keyDisagreements.length} key '
+                            'disagreement(s). See logs.',
                 );
               }()),
             );
@@ -2373,19 +2543,80 @@ $kSyncPanelCss
               if (_engine == null) return;
               recoverInFlight = true;
               try {
+                // A busy engine gets a longer deadline. Five seconds is
+                // arbitrary, and on dart2js the probe queues behind the very
+                // work it is probing — a startup pass chunking and encrypting
+                // will spend that budget on its own backlog. The probe asks
+                // whether the socket is alive, not whether it is quick, so
+                // waiting longer costs nothing and removes most of the false
+                // negatives that were tearing live engines down.
+                final probeSw = Stopwatch()..start();
                 final ok = await _engine!.healthCheck(
-                  timeout: const Duration(seconds: 5),
+                  timeout: probeTimeout(busy: _engineBusy),
                 );
+                probeSw.stop();
+                final quietFor = _lastEngineEventAt == null
+                    ? const Duration(days: 1)
+                    : DateTime.now().difference(_lastEngineEventAt!);
                 if (!ok) {
-                  _log.warning('Health check failed — restarting engine');
-                  try {
-                    await _scheduleBoot(
-                      (token) async {
-                        await _engine!.stop();
-                        await _guardedStart(_engine!, token);
-                      },
-                      automatic: true,
+                  // Every input to the decision, because the old line said
+                  // only that the probe failed — which is the one thing that
+                  // does not distinguish a dead socket from a busy one.
+                  _log.warning(
+                    'Health check failed after ${probeSw.elapsedMilliseconds}ms '
+                    '(trigger=${requireVisible ? 'visibility' : 'network/heal'}, '
+                    'busy=$_engineBusy, quiet for ${quietFor.inSeconds}s)',
+                  );
+                  var plan = planConnectionRecovery(
+                    sinceLastEvent: quietFor,
+                    busy: _engineBusy,
+                  );
+                  if (plan == ConnectionRecovery.waitItIsAlive) {
+                    // Restarting here would dispose the blob hub and abandon
+                    // whatever the startup pass had uploaded. It is alive, so
+                    // the probe lost to load, not to a dead socket.
+                    _log.info(
+                      'Engine is alive — not restarting it; the probe lost to '
+                      'its own workload',
                     );
+                    return;
+                  }
+                  if (plan == ConnectionRecovery.nudge) {
+                    // The cheap repair first. A swapped socket leaves notify
+                    // permanently silent while everything else works, and that
+                    // is fixed by re-arming — at no cost to the pass.
+                    _log.info(
+                      'Engine is silent — re-arming before any restart',
+                    );
+                    try {
+                      await _engine!.reissueNotify();
+                      await _engine!.triggerPull();
+                      _configSync?.handleReconnect();
+                    } catch (e) {
+                      _log.warning('Re-arm failed: $e');
+                    }
+                    final again = await _engine!.healthCheck(
+                      timeout: probeTimeout(busy: _engineBusy),
+                    );
+                    if (again) {
+                      _log.info('Re-arm worked — no restart needed');
+                      return;
+                    }
+                    plan = planConnectionRecovery(
+                      sinceLastEvent: quietFor,
+                      busy: _engineBusy,
+                      alreadyNudged: true,
+                    );
+                    if (plan != ConnectionRecovery.restart) return;
+                  }
+                  _log.warning(
+                    'Still unreachable after re-arming — restarting',
+                  );
+                  try {
+                    await _scheduleBoot((token) async {
+                      await _engine!.stop();
+                      await _guardedStart(_engine!, token);
+                    }, automatic: true);
                     if (cipher != null) {
                       await _launchConfigSync(
                         engine: _engine!,
@@ -2462,6 +2693,14 @@ $kSyncPanelCss
 
             _selfHealSub?.cancel();
             _selfHealSub = engine.events.listen((e) {
+              _lastEngineEventAt = DateTime.now();
+              if (e is SyncStorageRefused) _storageRefused = true;
+              // A file that reached the server is proof the storage takes our
+              // writes — including when the fix happened on the storage's side
+              // and nothing in the plugin was touched. Without this the panel
+              // would name a precondition the user had already met.
+              if (e is SyncFilePushed) _storageRefused = false;
+              if (e is SyncBusy) _engineBusy = e.busy;
               if (e is SyncConnected) {
                 selfHealOnline = true;
                 _cancelSelfHeal();
@@ -2634,6 +2873,20 @@ $kSyncPanelCss
                 // Authenticated traffic is flowing again — arm the bounded
                 // rebind budget for the next auth incident.
                 _authRebindAttempts = 0;
+                // And bring settings sync back if it is not running. Every
+                // path that restarts the engine is supposed to relaunch it,
+                // but a restore restarts from INSIDE a pull, which no such
+                // path covers — so settings sync stayed dead until the next
+                // manual restart. Only when it is actually down: a live one
+                // resolves the endpoint per call and needs nothing.
+                // Not while a launch is already under way: SyncConnected
+                // arrives DURING the ordinary startup, before that path has
+                // reached its own relaunch, so an unguarded re-arm started
+                // settings sync twice in the same second — two store loads and
+                // two pulls for one session.
+                if (_configSync == null && !_configSyncLaunching) {
+                  unawaited(relaunchConfigSync());
+                }
                 return;
               case SubscriptionRequired():
                 return;
@@ -2767,8 +3020,10 @@ $kSyncPanelCss
                 _setEngineAuth(engine, auth);
                 engine.config = buildConfig(engine.config);
                 await restartForAuth();
-                _log.info('Refresh inconclusive — session kept, provider '
-                    'rebound');
+                _log.info(
+                  'Refresh inconclusive — session kept, provider '
+                  'rebound',
+                );
               } else {
                 _log.warning(
                   'Refresh inconclusive — keeping the stored session, '
@@ -2961,8 +3216,8 @@ $kSyncPanelCss
     // quota that does not apply.
     onFetchUsage: () async =>
         (selfHostEnabled || engine.config.externalStorageKind != null)
-            ? null // no managed quota on self-host / BYO
-            : _fetchVaultUsage(engine, config.vaultId),
+        ? null // no managed quota on self-host / BYO
+        : _fetchVaultUsage(engine, config.vaultId),
     openUrl: _openExternalUrl,
     authWebUrl: kEnv.siteUrl,
     onConfigChanged: (updated) async {
@@ -3070,12 +3325,33 @@ $kSyncPanelCss
       if (c == null) {
         throw StateError('Vault is locked — enter your passphrase first.');
       }
+      // PROVE THE CREDENTIALS BEFORE SAVING THEM.
+      //
+      // Nothing exercised them here. A wrong password was accepted, written to
+      // the E2EE server config — which every other device then adopts — and the
+      // UI said "connected". The failure surfaced much later and somewhere
+      // else: a background verify reporting `HTTP blob upload failed: 401`,
+      // long after the settings screen had been closed.
+      //
+      // A round trip, not a reachability check: read-only credentials would
+      // pass a probe that only lists, and then fail on the first real upload —
+      // which is the same fault one step further away.
+      await _probeExternalStorage(
+        extConfig,
+        cipher: c,
+        vaultId: engine.config.vaultId,
+      );
+
       final metaService = VaultMetaService(
         storage: store,
         vaultId: engine.config.vaultId,
         cipher: c,
       );
       await metaService.saveExternalBlobConfig(extConfig);
+      // The probe above just proved these work, so whatever refused us before
+      // is no longer the state of the world. Without clearing it the panel
+      // would keep naming a precondition the user had already met.
+      _storageRefused = false;
       _log.info('External blob config saved');
     },
     onClearExternalBlobConfig: () async {

@@ -1,4 +1,3 @@
-
 /// Turns a frontmatter region into [FmMap] or [FmRaw].
 ///
 /// A hand-written recogniser for the modelled subset rather than
@@ -37,10 +36,22 @@ import 'frontmatter_document.dart';
 /// quoted on the way out, so a Dataview query or an external script does not
 /// silently see a boolean where the user typed a word.
 const ambiguousScalarTokens = <String>{
-  'yes', 'no', 'on', 'off',
-  'Yes', 'No', 'On', 'Off',
-  'YES', 'NO', 'ON', 'OFF',
-  'y', 'n', 'Y', 'N',
+  'yes',
+  'no',
+  'on',
+  'off',
+  'Yes',
+  'No',
+  'On',
+  'Off',
+  'YES',
+  'NO',
+  'ON',
+  'OFF',
+  'y',
+  'n',
+  'Y',
+  'N',
 };
 
 // Leading zeros included on purpose: js-yaml's core schema reads `007` as the
@@ -151,7 +162,10 @@ FmDocument parseFrontmatterRegion(
 /// Two lists under one key merge; anything else is last-wins by position,
 /// which every device computes identically because the file order is the same
 /// everywhere.
-FmDocument _collapseDuplicateKeys(List<FmEntry> entries, {required String trail}) {
+FmDocument _collapseDuplicateKeys(
+  List<FmEntry> entries, {
+  required String trail,
+}) {
   final byKey = <String, int>{};
   final out = <FmEntry>[];
   for (final e in entries) {
@@ -305,7 +319,10 @@ _ParsedValue? _parseValue({
   required bool priorIsList,
 }) {
   final keyLine = lines[keyLineIndex];
-  final afterColon = region.substring(valueStartOffset, keyLine.start + keyLine.text.length);
+  final afterColon = region.substring(
+    valueStartOffset,
+    keyLine.start + keyLine.text.length,
+  );
   final inline = afterColon.trimLeft();
 
   /// Everything from just past the colon up to the start of [untilLine],
@@ -360,10 +377,7 @@ _ParsedValue? _parseValue({
       // a bare `key:`, and reading that back as an empty STRING silently
       // changes the property's type — `aliases` stops being a list.
       if (priorIsList) return _ParsedValue(const FmList([]), end);
-      return _ParsedValue(
-        FmScalar(priorKind ?? ScalarKind.text, ''),
-        end,
-      );
+      return _ParsedValue(FmScalar(priorKind ?? ScalarKind.text, ''), end);
     }
     final block = lines.sublist(keyLineIndex + 1, end);
     final list = _parseBlockList(block);
@@ -376,8 +390,12 @@ _ParsedValue? _parseValue({
 
   // Multi-line scalars, anchors, aliases, explicit tags and flow mappings all
   // carry structure this build does not place.
-  if (first == '|' || first == '>' || first == '&' || first == '*' ||
-      first == '!' || first == '{') {
+  if (first == '|' ||
+      first == '>' ||
+      first == '&' ||
+      first == '*' ||
+      first == '!' ||
+      first == '{') {
     final end = blockEnd();
     return _ParsedValue(opaqueThrough(end), end);
   }

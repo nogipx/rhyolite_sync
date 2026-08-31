@@ -22,37 +22,37 @@ class _FakeWebDav {
   int mkcolAttempts = 0;
 
   http.Client get client => MockClient((request) async {
-        final method = request.method;
-        final path = request.url.path;
-        log.add('$method $path');
-        switch (method) {
-          case 'MKCOL':
-            mkcolAttempts++;
-            if (mkcolAttempts <= mkcolFailsUntilAttempt) {
-              return http.Response('busy', 503);
-            }
-            final created = collections.add(path);
-            return http.Response('', created ? 201 : 405);
-          case 'PUT':
-            final parent = path.substring(0, path.lastIndexOf('/') + 1);
-            if (!collections.contains(parent)) {
-              return http.Response('parent collection missing', 409);
-            }
-            objects[path] = request.bodyBytes;
-            return http.Response('', 201);
-          default:
-            return http.Response('', 404);
+    final method = request.method;
+    final path = request.url.path;
+    log.add('$method $path');
+    switch (method) {
+      case 'MKCOL':
+        mkcolAttempts++;
+        if (mkcolAttempts <= mkcolFailsUntilAttempt) {
+          return http.Response('busy', 503);
         }
-      });
+        final created = collections.add(path);
+        return http.Response('', created ? 201 : 405);
+      case 'PUT':
+        final parent = path.substring(0, path.lastIndexOf('/') + 1);
+        if (!collections.contains(parent)) {
+          return http.Response('parent collection missing', 409);
+        }
+        objects[path] = request.bodyBytes;
+        return http.Response('', 201);
+      default:
+        return http.Response('', 404);
+    }
+  });
 }
 
 HttpBlobStorage _storage(_FakeWebDav dav) => HttpBlobStorage(
-      baseUrl: Uri.parse('https://dav.example.com/remote.php/dav/'),
-      prefix: 'blobs/vault-1/',
-      auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
-      backend: HttpBlobBackend.webdav,
-      httpClient: dav.client,
-    );
+  baseUrl: Uri.parse('https://dav.example.com/remote.php/dav/'),
+  prefix: 'blobs/vault-1/',
+  auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
+  backend: HttpBlobBackend.webdav,
+  httpClient: dav.client,
+);
 
 Uint8List _bytes(String s) => Uint8List.fromList(s.codeUnits);
 
@@ -72,68 +72,86 @@ void main() {
       );
     });
 
-    test('a 409 mid-session rebuilds the directory and retries the upload',
-        () async {
-      final dav = _FakeWebDav();
-      final storage = _storage(dav);
-      await storage.upload([(_bytes('first'), 'blob-a')]);
-      expect(dav.objects, hasLength(1));
+    test(
+      'a 409 mid-session rebuilds the directory and retries the upload',
+      () async {
+        final dav = _FakeWebDav();
+        final storage = _storage(dav);
+        await storage.upload([(_bytes('first'), 'blob-a')]);
+        expect(dav.objects, hasLength(1));
 
-      // The user deletes the vault folder from their WebDAV UI. The next PUT
-      // gets a 409 against a storage instance that believes it already made
-      // the directory.
-      dav.collections.clear();
-      dav.log.clear();
+        // The user deletes the vault folder from their WebDAV UI. The next PUT
+        // gets a 409 against a storage instance that believes it already made
+        // the directory.
+        dav.collections.clear();
+        dav.log.clear();
 
-      await storage.upload([(_bytes('second'), 'blob-b')]);
+        await storage.upload([(_bytes('second'), 'blob-b')]);
 
-      expect(dav.objects.keys.any((p) => p.endsWith('blob-b')), isTrue,
-          reason: 'the retry after MKCOL must land');
-      expect(dav.log.where((l) => l.startsWith('MKCOL')), isNotEmpty,
-          reason: 'the 409 must trigger a rebuild, not just be reported');
-    });
+        expect(
+          dav.objects.keys.any((p) => p.endsWith('blob-b')),
+          isTrue,
+          reason: 'the retry after MKCOL must land',
+        );
+        expect(
+          dav.log.where((l) => l.startsWith('MKCOL')),
+          isNotEmpty,
+          reason: 'the 409 must trigger a rebuild, not just be reported',
+        );
+      },
+    );
 
-    test('a MKCOL blip is recovered by the 409 retry, within the same upload',
-        () async {
-      // Both segments fail on the first chain; the PUT then 409s, the retry
-      // rebuilds, and the upload lands. Before the fix the first chain latched
-      // "created" and the PUT failed with a 409 nothing would ever resolve.
-      final dav = _FakeWebDav(mkcolFailsUntilAttempt: 2);
-      await _storage(dav).upload([(_bytes('payload'), 'blob-a')]);
+    test(
+      'a MKCOL blip is recovered by the 409 retry, within the same upload',
+      () async {
+        // Both segments fail on the first chain; the PUT then 409s, the retry
+        // rebuilds, and the upload lands. Before the fix the first chain latched
+        // "created" and the PUT failed with a 409 nothing would ever resolve.
+        final dav = _FakeWebDav(mkcolFailsUntilAttempt: 2);
+        await _storage(dav).upload([(_bytes('payload'), 'blob-a')]);
 
-      expect(dav.objects.keys.any((p) => p.endsWith('blob-a')), isTrue);
-      expect(dav.mkcolAttempts, greaterThan(2),
-          reason: 'the failed chain must be retried, not trusted');
-    });
+        expect(dav.objects.keys.any((p) => p.endsWith('blob-a')), isTrue);
+        expect(
+          dav.mkcolAttempts,
+          greaterThan(2),
+          reason: 'the failed chain must be retried, not trusted',
+        );
+      },
+    );
 
-    test('the chain runs once per session when uploads are not refused',
-        () async {
-      // Latching only on a confirmed MKCOL response looked careful and cost
-      // two round trips before every upload batch on any server that answers
-      // it with something outside {201, 405, 301}. A 409 is what reopens it.
-      var mkcols = 0;
-      final client = MockClient((request) async {
-        if (request.method == 'MKCOL') {
-          mkcols++;
-          return http.Response('unsupported', 503);
-        }
-        return http.Response('', 201);
-      });
-      final storage = HttpBlobStorage(
-        baseUrl: Uri.parse('https://dav.example.com/'),
-        prefix: 'blobs/vault-1/',
-        auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
-        backend: HttpBlobBackend.webdav,
-        httpClient: client,
-      );
+    test(
+      'the chain runs once per session when uploads are not refused',
+      () async {
+        // Latching only on a confirmed MKCOL response looked careful and cost
+        // two round trips before every upload batch on any server that answers
+        // it with something outside {201, 405, 301}. A 409 is what reopens it.
+        var mkcols = 0;
+        final client = MockClient((request) async {
+          if (request.method == 'MKCOL') {
+            mkcols++;
+            return http.Response('unsupported', 503);
+          }
+          return http.Response('', 201);
+        });
+        final storage = HttpBlobStorage(
+          baseUrl: Uri.parse('https://dav.example.com/'),
+          prefix: 'blobs/vault-1/',
+          auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
+          backend: HttpBlobBackend.webdav,
+          httpClient: client,
+        );
 
-      await storage.upload([(_bytes('one'), 'blob-a')]);
-      await storage.upload([(_bytes('two'), 'blob-b')]);
-      await storage.upload([(_bytes('three'), 'blob-c')]);
+        await storage.upload([(_bytes('one'), 'blob-a')]);
+        await storage.upload([(_bytes('two'), 'blob-b')]);
+        await storage.upload([(_bytes('three'), 'blob-c')]);
 
-      expect(mkcols, 2,
-          reason: 'one chain of two segments, not one per upload');
-    });
+        expect(
+          mkcols,
+          2,
+          reason: 'one chain of two segments, not one per upload',
+        );
+      },
+    );
 
     test('S3 is never sent MKCOL — it has no directories to create', () async {
       var mkcols = 0;
@@ -152,40 +170,52 @@ void main() {
       await storage.upload([(_bytes('one'), 'blob-a')]);
       await storage.upload([(_bytes('two'), 'blob-b')]);
 
-      expect(mkcols, 0,
-          reason: 'two wasted round trips per upload batch, forever');
-    });
-
-    test('a concurrent burst of uploads makes one directory chain, not eight',
-        () async {
-      final dav = _FakeWebDav();
-      await _storage(dav).upload([
-        for (var i = 0; i < 8; i++) (_bytes('b$i'), 'blob-$i'),
-      ]);
-
-      expect(dav.objects, hasLength(8));
-      // Two segments in the prefix: blobs/ and vault-1/.
-      expect(dav.mkcolAttempts, 2,
-          reason: 'eight parallel uploads must not fire eight MKCOL chains');
-    });
-
-    test('no retry storm: a 409 that survives the rebuild is reported once',
-        () async {
-      // A server that always 409s (misconfigured path, no MKCOL support).
-      final client = MockClient((request) async => request.method == 'PUT'
-          ? http.Response('nope', 409)
-          : http.Response('', 201));
-      final storage = HttpBlobStorage(
-        baseUrl: Uri.parse('https://dav.example.com/'),
-        prefix: 'blobs/vault-1/',
-        auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
-        httpClient: client,
-      );
-
-      await expectLater(
-        storage.upload([(_bytes('x'), 'blob-a')]),
-        throwsA(isA<Exception>()),
+      expect(
+        mkcols,
+        0,
+        reason: 'two wasted round trips per upload batch, forever',
       );
     });
+
+    test(
+      'a concurrent burst of uploads makes one directory chain, not eight',
+      () async {
+        final dav = _FakeWebDav();
+        await _storage(
+          dav,
+        ).upload([for (var i = 0; i < 8; i++) (_bytes('b$i'), 'blob-$i')]);
+
+        expect(dav.objects, hasLength(8));
+        // Two segments in the prefix: blobs/ and vault-1/.
+        expect(
+          dav.mkcolAttempts,
+          2,
+          reason: 'eight parallel uploads must not fire eight MKCOL chains',
+        );
+      },
+    );
+
+    test(
+      'no retry storm: a 409 that survives the rebuild is reported once',
+      () async {
+        // A server that always 409s (misconfigured path, no MKCOL support).
+        final client = MockClient(
+          (request) async => request.method == 'PUT'
+              ? http.Response('nope', 409)
+              : http.Response('', 201),
+        );
+        final storage = HttpBlobStorage(
+          baseUrl: Uri.parse('https://dav.example.com/'),
+          prefix: 'blobs/vault-1/',
+          auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
+          httpClient: client,
+        );
+
+        await expectLater(
+          storage.upload([(_bytes('x'), 'blob-a')]),
+          throwsA(isA<Exception>()),
+        );
+      },
+    );
   });
 }

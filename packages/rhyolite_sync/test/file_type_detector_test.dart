@@ -32,12 +32,14 @@ void main() {
       expect(detector.shouldChunk('notes/todo.md'), isFalse);
     });
 
-    test('extension detection matches the filename, not a directory segment',
-        () {
-      // A directory named like the compound suffix must not drag its
-      // children onto the binary path.
-      expect(detector.isText('foo.excalidraw.md/notes.md'), isTrue);
-    });
+    test(
+      'extension detection matches the filename, not a directory segment',
+      () {
+        // A directory named like the compound suffix must not drag its
+        // children onto the binary path.
+        expect(detector.isText('foo.excalidraw.md/notes.md'), isTrue);
+      },
+    );
   });
 
   group('FileTypeDetector extraBinaryExtensions (synced policy)', () {

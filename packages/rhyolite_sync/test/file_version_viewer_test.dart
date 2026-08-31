@@ -21,8 +21,13 @@ class _MemBlobStorage implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
   @override
   Future<void> deleteMany(List<String> ids, {RpcContext? context}) async {
     for (final id in ids) store.remove(id);
@@ -37,7 +42,10 @@ class _MemBlobStorage implements IBlobStorage {
       if (store.containsKey(id)) id: store[id]!,
   };
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs, {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     for (final (bytes, id) in blobs) store[id] = bytes;
   }
 }
@@ -208,15 +216,15 @@ void main() {
   }
 
   HistoryEntry entryFor(String path, String blobRef) => HistoryEntry(
-        eventId: 'e',
-        fileId: fid(path),
-        path: path,
-        sizeBytes: 0,
-        blobRef: blobRef,
-        operation: HistoryOperation.modify,
-        createdAt: DateTime.now(),
-        hlc: Hlc(1, 0, 'A'),
-      );
+    eventId: 'e',
+    fileId: fid(path),
+    path: path,
+    sizeBytes: 0,
+    blobRef: blobRef,
+    operation: HistoryOperation.modify,
+    createdAt: DateTime.now(),
+    hlc: Hlc(1, 0, 'A'),
+  );
 
   test('versionsOf returns events only for the given path', () async {
     fakeHistory.events.add(
@@ -262,51 +270,53 @@ void main() {
     expect(v.last.eventId, 'a');
   });
 
-  test('versionsOf queries the KEYED record id when a recordIdKey is set',
-      () async {
-    // Regression for the reported bug: the engine/server key history events by
-    // the keyed HMAC fileId (since 3.5.3), but the viewer used the legacy
-    // unkeyed uuid.v5 — so a keyed vault always saw "no history for this file"
-    // even though the rows existed.
-    final key = Uint8List.fromList(List.generate(32, (i) => i + 1));
-    final keyedViewer = FileVersionViewer(
-      browser: browser,
-      chunkedIOBuilder: () => cio,
-      io: io,
-      changeProvider: changes,
-      vaultPath: vaultPath,
-      vaultId: _v,
-      recordIdKey: key,
-    );
-    const path = 'notes/keyed.md';
-    final keyedId = VaultCipher.recordId(key, _v, path);
-    // The keyed id must differ from the legacy unkeyed one, or the test proves
-    // nothing.
-    expect(keyedId, isNot(fid(path)));
+  test(
+    'versionsOf queries the KEYED record id when a recordIdKey is set',
+    () async {
+      // Regression for the reported bug: the engine/server key history events by
+      // the keyed HMAC fileId (since 3.5.3), but the viewer used the legacy
+      // unkeyed uuid.v5 — so a keyed vault always saw "no history for this file"
+      // even though the rows existed.
+      final key = Uint8List.fromList(List.generate(32, (i) => i + 1));
+      final keyedViewer = FileVersionViewer(
+        browser: browser,
+        chunkedIOBuilder: () => cio,
+        io: io,
+        changeProvider: changes,
+        vaultPath: vaultPath,
+        vaultId: _v,
+        recordIdKey: key,
+      );
+      const path = 'notes/keyed.md';
+      final keyedId = VaultCipher.recordId(key, _v, path);
+      // The keyed id must differ from the legacy unkeyed one, or the test proves
+      // nothing.
+      expect(keyedId, isNot(fid(path)));
 
-    // History stored under the keyed id — what the push/server path writes.
-    fakeHistory.events.add(
-      _evt(
-        id: 'k',
-        fileId: keyedId,
-        hlc: '100-0-A',
-        op: HistoryOperation.create,
-        blobRef: 'sha-k',
-        createdAtMs: 1,
-        path: path,
-        size: 5,
-      ),
-    );
+      // History stored under the keyed id — what the push/server path writes.
+      fakeHistory.events.add(
+        _evt(
+          id: 'k',
+          fileId: keyedId,
+          hlc: '100-0-A',
+          op: HistoryOperation.create,
+          blobRef: 'sha-k',
+          createdAtMs: 1,
+          path: path,
+          size: 5,
+        ),
+      );
 
-    // Keyed viewer finds it...
-    final found = await keyedViewer.versionsOf(path);
-    expect(found.length, 1);
-    expect(found.first.eventId, 'k');
+      // Keyed viewer finds it...
+      final found = await keyedViewer.versionsOf(path);
+      expect(found.length, 1);
+      expect(found.first.eventId, 'k');
 
-    // ...while the legacy unkeyed viewer (null key → uuid.v5) misses it — the
-    // exact failure the user hit.
-    expect(await viewer.versionsOf(path), isEmpty);
-  });
+      // ...while the legacy unkeyed viewer (null key → uuid.v5) misses it — the
+      // exact failure the user hit.
+      expect(await viewer.versionsOf(path), isEmpty);
+    },
+  );
 
   test('contentAt assembles binary content from the chunk manifest', () async {
     // 3 MiB of varied bytes → forces a multi-chunk manifest, so this proves
@@ -322,23 +332,26 @@ void main() {
     expect(result, orderedEquals(body));
   });
 
-  test('contentAt projects a text version to plain text, not Fugue JSON',
-      () async {
-    // The exact reported bug: a .md version restored as raw serialization.
-    final ref = await putText('# Title\n\nhello world\n');
+  test(
+    'contentAt projects a text version to plain text, not Fugue JSON',
+    () async {
+      // The exact reported bug: a .md version restored as raw serialization.
+      final ref = await putText('# Title\n\nhello world\n');
 
-    final result = await viewer.contentAt(entryFor('notes/a.md', ref));
-    expect(result, isNotNull);
-    final text = utf8.decode(result!);
-    expect(text, '# Title\n\nhello world\n');
-    // Must NOT be the raw CRDT/manifest envelope.
-    expect(text, isNot(contains('"chars"')));
-    expect(text, isNot(contains('"chunks"')));
-  });
+      final result = await viewer.contentAt(entryFor('notes/a.md', ref));
+      expect(result, isNotNull);
+      final text = utf8.decode(result!);
+      expect(text, '# Title\n\nhello world\n');
+      // Must NOT be the raw CRDT/manifest envelope.
+      expect(text, isNot(contains('"chars"')));
+      expect(text, isNot(contains('"chunks"')));
+    },
+  );
 
   test('contentAt returns null when blob is gone everywhere', () async {
-    final result =
-        await viewer.contentAt(entryFor('a.md', 'sha-missing-manifest'));
+    final result = await viewer.contentAt(
+      entryFor('a.md', 'sha-missing-manifest'),
+    );
     expect(result, isNull);
   });
 

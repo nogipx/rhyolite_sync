@@ -55,20 +55,28 @@ class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> ids, {RpcContext? context}) async =>
-      {for (final i in ids) if (store.containsKey(i)) i};
+  Future<Set<String>> exists(List<String> ids, {RpcContext? context}) async => {
+    for (final i in ids)
+      if (store.containsKey(i)) i,
+  };
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs,
-      {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     for (final (b, i) in blobs) {
       store[i] = b;
     }
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> ids,
-          {RpcContext? context}) async =>
-      {for (final i in ids) if (store.containsKey(i)) i: store[i]!};
+  Future<Map<String, Uint8List>> download(
+    List<String> ids, {
+    RpcContext? context,
+  }) async => {
+    for (final i in ids)
+      if (store.containsKey(i)) i: store[i]!,
+  };
   @override
   Future<void> deleteMany(List<String> ids, {RpcContext? context}) async {
     for (final i in ids) {
@@ -95,10 +103,10 @@ void main() {
     final events = <SyncEngineEvent>[];
 
     ChunkedBlobIO? builder() => ChunkedBlobIO(
-          blobStore: localBlobs,
-          remoteBlobStorage: remote,
-          vaultId: _vaultId,
-        );
+      blobStore: localBlobs,
+      remoteBlobStorage: remote,
+      vaultId: _vaultId,
+    );
 
     final reconciler = DiskReconciler(
       vaultPath: _vaultPath,
@@ -138,16 +146,14 @@ void main() {
     expect(
       hasFmTail(bytes!),
       isTrue,
-      reason: 'a repaired blob without the tail turns every later concurrent '
+      reason:
+          'a repaired blob without the tail turns every later concurrent '
           'edit into a character merge of the frontmatter region',
     );
 
     // The tail must describe the note that is actually on disk.
     final fm = readFmTail(bytes)!;
-    final rebuilt = renderNote(
-      materializeFm(fm),
-      splitFrontmatter(note).body,
-    );
+    final rebuilt = renderNote(materializeFm(fm), splitFrontmatter(note).body);
     expect(rebuilt, normalizeNewlines(note));
   });
 
@@ -167,10 +173,10 @@ void main() {
     final remote = _MemRemote();
 
     ChunkedBlobIO? builder() => ChunkedBlobIO(
-          blobStore: localBlobs,
-          remoteBlobStorage: remote,
-          vaultId: _vaultId,
-        );
+      blobStore: localBlobs,
+      remoteBlobStorage: remote,
+      vaultId: _vaultId,
+    );
 
     final reconciler = DiskReconciler(
       vaultPath: _vaultPath,
@@ -187,8 +193,9 @@ void main() {
       emit: (_) {},
     );
 
-    io.files['$_vaultPath/plain.md'] =
-        Uint8List.fromList(utf8.encode('# Title\n\nbody\n'));
+    io.files['$_vaultPath/plain.md'] = Uint8List.fromList(
+      utf8.encode('# Title\n\nbody\n'),
+    );
 
     await RepairVaultUseCase(
       io: io,
@@ -204,8 +211,12 @@ void main() {
 
     final state = store.get(const Uuid().v5(_vaultId, 'plain.md'))!;
     final bytes = await builder()!.download(state.blobRef);
-    expect(hasFmTail(bytes!), isFalse,
-        reason: 'no properties means nothing to carry — the blob stays as it '
-            'is today, so plain notes cost nothing');
+    expect(
+      hasFmTail(bytes!),
+      isFalse,
+      reason:
+          'no properties means nothing to carry — the blob stays as it '
+          'is today, so plain notes cost nothing',
+    );
   });
 }

@@ -68,8 +68,11 @@ void main() {
       );
       final out = renderNote(materializeFm(joinFm(carried, lifted)), body);
       expect(out.contains('start: 2026-08-09'), isTrue);
-      expect(RegExp(r'^start:', multiLine: true).allMatches(out).length, 1,
-          reason: 'exactly one start key — no duplicate, no blend');
+      expect(
+        RegExp(r'^start:', multiLine: true).allMatches(out).length,
+        1,
+        reason: 'exactly one start key — no duplicate, no blend',
+      );
       expect(out.contains('2026-08-0409'), isFalse);
       expect(out.contains('2026-08-0904'), isFalse);
     });
@@ -77,27 +80,39 @@ void main() {
     test('a note with no frontmatter lifts to the join identity', () {
       const plain = '# Title\n\njust a body\n';
       final state = lift(plain, Hlc(1000, 0, 'A'));
-      expect(fmStateIsWorthStoring(state), isFalse,
-          reason: 'nothing to carry, so nothing is written to the blob');
+      expect(
+        fmStateIsWorthStoring(state),
+        isFalse,
+        reason: 'nothing to carry, so nothing is written to the blob',
+      );
       expect(renderNote(materializeFm(state), plain), plain);
     });
 
-    test('a region we cannot model lifts to raw and is left to the text join',
-        () {
-      // Tabs in indentation — js-yaml errors, so the recogniser refuses.
-      const note = '---\na:\n\t- x\n---\nbody\n';
-      final state = lift(note, Hlc(1000, 0, 'A'));
-      expect(state, isA<FmRawState>(),
-          reason: 'the resolver skips the rewrite for this shape');
-    });
+    test(
+      'a region we cannot model lifts to raw and is left to the text join',
+      () {
+        // Tabs in indentation — js-yaml errors, so the recogniser refuses.
+        const note = '---\na:\n\t- x\n---\nbody\n';
+        final state = lift(note, Hlc(1000, 0, 'A'));
+        expect(
+          state,
+          isA<FmRawState>(),
+          reason: 'the resolver skips the rewrite for this shape',
+        );
+      },
+    );
   });
 
   group('an emptied list keeps its type (§6.5)', () {
     test('Obsidian rewriting `aliases: []` as `aliases:` stays a list', () {
-      final doc = parseFrontmatterRegion(
-        splitFrontmatter(raw.replaceFirst('aliases: []', 'aliases:')).region!,
-        priorListKeys: const {'aliases'},
-      ) as FmMap;
+      final doc =
+          parseFrontmatterRegion(
+                splitFrontmatter(
+                  raw.replaceFirst('aliases: []', 'aliases:'),
+                ).region!,
+                priorListKeys: const {'aliases'},
+              )
+              as FmMap;
       final aliases = doc.entries.firstWhere((e) => e.key == 'aliases');
       expect(aliases.value, const FmList([]));
       expect(renderEntry(aliases), 'aliases: []\n');

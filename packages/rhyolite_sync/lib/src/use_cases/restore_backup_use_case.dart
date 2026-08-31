@@ -40,7 +40,8 @@ class RestoreBackupUseCase {
   /// manifest ref + path, or null if unavailable. The path matters: text is
   /// stored as the Fugue serialization and must be projected to plain text
   /// before writing. In the engine: download + `materializeFileContent`.
-  final Future<Uint8List?> Function(String blobRef, String path) downloadContent;
+  final Future<Uint8List?> Function(String blobRef, String path)
+  downloadContent;
 
   final IPlatformIO targetIO;
 

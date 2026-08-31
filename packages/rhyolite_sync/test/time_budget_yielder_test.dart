@@ -32,19 +32,29 @@ void main() {
       // per item, which is what a per-item yield does.
       final y = TimeBudgetYielder(budget: const Duration(seconds: 10));
       for (var i = 0; i < 100; i++) {
-        expect(await _yielded(y.maybeYield), isFalse,
-            reason: 'nothing here spent 10 s, so nothing should have yielded');
+        expect(
+          await _yielded(y.maybeYield),
+          isFalse,
+          reason: 'nothing here spent 10 s, so nothing should have yielded',
+        );
       }
     });
 
     test('yields once the budget is spent, and rearms after', () async {
       final y = TimeBudgetYielder(budget: const Duration(milliseconds: 5));
       _burn(12);
-      expect(await _yielded(y.maybeYield), isTrue,
-          reason: '12 ms of work exceeds a 5 ms budget');
-      expect(await _yielded(y.maybeYield), isFalse,
-          reason: 'the budget must rearm at the yield, or every later '
-              'iteration would yield forever');
+      expect(
+        await _yielded(y.maybeYield),
+        isTrue,
+        reason: '12 ms of work exceeds a 5 ms budget',
+      );
+      expect(
+        await _yielded(y.maybeYield),
+        isFalse,
+        reason:
+            'the budget must rearm at the yield, or every later '
+            'iteration would yield forever',
+      );
     });
 
     test('the budget measures work, not time spent yielding', () async {

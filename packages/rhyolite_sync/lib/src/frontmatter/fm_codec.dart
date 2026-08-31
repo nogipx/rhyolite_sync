@@ -179,11 +179,11 @@ FmEntryState _unpackEntry(Object? packed, List<String> nodes) {
 /// A live item is three fields; a tombstoned one is four. The length carries
 /// the distinction, so no null has to be written for the common case.
 List<dynamic> _packItem(FmItemState i, _NodeTable nodes) => [
-      nodes.pack(i.addHlc),
-      i.order,
-      nodes.pack(i.orderHlc),
-      if (i.delHlc != null) nodes.pack(i.delHlc!),
-    ];
+  nodes.pack(i.addHlc),
+  i.order,
+  nodes.pack(i.orderHlc),
+  if (i.delHlc != null) nodes.pack(i.delHlc!),
+];
 
 FmItemState _unpackItem(Object? packed, List<String> nodes) {
   if (packed is! List || packed.length < 3) {
@@ -207,9 +207,7 @@ FmItemState _unpackItem(Object? packed, List<String> nodes) {
 /// sequence emit different bytes for an equal state — which is precisely the
 /// phantom divergence this file exists to prevent.
 class _NodeTable {
-  _NodeTable(Set<String> ids)
-      : sorted = (ids.toList()..sort()),
-        _index = {};
+  _NodeTable(Set<String> ids) : sorted = (ids.toList()..sort()), _index = {};
 
   final List<String> sorted;
   final Map<String, int> _index;
@@ -239,7 +237,9 @@ Set<String> _collectNodeIds(FmState state) {
         final v = e.value;
         if (v is FmListValue) {
           for (final i in v.items.values) {
-            ids..add(i.addHlc.nodeId)..add(i.orderHlc.nodeId);
+            ids
+              ..add(i.addHlc.nodeId)
+              ..add(i.orderHlc.nodeId);
             final d = i.delHlc;
             if (d != null) ids.add(d.nodeId);
           }
@@ -255,7 +255,9 @@ Hlc _unpackHlc(Object? packed, List<String> nodes) {
   }
   final idx = packed[2] as int;
   if (idx < 0 || idx >= nodes.length) {
-    throw FmDecodeException('clock references node $idx, table has ${nodes.length}');
+    throw FmDecodeException(
+      'clock references node $idx, table has ${nodes.length}',
+    );
   }
   return Hlc(packed[0] as int, packed[1] as int, nodes[idx]);
 }

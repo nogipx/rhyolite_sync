@@ -54,7 +54,16 @@ class VaultStats {
     required this.totalSizeBytes,
     required this.serverCursor,
     this.serverEpoch,
+    this.capturedAt,
   });
+
+  /// When these numbers were read, when they are not current.
+  ///
+  /// Null means live. Set when the engine hands back its last snapshot
+  /// because it has no store to read — which is the normal state of a stopped
+  /// engine, and therefore the normal state when someone is filing a bug
+  /// report about one.
+  final DateTime? capturedAt;
 
   /// Number of distinct fileIds in the local store (including tombstones).
   final int totalFiles;
@@ -76,4 +85,16 @@ class VaultStats {
 
   final int serverCursor;
   final int? serverEpoch;
+
+  /// The same numbers, marked as read at [at] rather than now.
+  VaultStats staleAt(DateTime at) => VaultStats(
+    totalFiles: totalFiles,
+    tombstones: tombstones,
+    conflicting: conflicting,
+    uniqueBlobs: uniqueBlobs,
+    totalSizeBytes: totalSizeBytes,
+    serverCursor: serverCursor,
+    serverEpoch: serverEpoch,
+    capturedAt: at,
+  );
 }

@@ -1,3 +1,55 @@
+## [3.16.3] - 2026-09-01
+
+**A large first sync is several times faster.**
+Notes upload in groups instead of one at a time, and content this device
+already holds is no longer fetched back from the server. A vault of a few
+hundred notes over your own storage finishes in seconds.
+
+**Your own storage is treated as yours alone.**
+A backend that cannot be reached is never replaced with the managed one. A
+refused password is named, a rate limit is waited out, and a server hiccup is
+retried — each gets the answer it deserves instead of a silent failure.
+
+**A long first sync is left to finish.**
+A device busy uploading keeps its session, so a pass that needs several
+minutes gets them, and what it has already sent survives an interruption.
+
+### Bug Fixes
+
+- a storage that refuses this device says so instead of syncing silently (core)
+- an unknown storage backend is refused, not guessed as managed (core)
+- external storage is proved before it is called connected (obsidian)
+- a throttled storage backend is waited out, not counted as a failure (core)
+- a 5xx blip on a storage backend is retried, not counted as a lost file (core)
+- a busy engine is no longer mistaken for a dead one (obsidian)
+- a busy engine is not restarted for going quiet (obsidian)
+- the connection probe gets room when the engine is busy (obsidian)
+- re-arm the connection before ever restarting the engine (obsidian)
+- a restore no longer kills settings sync with a null check (obsidian)
+- settings sync starts once per session again (obsidian)
+- serialise the local database, which cannot take two writers (core)
+- a dead session ends the pass, and it ends for every worker (core)
+- the push goes out in batches instead of one impossible call (core)
+- a vault with unsent files stops calling itself finished (core)
+- a stopped engine still reports the numbers it last had (core)
+- states are published while the upload is still running (core)
+- the startup scan reports where it has got to (core)
+- re-uploading to a new storage is its own pass, not the verify one (core)
+- the startup scan stops drowning the log it is written into (core)
+- the pull stops drowning the log it is written into (core)
+
+### Performance
+
+- the startup pass groups notes the way it already grouped binaries (core)
+- a note stops fetching its own blob on every reconcile (core)
+- a device stops fetching back the records it just pushed (core)
+- a tracked binary is skipped on its stat instead of re-read (core)
+- the push examines what changed, not the whole vault (core)
+
+### Other
+
+- connecting an external storage says what it leaves behind (obsidian)
+
 ## [3.16.2] - 2026-08-31
 
 **A large first sync now finishes on its own.**

@@ -54,25 +54,25 @@ class StatePutItem implements IRpcSerializable {
   });
 
   factory StatePutItem.fromJson(Map<String, dynamic> json) => StatePutItem(
-        fileId: json['fileId'] as String,
-        encryptedState: json['encryptedState'] as String,
-        blobRef: (json['blobRef'] as String?) ?? '',
-        hlcPacked: json['hlcPacked'] as String,
-        tombstone: (json['tombstone'] as bool?) ?? false,
-        contextPacked: (json['contextPacked'] as String?) ?? '',
-        chunks: (json['chunks'] as List?)?.cast<String>() ?? const [],
-      );
+    fileId: json['fileId'] as String,
+    encryptedState: json['encryptedState'] as String,
+    blobRef: (json['blobRef'] as String?) ?? '',
+    hlcPacked: json['hlcPacked'] as String,
+    tombstone: (json['tombstone'] as bool?) ?? false,
+    contextPacked: (json['contextPacked'] as String?) ?? '',
+    chunks: (json['chunks'] as List?)?.cast<String>() ?? const [],
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'fileId': fileId,
-        'encryptedState': encryptedState,
-        if (blobRef.isNotEmpty) 'blobRef': blobRef,
-        'hlcPacked': hlcPacked,
-        if (tombstone) 'tombstone': true,
-        if (contextPacked.isNotEmpty) 'contextPacked': contextPacked,
-        if (chunks.isNotEmpty) 'chunks': chunks,
-      };
+    'fileId': fileId,
+    'encryptedState': encryptedState,
+    if (blobRef.isNotEmpty) 'blobRef': blobRef,
+    'hlcPacked': hlcPacked,
+    if (tombstone) 'tombstone': true,
+    if (contextPacked.isNotEmpty) 'contextPacked': contextPacked,
+    if (chunks.isNotEmpty) 'chunks': chunks,
+  };
 }
 
 class StatePutRequest implements IRpcSerializable {
@@ -91,7 +91,8 @@ class StatePutRequest implements IRpcSerializable {
   final int? expectedEpoch;
   final String? sourceClientId;
 
-  factory StatePutRequest.fromJson(Map<String, dynamic> json) => StatePutRequest(
+  factory StatePutRequest.fromJson(Map<String, dynamic> json) =>
+      StatePutRequest(
         vaultId: json['vaultId'] as String,
         items: (json['items'] as List)
             .map((e) => StatePutItem.fromJson(e as Map<String, dynamic>))
@@ -102,11 +103,11 @@ class StatePutRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'items': items.map((e) => e.toJson()).toList(),
-        if (expectedEpoch != null) 'expectedEpoch': expectedEpoch,
-        if (sourceClientId != null) 'sourceClientId': sourceClientId,
-      };
+    'vaultId': vaultId,
+    'items': items.map((e) => e.toJson()).toList(),
+    if (expectedEpoch != null) 'expectedEpoch': expectedEpoch,
+    if (sourceClientId != null) 'sourceClientId': sourceClientId,
+  };
 }
 
 /// Why the server refused a single putStates item.
@@ -139,10 +140,10 @@ class StatePutRejection implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'code': code,
-        'current': current,
-        'limit': limit,
-      };
+    'code': code,
+    'current': current,
+    'limit': limit,
+  };
 }
 
 /// Per-file outcome of a putStates call.
@@ -171,20 +172,19 @@ class StatePutResult implements IRpcSerializable {
   bool get rejected => rejection != null;
 
   factory StatePutResult.fromJson(Map<String, dynamic> json) => StatePutResult(
-        fileId: json['fileId'] as String,
-        serverSeq: json['serverSeq'] as int,
-        rejection: json['rejection'] == null
-            ? null
-            : StatePutRejection.fromJson(
-                json['rejection'] as Map<String, dynamic>),
-      );
+    fileId: json['fileId'] as String,
+    serverSeq: json['serverSeq'] as int,
+    rejection: json['rejection'] == null
+        ? null
+        : StatePutRejection.fromJson(json['rejection'] as Map<String, dynamic>),
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'fileId': fileId,
-        'serverSeq': serverSeq,
-        if (rejection != null) 'rejection': rejection!.toJson(),
-      };
+    'fileId': fileId,
+    'serverSeq': serverSeq,
+    if (rejection != null) 'rejection': rejection!.toJson(),
+  };
 }
 
 class StatePutResponse implements IRpcSerializable {
@@ -204,7 +204,8 @@ class StatePutResponse implements IRpcSerializable {
   /// True when expectedEpoch did not match. NO writes were performed.
   final bool epochMismatch;
 
-  factory StatePutResponse.fromJson(Map<String, dynamic> json) => StatePutResponse(
+  factory StatePutResponse.fromJson(Map<String, dynamic> json) =>
+      StatePutResponse(
         results: (json['results'] as List)
             .map((e) => StatePutResult.fromJson(e as Map<String, dynamic>))
             .toList(),
@@ -215,11 +216,11 @@ class StatePutResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'results': results.map((e) => e.toJson()).toList(),
-        'cursor': cursor,
-        'epoch': epoch,
-        if (epochMismatch) 'epochMismatch': epochMismatch,
-      };
+    'results': results.map((e) => e.toJson()).toList(),
+    'cursor': cursor,
+    'epoch': epoch,
+    if (epochMismatch) 'epochMismatch': epochMismatch,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -234,16 +235,17 @@ class StateGetRequest implements IRpcSerializable {
   /// Return records whose serverSeq is strictly greater than this. 0 = full.
   final int sinceCursor;
 
-  factory StateGetRequest.fromJson(Map<String, dynamic> json) => StateGetRequest(
+  factory StateGetRequest.fromJson(Map<String, dynamic> json) =>
+      StateGetRequest(
         vaultId: json['vaultId'] as String,
         sinceCursor: json['sinceCursor'] as int,
       );
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'sinceCursor': sinceCursor,
-      };
+    'vaultId': vaultId,
+    'sinceCursor': sinceCursor,
+  };
 }
 
 /// One TaggedValue from a file's MvRegister (doc §5.2). A single fileId
@@ -281,27 +283,27 @@ class StateRecord implements IRpcSerializable {
   final List<String> chunks;
 
   factory StateRecord.fromJson(Map<String, dynamic> json) => StateRecord(
-        fileId: json['fileId'] as String,
-        encryptedState: json['encryptedState'] as String,
-        blobRef: (json['blobRef'] as String?) ?? '',
-        hlcPacked: json['hlcPacked'] as String,
-        contextPacked: (json['contextPacked'] as String?) ?? '',
-        serverSeq: json['serverSeq'] as int,
-        tombstone: (json['tombstone'] as bool?) ?? false,
-        chunks: (json['chunks'] as List?)?.cast<String>() ?? const [],
-      );
+    fileId: json['fileId'] as String,
+    encryptedState: json['encryptedState'] as String,
+    blobRef: (json['blobRef'] as String?) ?? '',
+    hlcPacked: json['hlcPacked'] as String,
+    contextPacked: (json['contextPacked'] as String?) ?? '',
+    serverSeq: json['serverSeq'] as int,
+    tombstone: (json['tombstone'] as bool?) ?? false,
+    chunks: (json['chunks'] as List?)?.cast<String>() ?? const [],
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'fileId': fileId,
-        'encryptedState': encryptedState,
-        if (blobRef.isNotEmpty) 'blobRef': blobRef,
-        'hlcPacked': hlcPacked,
-        if (contextPacked.isNotEmpty) 'contextPacked': contextPacked,
-        'serverSeq': serverSeq,
-        if (tombstone) 'tombstone': true,
-        if (chunks.isNotEmpty) 'chunks': chunks,
-      };
+    'fileId': fileId,
+    'encryptedState': encryptedState,
+    if (blobRef.isNotEmpty) 'blobRef': blobRef,
+    'hlcPacked': hlcPacked,
+    if (contextPacked.isNotEmpty) 'contextPacked': contextPacked,
+    'serverSeq': serverSeq,
+    if (tombstone) 'tombstone': true,
+    if (chunks.isNotEmpty) 'chunks': chunks,
+  };
 }
 
 class StateGetResponse implements IRpcSerializable {
@@ -318,7 +320,8 @@ class StateGetResponse implements IRpcSerializable {
   final int cursor;
   final int epoch;
 
-  factory StateGetResponse.fromJson(Map<String, dynamic> json) => StateGetResponse(
+  factory StateGetResponse.fromJson(Map<String, dynamic> json) =>
+      StateGetResponse(
         records: (json['records'] as List)
             .map((e) => StateRecord.fromJson(e as Map<String, dynamic>))
             .toList(),
@@ -328,10 +331,10 @@ class StateGetResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'records': records.map((e) => e.toJson()).toList(),
-        'cursor': cursor,
-        'epoch': epoch,
-      };
+    'records': records.map((e) => e.toJson()).toList(),
+    'cursor': cursor,
+    'epoch': epoch,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -344,16 +347,17 @@ class StateWipeRequest implements IRpcSerializable {
   final String vaultId;
   final String? sourceClientId;
 
-  factory StateWipeRequest.fromJson(Map<String, dynamic> json) => StateWipeRequest(
+  factory StateWipeRequest.fromJson(Map<String, dynamic> json) =>
+      StateWipeRequest(
         vaultId: json['vaultId'] as String,
         sourceClientId: json['sourceClientId'] as String?,
       );
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        if (sourceClientId != null) 'sourceClientId': sourceClientId,
-      };
+    'vaultId': vaultId,
+    if (sourceClientId != null) 'sourceClientId': sourceClientId,
+  };
 }
 
 class StateWipeResponse implements IRpcSerializable {
@@ -392,9 +396,9 @@ class StatePurgeRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        if (sourceClientId != null) 'sourceClientId': sourceClientId,
-      };
+    'vaultId': vaultId,
+    if (sourceClientId != null) 'sourceClientId': sourceClientId,
+  };
 }
 
 class StatePurgeResponse implements IRpcSerializable {

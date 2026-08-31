@@ -32,12 +32,15 @@ class _FakeBucket implements IListableBlobStorage {
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> ids,
-          {RpcContext? context}) async =>
-      {};
+  Future<Map<String, Uint8List>> download(
+    List<String> ids, {
+    RpcContext? context,
+  }) async => {};
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs,
-      {RpcContext? context}) async {}
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {}
   @override
   Future<Set<String>> exists(List<String> ids, {RpcContext? context}) async =>
       {};
@@ -46,12 +49,15 @@ class _FakeBucket implements IListableBlobStorage {
 /// A backend with no listing at all — what the managed gRPC path is.
 class _OpaqueStorage implements IBlobStorage {
   @override
-  Future<Map<String, Uint8List>> download(List<String> ids,
-          {RpcContext? context}) async =>
-      {};
+  Future<Map<String, Uint8List>> download(
+    List<String> ids, {
+    RpcContext? context,
+  }) async => {};
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs,
-      {RpcContext? context}) async {}
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {}
   @override
   Future<void> deleteMany(List<String> ids, {RpcContext? context}) async {}
   @override
@@ -76,26 +82,31 @@ class _FakeMaintenance implements IVaultMaintenanceContract {
     batches.add(request.blobIds.length);
     return ClassifyBlobsResponse(
       requested: request.blobIds.length,
-      deadBlobIds:
-          request.blobIds.where((id) => !live.contains(id)).toList(),
+      deadBlobIds: request.blobIds.where((id) => !live.contains(id)).toList(),
     );
   }
 
   @override
-  Future<ReleaseBlobsResponse> releaseBlobs(ReleaseBlobsRequest request,
-          {RpcContext? context}) async =>
-      const ReleaseBlobsResponse(
-          requested: 0, stillReferenced: 0, deletedBlobs: 0);
+  Future<ReleaseBlobsResponse> releaseBlobs(
+    ReleaseBlobsRequest request, {
+    RpcContext? context,
+  }) async => const ReleaseBlobsResponse(
+    requested: 0,
+    stillReferenced: 0,
+    deletedBlobs: 0,
+  );
 
   @override
   Future<SweepOrphanBlobsResponse> sweepOrphanBlobs(
-          SweepOrphanBlobsRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+    SweepOrphanBlobsRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
 
   @override
   Future<SweepStableTombstonesResponse> sweepStableTombstones(
-          SweepStableTombstonesRequest request, {RpcContext? context}) =>
-      throw UnimplementedError();
+    SweepStableTombstonesRequest request, {
+    RpcContext? context,
+  }) => throw UnimplementedError();
 }
 
 void main() {
@@ -140,51 +151,66 @@ void main() {
       );
 
       await janitor.scan();
-      expect(bucket.objects, hasLength(1),
-          reason: 'the user has not approved anything yet');
+      expect(
+        bucket.objects,
+        hasLength(1),
+        reason: 'the user has not approved anything yet',
+      );
     });
 
-    test('execute deletes exactly the approved plan, not a fresh verdict',
-        () async {
-      final bucket = _FakeBucket(['a', 'b']);
-      final janitor = ByoBlobJanitor(
-        blobStorage: bucket,
-        maintenanceCaller: _FakeMaintenance(live: const {}),
-        vaultId: _vaultId,
-      );
+    test(
+      'execute deletes exactly the approved plan, not a fresh verdict',
+      () async {
+        final bucket = _FakeBucket(['a', 'b']);
+        final janitor = ByoBlobJanitor(
+          blobStorage: bucket,
+          maintenanceCaller: _FakeMaintenance(live: const {}),
+          vaultId: _vaultId,
+        );
 
-      // A plan naming only 'a', as if the user reviewed it before 'b' appeared.
-      await janitor.execute(
-        const ByoSweepPlan(totalBlobs: 1, deadBlobIds: ['a']),
-      );
-      expect(bucket.objects.keys, ['b'],
-          reason: 'widening the plan would delete what nobody saw');
-    });
+        // A plan naming only 'a', as if the user reviewed it before 'b' appeared.
+        await janitor.execute(
+          const ByoSweepPlan(totalBlobs: 1, deadBlobIds: ['a']),
+        );
+        expect(
+          bucket.objects.keys,
+          ['b'],
+          reason: 'widening the plan would delete what nobody saw',
+        );
+      },
+    );
 
-    test('a storage that cannot be listed reports unsupported, not clean',
-        () async {
-      final janitor = ByoBlobJanitor(
-        blobStorage: _OpaqueStorage(),
-        maintenanceCaller: _FakeMaintenance(),
-        vaultId: _vaultId,
-      );
+    test(
+      'a storage that cannot be listed reports unsupported, not clean',
+      () async {
+        final janitor = ByoBlobJanitor(
+          blobStorage: _OpaqueStorage(),
+          maintenanceCaller: _FakeMaintenance(),
+          vaultId: _vaultId,
+        );
 
-      final plan = await janitor.scan();
-      expect(plan.unsupported, isTrue);
-      expect(plan.isClean, isFalse,
-          reason: 'a bucket we never read must not be reported clean');
-    });
+        final plan = await janitor.scan();
+        expect(plan.unsupported, isTrue);
+        expect(
+          plan.isClean,
+          isFalse,
+          reason: 'a bucket we never read must not be reported clean',
+        );
+      },
+    );
 
-    test('a listing that returns null is unsupported, not an empty bucket',
-        () async {
-      final janitor = ByoBlobJanitor(
-        blobStorage: _FakeBucket(const ['x'], canList: false),
-        maintenanceCaller: _FakeMaintenance(),
-        vaultId: _vaultId,
-      );
+    test(
+      'a listing that returns null is unsupported, not an empty bucket',
+      () async {
+        final janitor = ByoBlobJanitor(
+          blobStorage: _FakeBucket(const ['x'], canList: false),
+          maintenanceCaller: _FakeMaintenance(),
+          vaultId: _vaultId,
+        );
 
-      expect((await janitor.scan()).unsupported, isTrue);
-    });
+        expect((await janitor.scan()).unsupported, isTrue);
+      },
+    );
 
     test('a server too old to classify aborts the whole sweep', () async {
       final bucket = _FakeBucket(['a', 'b']);
@@ -196,8 +222,11 @@ void main() {
 
       final plan = await janitor.scan();
       expect(plan.unsupported, isTrue);
-      expect(plan.deadBlobIds, isEmpty,
-          reason: 'a half-answered sweep must never reach execute');
+      expect(
+        plan.deadBlobIds,
+        isEmpty,
+        reason: 'a half-answered sweep must never reach execute',
+      );
       expect(await janitor.execute(plan), 0);
       expect(bucket.objects, hasLength(2));
     });

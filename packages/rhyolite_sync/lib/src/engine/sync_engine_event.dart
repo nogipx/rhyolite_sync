@@ -209,6 +209,18 @@ class SyncFilePulled extends SyncEngineEvent {
   final String path;
 }
 
+/// The blob backend refused this device — wrong credentials, or no permission.
+///
+/// Distinct from [SyncError], which is a thing that went wrong; this is a
+/// thing that will keep going wrong. Nothing retries its way out of a 401, so
+/// a host should treat it as a missing precondition — name it, offer the way
+/// to fix it — rather than as a failure to report and move past.
+class SyncStorageRefused extends SyncEngineEvent {
+  SyncStorageRefused(this.detail);
+
+  final String detail;
+}
+
 class SyncError extends SyncEngineEvent {
   SyncError(this.message);
 
@@ -377,6 +389,23 @@ typedef ServerRejectionFactory =
       String message,
       Map<String, dynamic> params,
     );
+
+/// Emitted while the startup diff is walking the vault, before any upload.
+///
+/// The scan is the longest silent stretch a sync has: it walks every file and
+/// hashes the ones whose signature moved, which on a large vault is a minute
+/// with nothing to show. That silence was read two ways, both wrong — the UI
+/// had nothing to say, and the host's health check took it for a dead engine
+/// and restarted one mid-scan, so the next attempt began the same minute over.
+///
+/// A heartbeat rather than a fine-grained bar: [scanned] climbs to [total] in
+/// steps, on a time budget, because the scan already owns the thread.
+class SyncStartupScanProgress extends SyncEngineEvent {
+  SyncStartupScanProgress({required this.scanned, required this.total});
+
+  final int scanned;
+  final int total;
+}
 
 /// Emitted while the engine is uploading blobs as part of a startup diff
 /// (typically right after a reset / re-upload). Carries (completed, total)

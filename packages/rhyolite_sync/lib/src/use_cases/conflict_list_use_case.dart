@@ -14,10 +14,7 @@ class ConflictListUseCase {
     for (final fileId in _store.fileIds) {
       final reg = _store.registerFor(fileId);
       if (reg == null || !reg.hasConflict) continue;
-      out.add(ConflictedFile(
-        fileId: fileId,
-        values: reg.allValues,
-      ));
+      out.add(ConflictedFile(fileId: fileId, values: reg.allValues));
     }
     return out;
   }

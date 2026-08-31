@@ -103,7 +103,8 @@ class VerifyBlobsUseCase {
   final Future<Map<String, Uint8List>> Function(
     String relPath,
     Set<String> wantedIds,
-  )? recoverBytes;
+  )?
+  recoverBytes;
 
   final LogScope _log;
 
@@ -131,8 +132,9 @@ class VerifyBlobsUseCase {
       // Yielding here discards this run — everything learned so far survives
       // only because [confirmed] belongs to the caller.
       context?.cancellationToken?.throwIfCancelled();
-      final end =
-          (i + existsBatch) > refList.length ? refList.length : i + existsBatch;
+      final end = (i + existsBatch) > refList.length
+          ? refList.length
+          : i + existsBatch;
       final slice = refList.sublist(i, end);
       final toProbe = slice.where((id) => !confirmed.contains(id)).toList();
       if (toProbe.isNotEmpty) {
@@ -211,8 +213,9 @@ class VerifyBlobsUseCase {
     var reuploaded = 0;
     for (var i = 0; i < toUpload.length; i += uploadBatch) {
       context?.cancellationToken?.throwIfCancelled();
-      final end =
-          (i + uploadBatch) > toUpload.length ? toUpload.length : i + uploadBatch;
+      final end = (i + uploadBatch) > toUpload.length
+          ? toUpload.length
+          : i + uploadBatch;
       final batch = toUpload.sublist(i, end);
       await blobStorage.upload(batch, context: context);
       reuploaded += batch.length;

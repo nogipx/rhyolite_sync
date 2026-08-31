@@ -13,12 +13,20 @@ class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
   int uploadCount = 0;
 
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs, {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     for (final (bytes, id) in blobs) {
       store[id] = bytes;
       uploadCount++;
@@ -26,7 +34,10 @@ class _MemRemote implements IBlobStorage {
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> blobIds, {RpcContext? context}) async {
+  Future<Map<String, Uint8List>> download(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async {
     return {
       for (final id in blobIds)
         if (store.containsKey(id)) id: store[id]!,
@@ -181,8 +192,11 @@ void main() {
     }
 
     final up = <(int, int)>[];
-    final result =
-        await io.upload(original, {}, onProgress: (s, t) => up.add((s, t)));
+    final result = await io.upload(
+      original,
+      {},
+      onProgress: (s, t) => up.add((s, t)),
+    );
     expect(up, isNotEmpty);
     // Total is always the content size; the final report is 100%.
     expect(up.every((e) => e.$2 == original.length), isTrue);
@@ -196,68 +210,83 @@ void main() {
       vaultId: _v,
     );
     final down = <(int, int)>[];
-    final got = await io2.download(result.manifestHash,
-        onProgress: (s, t) => down.add((s, t)));
+    final got = await io2.download(
+      result.manifestHash,
+      onProgress: (s, t) => down.add((s, t)),
+    );
     expect(got, isNotNull);
     expect(down, isNotEmpty);
     expect(down.last, (original.length, original.length));
   });
 
-  test('onProgress advances across batches for a multi-MiB upload/download',
-      () async {
-    // Default ~1 MiB chunker + 5 MiB of varied data → several 2 MiB upload
-    // batches, so progress must report intermediate values (the bar moves).
-    final remote2 = _MemRemote();
-    final io2 = ChunkedBlobIO(
-      blobStore: LocalBlobStore(InMemoryBlobRepository()),
-      remoteBlobStorage: remote2,
-      vaultId: _v,
-    );
-    final big = Uint8List(5 * 1024 * 1024);
-    for (var i = 0; i < big.length; i++) {
-      big[i] = (i * 2654435761 >> 13) & 0xff; // pseudo-random, splits well
-    }
+  test(
+    'onProgress advances across batches for a multi-MiB upload/download',
+    () async {
+      // Default ~1 MiB chunker + 5 MiB of varied data → several 2 MiB upload
+      // batches, so progress must report intermediate values (the bar moves).
+      final remote2 = _MemRemote();
+      final io2 = ChunkedBlobIO(
+        blobStore: LocalBlobStore(InMemoryBlobRepository()),
+        remoteBlobStorage: remote2,
+        vaultId: _v,
+      );
+      final big = Uint8List(5 * 1024 * 1024);
+      for (var i = 0; i < big.length; i++) {
+        big[i] = (i * 2654435761 >> 13) & 0xff; // pseudo-random, splits well
+      }
 
-    final up = <int>[];
-    final res = await io2.upload(big, {}, onProgress: (s, _) => up.add(s));
-    expect(up.where((s) => s > 0 && s < big.length), isNotEmpty,
-        reason: 'upload must report intermediate progress, not just 0 → done');
-    expect(up.last, big.length);
+      final up = <int>[];
+      final res = await io2.upload(big, {}, onProgress: (s, _) => up.add(s));
+      expect(
+        up.where((s) => s > 0 && s < big.length),
+        isNotEmpty,
+        reason: 'upload must report intermediate progress, not just 0 → done',
+      );
+      expect(up.last, big.length);
 
-    // Fresh cache download must also step through.
-    final io3 = ChunkedBlobIO(
-      blobStore: LocalBlobStore(InMemoryBlobRepository()),
-      remoteBlobStorage: remote2,
-      vaultId: _v,
-    );
-    final down = <int>[];
-    final got =
-        await io3.download(res.manifestHash, onProgress: (s, _) => down.add(s));
-    expect(got!.length, big.length);
-    expect(down.where((s) => s > 0 && s < big.length), isNotEmpty,
-        reason: 'download must report intermediate progress');
-    expect(down.last, big.length);
-  });
+      // Fresh cache download must also step through.
+      final io3 = ChunkedBlobIO(
+        blobStore: LocalBlobStore(InMemoryBlobRepository()),
+        remoteBlobStorage: remote2,
+        vaultId: _v,
+      );
+      final down = <int>[];
+      final got = await io3.download(
+        res.manifestHash,
+        onProgress: (s, _) => down.add(s),
+      );
+      expect(got!.length, big.length);
+      expect(
+        down.where((s) => s > 0 && s < big.length),
+        isNotEmpty,
+        reason: 'download must report intermediate progress',
+      );
+      expect(down.last, big.length);
+    },
+  );
 
   group('maxDownloadBytes (M5 — download size admission)', () {
     ChunkedBlobIO _capped(int max) => ChunkedBlobIO(
-          blobStore: local,
-          remoteBlobStorage: remote,
-          vaultId: _v,
-          maxDownloadBytes: max,
-          chunker: ContentDefinedChunker(
-            minChunkSize: 64,
-            avgChunkSize: 128,
-            maxChunkSize: 256,
-          ),
-        );
+      blobStore: local,
+      remoteBlobStorage: remote,
+      vaultId: _v,
+      maxDownloadBytes: max,
+      chunker: ContentDefinedChunker(
+        minChunkSize: 64,
+        avgChunkSize: 128,
+        maxChunkSize: 256,
+      ),
+    );
 
     test('rejects a blob whose declared size exceeds the cap', () async {
       final content = _bytes('x' * 4000); // spans many tiny chunks
       final up = await io.upload(content, {}); // uncapped upload
       final got = await _capped(500).download(up.manifestHash);
-      expect(got, isNull,
-          reason: 'an oversized blob must not be assembled into memory');
+      expect(
+        got,
+        isNull,
+        reason: 'an oversized blob must not be assembled into memory',
+      );
     });
 
     test('a blob within the cap still downloads intact', () async {
@@ -352,13 +381,15 @@ void main() {
       expect(rebuilt, original);
     });
 
-    test('different bytes produce different ids, so a stale file heals nothing',
-        () async {
-      final uploaded = await io.upload(_bytes('c' * 900), {});
-      final produced = await io.recompute(_bytes('c' * 900 + 'tail'));
+    test(
+      'different bytes produce different ids, so a stale file heals nothing',
+      () async {
+        final uploaded = await io.upload(_bytes('c' * 900), {});
+        final produced = await io.recompute(_bytes('c' * 900 + 'tail'));
 
-      expect(produced.containsKey(uploaded.manifestHash), isFalse);
-    });
+        expect(produced.containsKey(uploaded.manifestHash), isFalse);
+      },
+    );
 
     test('caches nothing and uploads nothing', () async {
       final before = remote.store.length;

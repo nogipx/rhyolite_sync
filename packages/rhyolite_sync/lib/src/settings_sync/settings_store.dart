@@ -28,7 +28,7 @@ class StoredResource {
 /// sharing, is what convergence requires).
 class SettingsStore {
   SettingsStore({required IDataClient client, required this.vaultId})
-      : _client = client;
+    : _client = client;
 
   final IDataClient _client;
   final String vaultId;
@@ -126,8 +126,11 @@ class SettingsStore {
     // A null sig preserves the existing one — pulls update state without a
     // local file signature, so they must not clobber it.
     final effectiveSig = sig ?? _rows[resourceId]?.sig;
-    _rows[resourceId] =
-        StoredResource(encodedState: encodedState, seen: seen, sig: effectiveSig);
+    _rows[resourceId] = StoredResource(
+      encodedState: encodedState,
+      seen: seen,
+      sig: effectiveSig,
+    );
     await _writeWithRetry(
       collection: _storeCol,
       id: resourceId,
@@ -143,17 +146,15 @@ class SettingsStore {
   /// file produced no CRDT change, or after a pull-write, so the next scan
   /// recognises the on-disk version as already synced.
   Future<void> setSig(String resourceId, String sig) async {
-    final row = _rows[resourceId] ??=
-        StoredResource(encodedState: null, seen: const CausalContext.empty());
+    final row = _rows[resourceId] ??= StoredResource(
+      encodedState: null,
+      seen: const CausalContext.empty(),
+    );
     row.sig = sig;
     await _writeWithRetry(
       collection: _storeCol,
       id: resourceId,
-      payload: {
-        'state': row.encodedState,
-        'seen': row.seen.pack(),
-        'sig': sig,
-      },
+      payload: {'state': row.encodedState, 'seen': row.seen.pack(), 'sig': sig},
     );
   }
 
@@ -222,7 +223,8 @@ class SettingsStore {
         return;
       } catch (e) {
         final msg = e.toString().toLowerCase();
-        final transient = msg.contains('not newer') ||
+        final transient =
+            msg.contains('not newer') ||
             msg.contains('conflict') ||
             msg.contains('expected version') ||
             msg.contains('already exists') ||

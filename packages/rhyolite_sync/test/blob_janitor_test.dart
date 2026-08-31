@@ -17,8 +17,13 @@ class _MemBlobStorage implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
   final List<String> deletedLog = [];
   bool failDelete = false;
 
@@ -32,13 +37,19 @@ class _MemBlobStorage implements IBlobStorage {
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> blobIds, {RpcContext? context}) async => {
+  Future<Map<String, Uint8List>> download(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
     for (final id in blobIds)
       if (store.containsKey(id)) id: store[id]!,
   };
 
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs, {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     for (final (bytes, id) in blobs) store[id] = bytes;
   }
 }
@@ -282,29 +293,31 @@ void main() {
       expect(() => janitor.scan(olderThanDays: -1), throwsArgumentError);
     });
 
-    test('olderThanDays: 0 deletes recent history a 30-day window would keep',
-        () async {
-      historyCaller.seed(
-        _evt(
-          id: 'yesterday',
-          fileId: 'f1',
-          blobRef: 'blob-recent',
-          hlcMs: 1,
-          createdAtMs: _daysAgoMs(1),
-        ),
-      );
-      // No active heads → nothing pins → device-safety allows deletion.
-      expect(
-        (await janitor.scan(olderThanDays: 30)).eventsToDelete,
-        0,
-        reason: 'a 1-day-old event is within a 30-day window',
-      );
-      expect(
-        (await janitor.scan(olderThanDays: 0)).eventsToDelete,
-        1,
-        reason: 'days=0 clears everything the device head allows',
-      );
-    });
+    test(
+      'olderThanDays: 0 deletes recent history a 30-day window would keep',
+      () async {
+        historyCaller.seed(
+          _evt(
+            id: 'yesterday',
+            fileId: 'f1',
+            blobRef: 'blob-recent',
+            hlcMs: 1,
+            createdAtMs: _daysAgoMs(1),
+          ),
+        );
+        // No active heads → nothing pins → device-safety allows deletion.
+        expect(
+          (await janitor.scan(olderThanDays: 30)).eventsToDelete,
+          0,
+          reason: 'a 1-day-old event is within a 30-day window',
+        );
+        expect(
+          (await janitor.scan(olderThanDays: 0)).eventsToDelete,
+          1,
+          reason: 'days=0 clears everything the device head allows',
+        );
+      },
+    );
 
     test('isEmpty true when nothing to do', () async {
       final plan = await janitor.scan(olderThanDays: 30);
@@ -460,9 +473,13 @@ void main() {
 
       expect(result.failedBlobs, greaterThan(0));
       expect(result.hadFailures, isTrue);
-      expect(result.deletedEvents, 0,
-          reason: 'events must NOT be deleted while their blobs remain — '
-              'that would strand the blob as an unfindable orphan');
+      expect(
+        result.deletedEvents,
+        0,
+        reason:
+            'events must NOT be deleted while their blobs remain — '
+            'that would strand the blob as an unfindable orphan',
+      );
       expect(historyCaller.deletedEventIds, isEmpty);
       expect(historyCaller.events, isNotEmpty, reason: 'event kept for retry');
     });

@@ -89,8 +89,10 @@ class _CountingRemote implements IBlobStorage {
   Future<Set<String>> exists(
     List<String> blobIds, {
     covariant Object? context,
-  }) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
   int uploads = 0;
   int downloads = 0;
 
@@ -143,13 +145,16 @@ class _NoopChangeProvider implements IChangeProvider {
   void unsuppress(String path) {}
 }
 
-Future<({
-  DiskReconciler reconciler,
-  FileStateStore store,
-  FugueStore fugueStore,
-  _MtimeAwareIo io,
-  _CountingRemote remote,
-})> _newFixture() async {
+Future<
+  ({
+    DiskReconciler reconciler,
+    FileStateStore store,
+    FugueStore fugueStore,
+    _MtimeAwareIo io,
+    _CountingRemote remote,
+  })
+>
+_newFixture() async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
   final store = FileStateStore(client: env.client, vaultId: _vaultId);
@@ -161,10 +166,10 @@ Future<({
   final remote = _CountingRemote();
   String fileIdFor(String p) => const Uuid().v5(_vaultId, p);
   ChunkedBlobIO? builder() => ChunkedBlobIO(
-        blobStore: localBlobs,
-        remoteBlobStorage: remote,
-        vaultId: _vaultId,
-      );
+    blobStore: localBlobs,
+    remoteBlobStorage: remote,
+    vaultId: _vaultId,
+  );
   final reconciler = DiskReconciler(
     vaultPath: _vaultPath,
     vaultId: _vaultId,
@@ -174,9 +179,7 @@ Future<({
     store: store,
     fugueStore: fugueStore,
     chunkedIOBuilder: builder,
-    knownChunks: () => {
-      for (final s in store.allValuesFlat) ...s.chunks,
-    },
+    knownChunks: () => {for (final s in store.allValuesFlat) ...s.chunks},
     fileIdFor: fileIdFor,
     emit: (_) {},
   );
@@ -274,24 +277,26 @@ void main() {
       expect(recreated, isTrue);
     });
 
-    test('forgetStat invalidates the cache for explicit invalidation',
-        () async {
-      final f = await _newFixture();
-      f.io.files['$_vaultPath/note.md'] = _bytes('hello');
-      f.io.mtimes['$_vaultPath/note.md'] = 1;
-      await f.reconciler.reconcileWithDisk('note.md');
+    test(
+      'forgetStat invalidates the cache for explicit invalidation',
+      () async {
+        final f = await _newFixture();
+        f.io.files['$_vaultPath/note.md'] = _bytes('hello');
+        f.io.mtimes['$_vaultPath/note.md'] = 1;
+        await f.reconciler.reconcileWithDisk('note.md');
 
-      // Without forgetStat → short-circuits.
-      await f.reconciler.reconcileWithDisk('note.md');
+        // Without forgetStat → short-circuits.
+        await f.reconciler.reconcileWithDisk('note.md');
 
-      // After forgetStat → goes through full path.
-      f.reconciler.forgetStat('note.md');
+        // After forgetStat → goes through full path.
+        f.reconciler.forgetStat('note.md');
 
-      final changed = await f.reconciler.reconcileWithDisk('note.md');
-      // Content didn't change, so changed=false, but we DID enter the
-      // text-reconcile path.
-      expect(changed, isFalse);
-    });
+        final changed = await f.reconciler.reconcileWithDisk('note.md');
+        // Content didn't change, so changed=false, but we DID enter the
+        // text-reconcile path.
+        expect(changed, isFalse);
+      },
+    );
 
     test('binary path also short-circuits', () async {
       final f = await _newFixture();

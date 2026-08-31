@@ -109,9 +109,9 @@ class PathScope {
   /// matches the NFC paths the engine stores — the same split that once turned
   /// one Russian-named file into two file ids.
   static String? normalizeEntry(String raw) {
-    final collapsed = normalizeVaultPath(raw.trim())
-        .replaceAll(r'\', '/')
-        .replaceAll(RegExp(r'/+'), '/');
+    final collapsed = normalizeVaultPath(
+      raw.trim(),
+    ).replaceAll(r'\', '/').replaceAll(RegExp(r'/+'), '/');
     final trimmed = collapsed.replaceAll(RegExp(r'^/+|/+$'), '').trim();
     return trimmed.isEmpty ? null : trimmed;
   }

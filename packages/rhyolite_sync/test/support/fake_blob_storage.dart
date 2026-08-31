@@ -57,14 +57,13 @@ class FakeBlobStorage implements IBlobStorage {
   Future<Set<String>> exists(
     List<String> blobIds, {
     RpcContext? context,
-  }) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     for (final id in blobIds) {
       store.remove(id);
     }

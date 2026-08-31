@@ -25,10 +25,10 @@ class BackupSnapshotInfo implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'snapshotId': snapshotId,
-        'createdAtMs': createdAtMs,
-        'recordCount': recordCount,
-      };
+    'snapshotId': snapshotId,
+    'createdAtMs': createdAtMs,
+    'recordCount': recordCount,
+  };
 }
 
 class ListBackupsRequest implements IRpcSerializable {
@@ -55,8 +55,9 @@ class ListBackupsResponse implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'snapshots': [for (final s in snapshots) s.toJson()]};
+  Map<String, dynamic> toJson() => {
+    'snapshots': [for (final s in snapshots) s.toJson()],
+  };
 }
 
 class GetBackupRequest implements IRpcSerializable {
@@ -71,8 +72,10 @@ class GetBackupRequest implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'vaultId': vaultId, 'snapshotId': snapshotId};
+  Map<String, dynamic> toJson() => {
+    'vaultId': vaultId,
+    'snapshotId': snapshotId,
+  };
 }
 
 /// A snapshot's frozen state records — the same shape a pull delivers, so the
@@ -90,8 +93,9 @@ class GetBackupResponse implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'records': [for (final r in records) r.toJson()]};
+  Map<String, dynamic> toJson() => {
+    'records': [for (final r in records) r.toJson()],
+  };
 }
 
 class CaptureBackupRequest implements IRpcSerializable {
@@ -112,7 +116,8 @@ class CaptureBackupResponse implements IRpcSerializable {
   factory CaptureBackupResponse.fromJson(Map<String, dynamic> json) =>
       CaptureBackupResponse(
         snapshot: BackupSnapshotInfo.fromJson(
-            (json['snapshot'] as Map).cast<String, dynamic>()),
+          (json['snapshot'] as Map).cast<String, dynamic>(),
+        ),
       );
 
   @override
@@ -131,8 +136,10 @@ class DeleteBackupRequest implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'vaultId': vaultId, 'snapshotId': snapshotId};
+  Map<String, dynamic> toJson() => {
+    'vaultId': vaultId,
+    'snapshotId': snapshotId,
+  };
 }
 
 class DeleteBackupResponse implements IRpcSerializable {

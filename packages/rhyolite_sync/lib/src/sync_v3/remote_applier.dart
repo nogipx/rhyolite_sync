@@ -459,8 +459,12 @@ class RemoteApplier {
     // account for. If any of these can't be downloaded, resolving now
     // would drop that side.
     final realValues = joined.allValues
-        .where((s) =>
-            !s.tombstone && s.blobRef.isNotEmpty && !isStaleBaseUnderDelete(s))
+        .where(
+          (s) =>
+              !s.tombstone &&
+              s.blobRef.isNotEmpty &&
+              !isStaleBaseUnderDelete(s),
+        )
         .toList(growable: false);
 
     final sequences = <Fugue<String>>[];
@@ -486,8 +490,9 @@ class RemoteApplier {
       await Future<void>.delayed(Duration.zero);
       // Always the text path: only text files reach the text conflict resolver.
       final kind = classifyBlob(bytes, isTextPath: true);
-      final decoded =
-          kind == BlobKind.fugue ? reconciler.tryDecodeFugueBlob(bytes) : null;
+      final decoded = kind == BlobKind.fugue
+          ? reconciler.tryDecodeFugueBlob(bytes)
+          : null;
       if (decoded != null) {
         sequences.add(decoded);
         // The frontmatter of this side. A blob written before this feature —
@@ -605,7 +610,10 @@ class RemoteApplier {
       // losslessly — rewriting from the raw state could only lose a version.
       if (unionFm is FmRawState) unionFm = null;
       if (unionFm != null) {
-        union = renderNote(materializeFm(unionFm), splitFrontmatter(union).body);
+        union = renderNote(
+          materializeFm(unionFm),
+          splitFrontmatter(union).body,
+        );
       }
       final wrote = await reconciler.renderUnionView(fileId, winnerPath, union);
       if (wrote) _emit(SyncFileModified(winnerPath));
@@ -640,8 +648,10 @@ class RemoteApplier {
     // See the union branch: a raw region has no typed merge, and its state
     // cannot be joined without dropping a side. The character join stands.
     if (mergedFm is FmRawState) {
-      _log.info('Text merge for $fileId keeps the character union: '
-          'the region is not a mapping this build can place');
+      _log.info(
+        'Text merge for $fileId keeps the character union: '
+        'the region is not a mapping this build can place',
+      );
       mergedFm = null;
     }
     if (mergedFm != null) {
@@ -943,12 +953,16 @@ class RemoteApplier {
         for (final part in parts) {
           switch (part) {
             case StateMergeConflictCopy(:final loser, :final suggestedCopyPath):
-              await _writeConflictCopyFile(loser, suggestedCopyPath, context: context);
+              await _writeConflictCopyFile(
+                loser,
+                suggestedCopyPath,
+                context: context,
+              );
             case StateMergeWinnerOnlyLossy(
-                :final lostBlobRef,
-                :final lostNodeId,
-                :final reason,
-              ):
+              :final lostBlobRef,
+              :final lostNodeId,
+              :final reason,
+            ):
               _log.warning('Data loss sealing $fileId via LWW (N>2): $reason');
               _emit(
                 SyncDataLoss(

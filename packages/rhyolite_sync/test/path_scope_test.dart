@@ -94,10 +94,11 @@ void main() {
 
   group('PathScope.parse', () {
     test('splits on commas and newlines, dropping blanks', () {
-      expect(
-        PathScope.parse('Work, Personal/Journal\n\n /Inbox/ ,'),
-        {'Work', 'Personal/Journal', 'Inbox'},
-      );
+      expect(PathScope.parse('Work, Personal/Journal\n\n /Inbox/ ,'), {
+        'Work',
+        'Personal/Journal',
+        'Inbox',
+      });
     });
 
     test('a root-only entry does not silently defeat the allowlist', () {
@@ -114,10 +115,7 @@ void main() {
     test('a missing or malformed payload reads as the whole vault', () {
       expect(PathScope.fromJson(null).isUnrestricted, isTrue);
       expect(PathScope.fromJson('nonsense').isUnrestricted, isTrue);
-      expect(
-        PathScope.fromJson({'includePaths': 42}).isUnrestricted,
-        isTrue,
-      );
+      expect(PathScope.fromJson({'includePaths': 42}).isUnrestricted, isTrue);
     });
   });
 }

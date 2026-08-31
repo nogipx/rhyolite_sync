@@ -51,10 +51,10 @@ Future<_Fx> _newReconciler(int truncateAt) async {
   final backing = FakeBlobStorage();
 
   ChunkedBlobIO builder() => ChunkedBlobIO(
-        blobStore: appLocal,
-        remoteBlobStorage: backing,
-        vaultId: _vaultId,
-      );
+    blobStore: appLocal,
+    remoteBlobStorage: backing,
+    vaultId: _vaultId,
+  );
 
   final reconciler = DiskReconciler(
     vaultPath: _vaultPath,
@@ -74,19 +74,19 @@ Future<_Fx> _newReconciler(int truncateAt) async {
 }
 
 void main() {
-  group('H3 — non-atomic write leaves a truncated file that then propagates',
-      () {
-    test(
-      'crash mid-write -> truncated file stays on disk AND becomes the new '
-      'version the next reconcile would push',
-      () async {
+  group(
+    'H3 — non-atomic write leaves a truncated file that then propagates',
+    () {
+      test('crash mid-write -> truncated file stays on disk AND becomes the new '
+          'version the next reconcile would push', () async {
         const truncateAt = 500;
         final f = await _newReconciler(truncateAt);
         final fileId = _fileIdFor('big.bin');
 
         // Correct content (single chunk, well under the min chunk size).
-        final original =
-            Uint8List.fromList(List<int>.generate(2000, (i) => (i * 7) & 0xFF));
+        final original = Uint8List.fromList(
+          List<int>.generate(2000, (i) => (i * 7) & 0xFF),
+        );
         final up = await f.builder().upload(original, <String>{});
 
         // The register already knows the correct version (as after a pull that
@@ -111,28 +111,48 @@ void main() {
 
         // (a) A truncated file is left on disk — not absent, not whole.
         final onDisk = f.io.files['$_vaultPath/big.bin'];
-        expect(onDisk, isNotNull,
-            reason: 'a tmp+rename write would have left NO partial file');
-        expect(onDisk!.length, truncateAt,
-            reason: 'exactly the bytes written before the crash remain');
-        expect(onDisk, equals(original.sublist(0, truncateAt)),
-            reason: 'it is a genuine prefix — a torn write');
+        expect(
+          onDisk,
+          isNotNull,
+          reason: 'a tmp+rename write would have left NO partial file',
+        );
+        expect(
+          onDisk!.length,
+          truncateAt,
+          reason: 'exactly the bytes written before the crash remain',
+        );
+        expect(
+          onDisk,
+          equals(original.sublist(0, truncateAt)),
+          reason: 'it is a genuine prefix — a torn write',
+        );
 
         // (b) The next reconcile reads the truncated file back and treats it as
         // a local edit: the truncated content becomes the tracked version.
         f.io.armed = false; // let the (small) re-upload of truncated bytes pass
         final changed = await f.reconciler.reconcileWithDisk('big.bin');
-        expect(changed, isTrue,
-            reason: 'truncated disk content diverges from the store -> '
-                'a push-worthy mutation');
+        expect(
+          changed,
+          isTrue,
+          reason:
+              'truncated disk content diverges from the store -> '
+              'a push-worthy mutation',
+        );
 
         final tracked = f.store.get(fileId)!;
-        expect(tracked.sizeBytes, truncateAt,
-            reason: 'the truncated size is now the authoritative version');
-        expect(tracked.blobRef, isNot(up.manifestHash),
-            reason: 'it no longer references the correct blob — the torn '
-                'version would be uploaded to the server as a new edit');
-      },
-    );
-  });
+        expect(
+          tracked.sizeBytes,
+          truncateAt,
+          reason: 'the truncated size is now the authoritative version',
+        );
+        expect(
+          tracked.blobRef,
+          isNot(up.manifestHash),
+          reason:
+              'it no longer references the correct blob — the torn '
+              'version would be uploaded to the server as a new edit',
+        );
+      });
+    },
+  );
 }

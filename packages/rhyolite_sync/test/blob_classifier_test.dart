@@ -14,9 +14,9 @@ Uint8List _bytes(List<int> b) => Uint8List.fromList(b);
 /// Not `\0doc1`: that one exists now. This is the shape of whatever comes
 /// after it.
 Uint8List _futureTag() => _bytes([
-      0x00, 0x78, 0x79, 0x7A, 0x39, // \0xyz9
-      0xA1, 0x61, 0x78, 0x01, // arbitrary payload
-    ]);
+  0x00, 0x78, 0x79, 0x7A, 0x39, // \0xyz9
+  0xA1, 0x61, 0x78, 0x01, // arbitrary payload
+]);
 
 void main() {
   group('classifyBlob', () {
@@ -29,8 +29,10 @@ void main() {
     });
 
     test('an unknown tag on a text path is refused, not written', () {
-      expect(classifyBlob(_futureTag(), isTextPath: true),
-          BlobKind.unknownTagged);
+      expect(
+        classifyBlob(_futureTag(), isTextPath: true),
+        BlobKind.unknownTagged,
+      );
     });
 
     test('NUL-leading binaries are NOT mistaken for an unknown tag', () {
@@ -46,10 +48,7 @@ void main() {
     });
 
     test('a legacy Sequence blob is told apart from genuine plain text', () {
-      final legacy = CborCodec.encode({
-        'v': 1,
-        'chars': <dynamic>[],
-      });
+      final legacy = CborCodec.encode({'v': 1, 'chars': <dynamic>[]});
       expect(classifyBlob(legacy, isTextPath: true), BlobKind.legacySequence);
 
       final plain = _bytes(utf8.encode('# just a note\n\nbody'));

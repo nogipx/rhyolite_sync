@@ -76,12 +76,13 @@ class VaultMetaService {
   /// config. Values are normalised (trimmed, lowercased, leading dot dropped);
   /// an empty set removes the policy from the slot.
   Future<void> saveForcedBinaryExtensions(Set<String> extensions) async {
-    final normalized = (extensions
-          .map(_normalizeExtension)
-          .where((e) => e.isNotEmpty)
-          .toSet()
-          .toList())
-      ..sort();
+    final normalized =
+        (extensions
+              .map(_normalizeExtension)
+              .where((e) => e.isNotEmpty)
+              .toSet()
+              .toList())
+          ..sort();
     final next = <String, dynamic>{...await _loadRaw()};
     if (normalized.isEmpty) {
       next.remove(_forcedBinaryKey);

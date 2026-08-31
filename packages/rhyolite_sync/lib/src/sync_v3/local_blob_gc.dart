@@ -131,7 +131,9 @@ class LocalBlobGc {
     // Anything live only on behalf of files that can rebuild it is dropped —
     // the vault is holding those bytes already.
     if (regenerable != null) {
-      live.removeWhere((id) => !pinned.contains(id) && !(external?.contains(id) ?? false));
+      live.removeWhere(
+        (id) => !pinned.contains(id) && !(external?.contains(id) ?? false),
+      );
     }
     final List<String> allBlobIds;
     if (candidates != null) {
@@ -155,7 +157,10 @@ class LocalBlobGc {
       // Partial deletes are fine — the next sweep will catch the rest.
     }
 
-    return LocalBlobGcResult(scanned: allBlobIds.length, deleted: orphans.length);
+    return LocalBlobGcResult(
+      scanned: allBlobIds.length,
+      deleted: orphans.length,
+    );
   }
 }
 

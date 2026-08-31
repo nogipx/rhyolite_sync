@@ -43,18 +43,29 @@ class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
 
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs, {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     for (final (bytes, id) in blobs) {
       store[id] = bytes;
     }
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> blobIds, {RpcContext? context}) async {
+  Future<Map<String, Uint8List>> download(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async {
     return {
       for (final id in blobIds)
         if (store.containsKey(id)) id: store[id]!,
@@ -148,15 +159,15 @@ class _UnusedResolver implements IStateConflictResolver {
 
 /// Rebuilds a pull record from a put item, as the server would.
 StateRecord _asRecord(StatePutItem item, int seq) => StateRecord(
-      fileId: item.fileId,
-      encryptedState: item.encryptedState,
-      blobRef: item.blobRef,
-      hlcPacked: item.hlcPacked,
-      contextPacked: item.contextPacked,
-      serverSeq: seq,
-      tombstone: item.tombstone,
-      chunks: item.chunks,
-    );
+  fileId: item.fileId,
+  encryptedState: item.encryptedState,
+  blobRef: item.blobRef,
+  hlcPacked: item.hlcPacked,
+  contextPacked: item.contextPacked,
+  serverSeq: seq,
+  tombstone: item.tombstone,
+  chunks: item.chunks,
+);
 
 typedef _Fx = ({
   RemoteApplier applier,
@@ -188,10 +199,10 @@ Future<_Fx> _newApplier({PathScope? pathScope, IVaultCipher? cipher}) async {
   String fileIdFor(String relPath) => const Uuid().v5(_vaultId, relPath);
 
   ChunkedBlobIO? builder() => ChunkedBlobIO(
-        blobStore: localBlobs,
-        remoteBlobStorage: remote,
-        vaultId: _vaultId,
-      );
+    blobStore: localBlobs,
+    remoteBlobStorage: remote,
+    vaultId: _vaultId,
+  );
 
   final reconciler = DiskReconciler(
     vaultPath: _vaultPath,
@@ -272,8 +283,9 @@ void main() {
           chunks: const ['chunk-that-does-not-exist'],
         );
 
-        await f.applier.apply(fileId, [await _record(f.codec, state, 1)],
-            _UnusedResolver());
+        await f.applier.apply(fileId, [
+          await _record(f.codec, state, 1),
+        ], _UnusedResolver());
 
         expect(
           f.io.files.containsKey('$_vaultPath/img.bin'),
@@ -295,7 +307,10 @@ void main() {
       final f = await _newApplier();
       final fileId = f.fileIdFor('img.bin');
       // Upload real content so the manifest + chunk are retrievable.
-      final up = await f.builder()!.upload(_bytes('binary content'), <String>{});
+      final up = await f.builder()!.upload(
+        _bytes('binary content'),
+        <String>{},
+      );
       final state = FileState(
         fileId: fileId,
         path: 'img.bin',
@@ -305,93 +320,113 @@ void main() {
         chunks: up.chunkHashes,
       );
 
-      await f.applier.apply(fileId, [await _record(f.codec, state, 1)],
-          _UnusedResolver());
+      await f.applier.apply(fileId, [
+        await _record(f.codec, state, 1),
+      ], _UnusedResolver());
 
       expect(
         utf8.decode(f.io.files['$_vaultPath/img.bin']!),
         'binary content',
         reason: 'content is available, so it must land on disk',
       );
-      expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash,
-          reason: 'confirmed write advances the LCA');
+      expect(
+        f.store.lastSyncedBlobRefFor(fileId),
+        up.manifestHash,
+        reason: 'confirmed write advances the LCA',
+      );
     });
   });
 
-  group('RemoteApplier — text conflict never drops an unreachable side (L1-2)',
-      () {
-    test(
-      'concurrent text edit whose blob is unreachable is retained, not sealed away',
-      () async {
-        final f = await _newApplier();
-        final fileId = f.fileIdFor('note.md');
+  group(
+    'RemoteApplier — text conflict never drops an unreachable side (L1-2)',
+    () {
+      test(
+        'concurrent text edit whose blob is unreachable is retained, not sealed away',
+        () async {
+          final f = await _newApplier();
+          final fileId = f.fileIdFor('note.md');
 
-        // Device A: real, retrievable content.
-        final upA = await f.builder()!.upload(_bytes('hello from A'), <String>{});
-        final stateA = FileState(
-          fileId: fileId,
-          path: 'note.md',
-          blobRef: upA.manifestHash,
-          sizeBytes: 11,
-          hlc: Hlc(1000, 0, 'device-A'),
-          chunks: upA.chunkHashes,
-        );
-        // Device B: concurrent edit, but its blob was never uploaded here —
-        // download will fail. Its content must NOT be lost.
-        final stateB = FileState(
-          fileId: fileId,
-          path: 'note.md',
-          blobRef: 'manifest-B-unreachable',
-          sizeBytes: 11,
-          hlc: Hlc(1000, 0, 'device-B'),
-          chunks: const ['chunk-B-unreachable'],
-        );
+          // Device A: real, retrievable content.
+          final upA = await f.builder()!.upload(
+            _bytes('hello from A'),
+            <String>{},
+          );
+          final stateA = FileState(
+            fileId: fileId,
+            path: 'note.md',
+            blobRef: upA.manifestHash,
+            sizeBytes: 11,
+            hlc: Hlc(1000, 0, 'device-A'),
+            chunks: upA.chunkHashes,
+          );
+          // Device B: concurrent edit, but its blob was never uploaded here —
+          // download will fail. Its content must NOT be lost.
+          final stateB = FileState(
+            fileId: fileId,
+            path: 'note.md',
+            blobRef: 'manifest-B-unreachable',
+            sizeBytes: 11,
+            hlc: Hlc(1000, 0, 'device-B'),
+            chunks: const ['chunk-B-unreachable'],
+          );
 
-        await f.applier.apply(
-          fileId,
-          [
+          await f.applier.apply(fileId, [
             await _record(f.codec, stateA, 1),
             await _record(f.codec, stateB, 2),
-          ],
-          _UnusedResolver(),
-        );
+          ], _UnusedResolver());
 
-        expect(
-          f.store.hasConflict(fileId),
-          isTrue,
-          reason:
-              'with one concurrent blob unreachable, the register must stay '
-              'multi-valued (deferred) rather than collapse to the survivor',
-        );
-        expect(
-          f.store.currentValues(fileId).map((s) => s.blobRef),
-          containsAll(<String>[upA.manifestHash, 'manifest-B-unreachable']),
-          reason: 'both concurrent sides must survive; nothing is dropped',
-        );
-        expect(
-          f.events.whereType<SyncConflictResolved>(),
-          isEmpty,
-          reason: 'a conflict resolved on partial input would be a false claim',
-        );
-      },
-    );
-  });
+          expect(
+            f.store.hasConflict(fileId),
+            isTrue,
+            reason:
+                'with one concurrent blob unreachable, the register must stay '
+                'multi-valued (deferred) rather than collapse to the survivor',
+          );
+          expect(
+            f.store.currentValues(fileId).map((s) => s.blobRef),
+            containsAll(<String>[upA.manifestHash, 'manifest-B-unreachable']),
+            reason: 'both concurrent sides must survive; nothing is dropped',
+          );
+          expect(
+            f.events.whereType<SyncConflictResolved>(),
+            isEmpty,
+            reason:
+                'a conflict resolved on partial input would be a false claim',
+          );
+        },
+      );
+    },
+  );
 
-  group('RemoteApplier — N>2 binary conflict preserves every version (L1-5)',
-      () {
-    test(
+  group(
+    'RemoteApplier — N>2 binary conflict preserves every version (L1-5)',
+    () {
+      test(
         'three concurrent binary versions -> winner + 2 conflict copies on disk',
         () async {
-      final f = await _newApplier();
-      final fileId = f.fileIdFor('photo.bin'); // non-text -> binary resolver
+          final f = await _newApplier();
+          final fileId = f.fileIdFor(
+            'photo.bin',
+          ); // non-text -> binary resolver
 
-      // Upload distinct content so each version's blob is retrievable.
-      final upA = await f.builder()!.upload(_bytes('version A'), <String>{});
-      final upB = await f.builder()!.upload(_bytes('version B'), <String>{});
-      final upC = await f.builder()!.upload(_bytes('version C'), <String>{});
-      FileState mk(({String manifestHash, List<String> chunkHashes}) up,
-              int millis, String node) =>
-          FileState(
+          // Upload distinct content so each version's blob is retrievable.
+          final upA = await f.builder()!.upload(
+            _bytes('version A'),
+            <String>{},
+          );
+          final upB = await f.builder()!.upload(
+            _bytes('version B'),
+            <String>{},
+          );
+          final upC = await f.builder()!.upload(
+            _bytes('version C'),
+            <String>{},
+          );
+          FileState mk(
+            ({String manifestHash, List<String> chunkHashes}) up,
+            int millis,
+            String node,
+          ) => FileState(
             fileId: fileId,
             path: 'photo.bin',
             blobRef: up.manifestHash,
@@ -400,127 +435,154 @@ void main() {
             chunks: up.chunkHashes,
           );
 
-      final resolver = StateConflictResolver(
-        store: f.store,
-        blobStore: f.localBlobs,
-        vaultId: _vaultId,
-        nodeId: 'test',
-        chunkedBlobIO: f.builder(),
+          final resolver = StateConflictResolver(
+            store: f.store,
+            blobStore: f.localBlobs,
+            vaultId: _vaultId,
+            nodeId: 'test',
+            chunkedBlobIO: f.builder(),
+          );
+
+          await f.applier.apply(fileId, [
+            await _record(f.codec, mk(upA, 100, 'A'), 1),
+            await _record(f.codec, mk(upB, 200, 'B'), 2),
+            await _record(f.codec, mk(upC, 300, 'C'), 3),
+          ], resolver);
+
+          // Winner (max-HLC = C) is materialised at the canonical path.
+          expect(
+            utf8.decode(f.io.files['$_vaultPath/photo.bin']!),
+            'version C',
+          );
+          // The two non-winning versions are preserved as conflict-copy files —
+          // not silently dropped.
+          final copies = f.io.files.keys
+              .where((p) => p != '$_vaultPath/photo.bin')
+              .toList();
+          expect(
+            copies,
+            hasLength(2),
+            reason: 'both A and B must survive as conflict copies',
+          );
+          final copyContents = copies
+              .map((p) => utf8.decode(f.io.files[p]!))
+              .toSet();
+          expect(copyContents, containsAll(<String>{'version A', 'version B'}));
+        },
       );
+    },
+  );
 
-      await f.applier.apply(
-        fileId,
-        [
-          await _record(f.codec, mk(upA, 100, 'A'), 1),
-          await _record(f.codec, mk(upB, 200, 'B'), 2),
-          await _record(f.codec, mk(upC, 300, 'C'), 3),
-        ],
-        resolver,
-      );
+  group(
+    'RemoteApplier — a delete is not resurrected by a stale on-disk copy',
+    () {
+      test('text: converged file + concurrent tombstone -> deleted, not '
+          'resurrected/duplicated', () async {
+        final f = await _newApplier();
+        final fileId = f.fileIdFor('note.md');
 
-      // Winner (max-HLC = C) is materialised at the canonical path.
-      expect(utf8.decode(f.io.files['$_vaultPath/photo.bin']!), 'version C');
-      // The two non-winning versions are preserved as conflict-copy files —
-      // not silently dropped.
-      final copies =
-          f.io.files.keys.where((p) => p != '$_vaultPath/photo.bin').toList();
-      expect(copies, hasLength(2),
-          reason: 'both A and B must survive as conflict copies');
-      final copyContents =
-          copies.map((p) => utf8.decode(f.io.files[p]!)).toSet();
-      expect(copyContents, containsAll(<String>{'version A', 'version B'}));
-    });
-  });
+        // Step 1: a text file converges here — Fugue blob uploaded, projected to
+        // disk, LCA recorded (mirrors a normal pull/materialise).
+        final seq = FugueTextSync.seedFromText('hello world');
+        final blob = FugueStore.encodeBlob(seq);
+        final up = await f.builder()!.upload(blob, <String>{});
+        final live = FileState(
+          fileId: fileId,
+          path: 'note.md',
+          blobRef: up.manifestHash,
+          sizeBytes: blob.length,
+          hlc: Hlc(1000, 0, 'device-A'),
+          chunks: up.chunkHashes,
+        );
+        await f.applier.apply(fileId, [
+          await _record(f.codec, live, 1),
+        ], _UnusedResolver());
+        expect(utf8.decode(f.io.files['$_vaultPath/note.md']!), 'hello world');
+        expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash);
 
-  group('RemoteApplier — a delete is not resurrected by a stale on-disk copy',
-      () {
-    test(
-        'text: converged file + concurrent tombstone -> deleted, not '
-        'resurrected/duplicated', () async {
-      final f = await _newApplier();
-      final fileId = f.fileIdFor('note.md');
+        // Step 2: another device deleted the file (moved it away). The incoming
+        // tombstone is concurrent with our still-live value (its causal context
+        // doesn't cover ours), and our on-disk copy is unchanged since the LCA —
+        // a stale copy, not a concurrent edit.
+        final tomb = FileState(
+          fileId: fileId,
+          path: 'note.md',
+          blobRef: '',
+          sizeBytes: 0,
+          hlc: Hlc(500, 0, 'device-B'),
+          tombstone: true,
+        );
+        await f.applier.apply(fileId, [
+          await _record(f.codec, tomb, 2),
+        ], _UnusedResolver());
 
-      // Step 1: a text file converges here — Fugue blob uploaded, projected to
-      // disk, LCA recorded (mirrors a normal pull/materialise).
-      final seq = FugueTextSync.seedFromText('hello world');
-      final blob = FugueStore.encodeBlob(seq);
-      final up = await f.builder()!.upload(blob, <String>{});
-      final live = FileState(
-        fileId: fileId,
-        path: 'note.md',
-        blobRef: up.manifestHash,
-        sizeBytes: blob.length,
-        hlc: Hlc(1000, 0, 'device-A'),
-        chunks: up.chunkHashes,
-      );
-      await f.applier.apply(
-          fileId, [await _record(f.codec, live, 1)], _UnusedResolver());
-      expect(utf8.decode(f.io.files['$_vaultPath/note.md']!), 'hello world');
-      expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash);
+        expect(
+          f.io.files.containsKey('$_vaultPath/note.md'),
+          isFalse,
+          reason: 'the stale on-disk copy must be deleted, not resurrected',
+        );
+        expect(
+          f.store.get(fileId)?.tombstone,
+          isTrue,
+          reason: 'register collapses to a tombstone',
+        );
+      });
 
-      // Step 2: another device deleted the file (moved it away). The incoming
-      // tombstone is concurrent with our still-live value (its causal context
-      // doesn't cover ours), and our on-disk copy is unchanged since the LCA —
-      // a stale copy, not a concurrent edit.
-      final tomb = FileState(
-        fileId: fileId,
-        path: 'note.md',
-        blobRef: '',
-        sizeBytes: 0,
-        hlc: Hlc(500, 0, 'device-B'),
-        tombstone: true,
-      );
-      await f.applier.apply(
-          fileId, [await _record(f.codec, tomb, 2)], _UnusedResolver());
+      test('binary: converged file + concurrent tombstone -> deleted, not '
+          'resurrected', () async {
+        final f = await _newApplier();
+        final fileId = f.fileIdFor('photo.bin'); // non-text -> binary resolver
+        final resolver = StateConflictResolver(
+          store: f.store,
+          blobStore: f.localBlobs,
+          vaultId: _vaultId,
+          nodeId: 'test',
+          chunkedBlobIO: f.builder(),
+        );
 
-      expect(f.io.files.containsKey('$_vaultPath/note.md'), isFalse,
-          reason: 'the stale on-disk copy must be deleted, not resurrected');
-      expect(f.store.get(fileId)?.tombstone, isTrue,
-          reason: 'register collapses to a tombstone');
-    });
+        final up = await f.builder()!.upload(
+          _bytes('binary content'),
+          <String>{},
+        );
+        final live = FileState(
+          fileId: fileId,
+          path: 'photo.bin',
+          blobRef: up.manifestHash,
+          sizeBytes: 14,
+          hlc: Hlc(1000, 0, 'device-A'),
+          chunks: up.chunkHashes,
+        );
+        await f.applier.apply(fileId, [
+          await _record(f.codec, live, 1),
+        ], resolver);
+        expect(f.io.files.containsKey('$_vaultPath/photo.bin'), isTrue);
+        expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash);
 
-    test(
-        'binary: converged file + concurrent tombstone -> deleted, not '
-        'resurrected', () async {
-      final f = await _newApplier();
-      final fileId = f.fileIdFor('photo.bin'); // non-text -> binary resolver
-      final resolver = StateConflictResolver(
-        store: f.store,
-        blobStore: f.localBlobs,
-        vaultId: _vaultId,
-        nodeId: 'test',
-        chunkedBlobIO: f.builder(),
-      );
+        final tomb = FileState(
+          fileId: fileId,
+          path: 'photo.bin',
+          blobRef: '',
+          sizeBytes: 0,
+          hlc: Hlc(500, 0, 'device-B'),
+          tombstone: true,
+        );
+        await f.applier.apply(fileId, [
+          await _record(f.codec, tomb, 2),
+        ], resolver);
 
-      final up = await f.builder()!.upload(_bytes('binary content'), <String>{});
-      final live = FileState(
-        fileId: fileId,
-        path: 'photo.bin',
-        blobRef: up.manifestHash,
-        sizeBytes: 14,
-        hlc: Hlc(1000, 0, 'device-A'),
-        chunks: up.chunkHashes,
-      );
-      await f.applier.apply(fileId, [await _record(f.codec, live, 1)], resolver);
-      expect(f.io.files.containsKey('$_vaultPath/photo.bin'), isTrue);
-      expect(f.store.lastSyncedBlobRefFor(fileId), up.manifestHash);
-
-      final tomb = FileState(
-        fileId: fileId,
-        path: 'photo.bin',
-        blobRef: '',
-        sizeBytes: 0,
-        hlc: Hlc(500, 0, 'device-B'),
-        tombstone: true,
-      );
-      await f.applier.apply(fileId, [await _record(f.codec, tomb, 2)], resolver);
-
-      expect(f.io.files.containsKey('$_vaultPath/photo.bin'), isFalse,
-          reason: 'the stale on-disk binary must be deleted, not resurrected');
-      expect(f.store.get(fileId)?.tombstone, isTrue,
-          reason: 'register collapses to a tombstone');
-    });
-  });
+        expect(
+          f.io.files.containsKey('$_vaultPath/photo.bin'),
+          isFalse,
+          reason: 'the stale on-disk binary must be deleted, not resurrected',
+        );
+        expect(
+          f.store.get(fileId)?.tombstone,
+          isTrue,
+          reason: 'register collapses to a tombstone',
+        );
+      });
+    },
+  );
 
   group('RemoteApplier — path confinement (C2)', () {
     test('a record with a traversal path is rejected: nothing written, not '
@@ -529,7 +591,10 @@ void main() {
       final fileId = f.fileIdFor('../evil.md');
       // Real, retrievable content — proves the record is dropped at the path
       // gate, not merely because the blob was unavailable.
-      final up = await f.builder()!.upload(_bytes('malicious payload'), <String>{});
+      final up = await f.builder()!.upload(
+        _bytes('malicious payload'),
+        <String>{},
+      );
       final evil = FileState(
         fileId: fileId,
         path: '../evil.md',
@@ -539,19 +604,23 @@ void main() {
         chunks: up.chunkHashes,
       );
 
-      await f.applier
-          .apply(fileId, [await _record(f.codec, evil, 1)], _UnusedResolver());
+      await f.applier.apply(fileId, [
+        await _record(f.codec, evil, 1),
+      ], _UnusedResolver());
 
       // Nothing was written to disk anywhere.
-      expect(f.io.files, isEmpty,
-          reason: 'a "../" path must never reach a disk write');
+      expect(
+        f.io.files,
+        isEmpty,
+        reason: 'a "../" path must never reach a disk write',
+      );
       // The record never entered the store.
       expect(f.store.get(fileId), isNull);
       // Surfaced as a skipped record with the reason.
       expect(
-        f.events
-            .whereType<SyncRecordSkipped>()
-            .any((e) => e.reason.contains('unsafe path')),
+        f.events.whereType<SyncRecordSkipped>().any(
+          (e) => e.reason.contains('unsafe path'),
+        ),
         isTrue,
         reason: 'the drop must be observable, not silent',
       );
@@ -569,8 +638,9 @@ void main() {
         hlc: Hlc(1000, 0, 'attacker'),
         chunks: up.chunkHashes,
       );
-      await f.applier
-          .apply(fileId, [await _record(f.codec, evil, 1)], _UnusedResolver());
+      await f.applier.apply(fileId, [
+        await _record(f.codec, evil, 1),
+      ], _UnusedResolver());
       expect(f.io.files, isEmpty);
       expect(f.store.get(fileId), isNull);
     });
@@ -580,8 +650,7 @@ void main() {
     test('an out-of-scope remote file is not downloaded or written', () async {
       final f = await _newApplier(pathScope: PathScope(include: ['Work']));
       final fileId = f.fileIdFor('Personal/diary.md');
-      final up =
-          await f.builder()!.upload(_bytes('peer content'), <String>{});
+      final up = await f.builder()!.upload(_bytes('peer content'), <String>{});
       final state = FileState(
         fileId: fileId,
         path: 'Personal/diary.md',
@@ -591,45 +660,56 @@ void main() {
         chunks: up.chunkHashes,
       );
 
-      await f.applier
-          .apply(fileId, [await _record(f.codec, state, 1)], _UnusedResolver());
+      await f.applier.apply(fileId, [
+        await _record(f.codec, state, 1),
+      ], _UnusedResolver());
 
       expect(f.io.files.containsKey('$_vaultPath/Personal/diary.md'), isFalse);
-      expect(f.store.get(fileId), isNotNull,
-          reason: 'the register still joins — the metadata is what lets a '
-              'later widening backfill the file');
-      expect(f.store.lastSyncedBlobRefFor(fileId), isNull,
-          reason: 'an empty LCA is the marker the backfill looks for');
+      expect(
+        f.store.get(fileId),
+        isNotNull,
+        reason:
+            'the register still joins — the metadata is what lets a '
+            'later widening backfill the file',
+      );
+      expect(
+        f.store.lastSyncedBlobRefFor(fileId),
+        isNull,
+        reason: 'an empty LCA is the marker the backfill looks for',
+      );
       expect(
         f.events.whereType<SyncFileOutOfScope>().map((e) => e.path),
         contains('Personal/diary.md'),
       );
     });
 
-    test("a peer's delete of an out-of-scope path does not touch local disk",
-        () async {
-      final f = await _newApplier(pathScope: PathScope(include: ['Work']));
-      final fileId = f.fileIdFor('Personal/diary.md');
-      // The user still keeps this file locally; they only stopped syncing it.
-      f.io.files['$_vaultPath/Personal/diary.md'] = _bytes('mine');
+    test(
+      "a peer's delete of an out-of-scope path does not touch local disk",
+      () async {
+        final f = await _newApplier(pathScope: PathScope(include: ['Work']));
+        final fileId = f.fileIdFor('Personal/diary.md');
+        // The user still keeps this file locally; they only stopped syncing it.
+        f.io.files['$_vaultPath/Personal/diary.md'] = _bytes('mine');
 
-      final tombstone = FileState(
-        fileId: fileId,
-        path: 'Personal/diary.md',
-        blobRef: '',
-        sizeBytes: 0,
-        hlc: Hlc(2000, 0, 'device-A'),
-        tombstone: true,
-      );
-      await f.applier.apply(
-          fileId, [await _record(f.codec, tombstone, 1)], _UnusedResolver());
+        final tombstone = FileState(
+          fileId: fileId,
+          path: 'Personal/diary.md',
+          blobRef: '',
+          sizeBytes: 0,
+          hlc: Hlc(2000, 0, 'device-A'),
+          tombstone: true,
+        );
+        await f.applier.apply(fileId, [
+          await _record(f.codec, tombstone, 1),
+        ], _UnusedResolver());
 
-      expect(
-        utf8.decode(f.io.files['$_vaultPath/Personal/diary.md']!),
-        'mine',
-        reason: 'a scope the user opted out of must not delete their files',
-      );
-    });
+        expect(
+          utf8.decode(f.io.files['$_vaultPath/Personal/diary.md']!),
+          'mine',
+          reason: 'a scope the user opted out of must not delete their files',
+        );
+      },
+    );
 
     test('an in-scope remote file still lands on disk', () async {
       final f = await _newApplier(pathScope: PathScope(include: ['Work']));
@@ -644,28 +724,32 @@ void main() {
         chunks: up.chunkHashes,
       );
 
-      await f.applier
-          .apply(fileId, [await _record(f.codec, state, 1)], _UnusedResolver());
+      await f.applier.apply(fileId, [
+        await _record(f.codec, state, 1),
+      ], _UnusedResolver());
 
-      expect(utf8.decode(f.io.files['$_vaultPath/Work/plan.md']!),
-          'peer content');
+      expect(
+        utf8.decode(f.io.files['$_vaultPath/Work/plan.md']!),
+        'peer content',
+      );
     });
   });
 
   group('RemoteApplier - an envelope this build cannot open', () {
-    test('is surfaced as an unreadable file, not skipped in silence',
-        () async {
+    test('is surfaced as an unreadable file, not skipped in silence', () async {
       final f = await _newApplier(cipher: _TagCheckingCipher());
       final fileId = f.fileIdFor('note.md');
 
       // The device has seen this file before, so it can name it.
-      f.store.applyLocal(FileState(
-        fileId: fileId,
-        path: 'note.md',
-        blobRef: 'old',
-        sizeBytes: 3,
-        hlc: Hlc(500, 0, 'device-B'),
-      ));
+      f.store.applyLocal(
+        FileState(
+          fileId: fileId,
+          path: 'note.md',
+          blobRef: 'old',
+          sizeBytes: 3,
+          hlc: Hlc(500, 0, 'device-B'),
+        ),
+      );
 
       // A record sealed by a newer client: tag 0x7f is no cipher we know.
       final sealed = StateRecord(
@@ -683,7 +767,8 @@ void main() {
       expect(
         f.events.whereType<SyncFileFormatUnsupported>().map((e) => e.path),
         contains('note.md'),
-        reason: 'the user must be told to update, not left waiting for a '
+        reason:
+            'the user must be told to update, not left waiting for a '
             'record that will never decode',
       );
     });
@@ -702,12 +787,16 @@ void main() {
         tombstone: false,
       );
 
-      await f.applier
-          .apply(f.fileIdFor('never-seen.md'), [sealed], _UnusedResolver());
+      await f.applier.apply(f.fileIdFor('never-seen.md'), [
+        sealed,
+      ], _UnusedResolver());
 
       expect(f.events.whereType<SyncFileFormatUnsupported>(), isEmpty);
-      expect(f.events.whereType<SyncRecordSkipped>(), isNotEmpty,
-          reason: 'still recorded as skipped, as any unreadable record is');
+      expect(
+        f.events.whereType<SyncRecordSkipped>(),
+        isNotEmpty,
+        reason: 'still recorded as skipped, as any unreadable record is',
+      );
     });
   });
 }

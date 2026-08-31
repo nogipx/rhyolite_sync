@@ -19,23 +19,22 @@ PluginDirManifest manifest({
   String? updatedBy = 'MacBook',
   bool desktopOnly = false,
   List<PluginVersionEntry> history = const [],
-}) =>
-    PluginDirManifest(
-      pluginId: id,
-      version: version,
-      desktopOnly: desktopOnly,
-      updatedAtMs: updatedAtMs,
-      updatedBy: updatedBy,
-      history: history,
-      files: {
-        for (final e in refs.entries)
-          e.key: PluginFileRef(
-            blobRef: e.value,
-            chunks: ['${e.value}-c0', '${e.value}-c1'],
-            size: 1024,
-          ),
-      },
-    );
+}) => PluginDirManifest(
+  pluginId: id,
+  version: version,
+  desktopOnly: desktopOnly,
+  updatedAtMs: updatedAtMs,
+  updatedBy: updatedBy,
+  history: history,
+  files: {
+    for (final e in refs.entries)
+      e.key: PluginFileRef(
+        blobRef: e.value,
+        chunks: ['${e.value}-c0', '${e.value}-c1'],
+        size: 1024,
+      ),
+  },
+);
 
 void main() {
   group('PluginDirManifest', () {
@@ -43,7 +42,9 @@ void main() {
       final m = manifest(
         refs: {'main.js': 'b1', 'manifest.json': 'b2', 'styles.css': 'b3'},
         desktopOnly: true,
-        history: const [PluginVersionEntry(version: '0.9.0', atMs: 1, device: 'PC')],
+        history: const [
+          PluginVersionEntry(version: '0.9.0', atMs: 1, device: 'PC'),
+        ],
       );
       final back = PluginDirManifest.tryParse(m.toBytes())!;
       expect(back.pluginId, m.pluginId);
@@ -51,7 +52,11 @@ void main() {
       expect(back.desktopOnly, isTrue);
       expect(back.updatedAtMs, m.updatedAtMs);
       expect(back.updatedBy, m.updatedBy);
-      expect(back.files.keys.toList()..sort(), ['main.js', 'manifest.json', 'styles.css']);
+      expect(back.files.keys.toList()..sort(), [
+        'main.js',
+        'manifest.json',
+        'styles.css',
+      ]);
       expect(back.files['main.js']!.chunks, ['b1-c0', 'b1-c1']);
       expect(back.history.single.version, '0.9.0');
       expect(back.contentHash, m.contentHash);
@@ -75,21 +80,30 @@ void main() {
     });
 
     test('contentHash is bound to the plugin id', () {
-      expect(manifest(id: 'a').contentHash, isNot(manifest(id: 'b').contentHash));
+      expect(
+        manifest(id: 'a').contentHash,
+        isNot(manifest(id: 'b').contentHash),
+      );
     });
 
     test('liveBlobIds covers every manifest hash and chunk', () {
       final m = manifest(refs: {'main.js': 'b1', 'styles.css': 'b2'});
-      expect(
-        m.liveBlobIds..sort(),
-        ['b1', 'b1-c0', 'b1-c1', 'b2', 'b2-c0', 'b2-c1'],
-      );
+      expect(m.liveBlobIds..sort(), [
+        'b1',
+        'b1-c0',
+        'b1-c1',
+        'b2',
+        'b2-c0',
+        'b2-c1',
+      ]);
     });
 
     test('withHistoryFrom carries the trail and appends the old version', () {
       final prev = manifest(version: '1.0.0', updatedAtMs: 10, updatedBy: 'PC');
-      final next = manifest(version: '1.1.0', refs: {'main.js': 'blob-main-2'})
-          .withHistoryFrom(prev);
+      final next = manifest(
+        version: '1.1.0',
+        refs: {'main.js': 'blob-main-2'},
+      ).withHistoryFrom(prev);
       expect(next.history.single.version, '1.0.0');
       expect(next.history.single.atMs, 10);
       expect(next.history.single.device, 'PC');
@@ -97,27 +111,47 @@ void main() {
 
     test('withHistoryFrom does not record an unchanged version', () {
       final prev = manifest(version: '1.0.0');
-      final next = manifest(version: '1.0.0', refs: {'main.js': 'b2'})
-          .withHistoryFrom(prev);
+      final next = manifest(
+        version: '1.0.0',
+        refs: {'main.js': 'b2'},
+      ).withHistoryFrom(prev);
       expect(next.history, isEmpty);
     });
 
     test('history trail is bounded', () {
       var current = manifest(version: 'v0');
       for (var i = 1; i <= PluginDirManifest.maxHistoryEntries + 5; i++) {
-        current = manifest(version: 'v$i', refs: {'main.js': 'b$i'})
-            .withHistoryFrom(current);
+        current = manifest(
+          version: 'v$i',
+          refs: {'main.js': 'b$i'},
+        ).withHistoryFrom(current);
       }
       expect(current.history.length, PluginDirManifest.maxHistoryEntries);
       // Oldest entries fall off the front; the newest predecessor stays.
-      expect(current.history.last.version, 'v${PluginDirManifest.maxHistoryEntries + 4}');
+      expect(
+        current.history.last.version,
+        'v${PluginDirManifest.maxHistoryEntries + 4}',
+      );
     });
 
     test('rejects payloads with no usable file', () {
-      expect(PluginDirManifest.tryFromJson({'id': 'x', 'f': <String, Object?>{}}), isNull);
-      expect(PluginDirManifest.tryFromJson({'f': {'main.js': {'b': 'x'}}}), isNull);
+      expect(
+        PluginDirManifest.tryFromJson({'id': 'x', 'f': <String, Object?>{}}),
+        isNull,
+      );
+      expect(
+        PluginDirManifest.tryFromJson({
+          'f': {
+            'main.js': {'b': 'x'},
+          },
+        }),
+        isNull,
+      );
       expect(PluginDirManifest.tryParse(Uint8List(0)), isNull);
-      expect(PluginDirManifest.tryParse(Uint8List.fromList(utf8.encode('nope'))), isNull);
+      expect(
+        PluginDirManifest.tryParse(Uint8List.fromList(utf8.encode('nope'))),
+        isNull,
+      );
     });
   });
 
@@ -133,10 +167,18 @@ void main() {
     });
 
     test('same contentHash is suppressed even when metadata differs', () {
-      final s1 = c.diffApply(c.emptyState(), manifest(updatedAtMs: 1).toBytes(), clock('A'));
+      final s1 = c.diffApply(
+        c.emptyState(),
+        manifest(updatedAtMs: 1).toBytes(),
+        clock('A'),
+      );
       final s2 = c.diffApply(
         s1,
-        manifest(updatedAtMs: 5000, updatedBy: 'Phone', version: '2.0.0').toBytes(),
+        manifest(
+          updatedAtMs: 5000,
+          updatedBy: 'Phone',
+          version: '2.0.0',
+        ).toBytes(),
         clock('A', start: 500),
       );
       expect(identical(s1, s2), isTrue);
@@ -154,19 +196,29 @@ void main() {
 
     test('unparseable bytes leave the state untouched', () {
       final s1 = c.diffApply(c.emptyState(), manifest().toBytes(), clock('A'));
-      final s2 = c.diffApply(s1, Uint8List.fromList(utf8.encode('{}')), clock('B'));
+      final s2 = c.diffApply(
+        s1,
+        Uint8List.fromList(utf8.encode('{}')),
+        clock('B'),
+      );
       expect(identical(s1, s2), isTrue);
     });
 
     test('join is last-write-wins on the whole directory', () {
       final a = c.diffApply(
         c.emptyState(),
-        manifest(version: '1.0.0', refs: {'main.js': 'b1', 'styles.css': 's1'}).toBytes(),
+        manifest(
+          version: '1.0.0',
+          refs: {'main.js': 'b1', 'styles.css': 's1'},
+        ).toBytes(),
         clock('A', start: 1),
       );
       final b = c.diffApply(
         c.emptyState(),
-        manifest(version: '2.0.0', refs: {'main.js': 'b2', 'styles.css': 's2'}).toBytes(),
+        manifest(
+          version: '2.0.0',
+          refs: {'main.js': 'b2', 'styles.css': 's2'},
+        ).toBytes(),
         clock('B', start: 100),
       );
 
@@ -213,8 +265,11 @@ void main() {
       final back = PluginDirManifest.tryParse(m.toBytes())!;
       expect(back.deleted, isTrue);
       expect(back.files, isEmpty);
-      expect(back.liveBlobIds, isEmpty,
-          reason: 'the previous version stops being referenced');
+      expect(
+        back.liveBlobIds,
+        isEmpty,
+        reason: 'the previous version stops being referenced',
+      );
       expect(back.totalSize, 0);
       expect(back.version, '1.0.0');
       expect(back.updatedBy, 'MacBook');
@@ -236,16 +291,20 @@ void main() {
 
     test('carries the version trail forward', () {
       final prev = manifest(version: '2.0.0', updatedAtMs: 7, updatedBy: 'PC');
-      final gone =
-          PluginDirManifest.removed(pluginId: prev.pluginId).withHistoryFrom(prev);
+      final gone = PluginDirManifest.removed(
+        pluginId: prev.pluginId,
+      ).withHistoryFrom(prev);
       expect(gone.deleted, isTrue);
       expect(gone.history.single.version, '2.0.0');
     });
 
     test('codec: a removal replaces a live version', () {
       const c = BlobDirCodec();
-      final live =
-          c.diffApply(c.emptyState(), manifest().toBytes(), clock('A'));
+      final live = c.diffApply(
+        c.emptyState(),
+        manifest().toBytes(),
+        clock('A'),
+      );
       final gone = c.diffApply(
         live,
         PluginDirManifest.removed(pluginId: 'dataview').toBytes(),
@@ -282,8 +341,10 @@ void main() {
       );
       final again = c.diffApply(
         gone,
-        PluginDirManifest.removed(pluginId: 'dataview', updatedAtMs: 999)
-            .toBytes(),
+        PluginDirManifest.removed(
+          pluginId: 'dataview',
+          updatedAtMs: 999,
+        ).toBytes(),
         clock('A', start: 500),
       );
       expect(identical(gone, again), isTrue);
@@ -292,12 +353,12 @@ void main() {
 
   group('untrusted id (the manifest is authored by a peer)', () {
     Object? raw(String id) => {
-          'v': 1,
-          'id': id,
-          'f': {
-            'main.js': {'b': 'blob', 's': 1},
-          },
-        };
+      'v': 1,
+      'id': id,
+      'f': {
+        'main.js': {'b': 'blob', 's': 1},
+      },
+    };
 
     test('rejects ids that would escape their directory', () {
       // The id used to reach the filesystem verbatim, so `../plugins/
@@ -319,7 +380,12 @@ void main() {
     test('rejects an empty or non-string id', () {
       expect(PluginDirManifest.tryFromJson(raw('')), isNull);
       expect(
-        PluginDirManifest.tryFromJson({'id': 42, 'f': {'main.js': {'b': 'x'}}}),
+        PluginDirManifest.tryFromJson({
+          'id': 42,
+          'f': {
+            'main.js': {'b': 'x'},
+          },
+        }),
         isNull,
       );
     });

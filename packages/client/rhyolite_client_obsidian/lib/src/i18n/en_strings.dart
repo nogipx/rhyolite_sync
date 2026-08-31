@@ -1396,4 +1396,20 @@ class EnStrings extends AppStrings {
   String get paymentNotConfirmedBody =>
       'We could not confirm your payment within 5 minutes. If you completed the '
       'payment, please restart Obsidian. If the issue persists, contact support.';
+  @override
+  String get storageSwitchedTitle => 'Storage switched';
+  @override
+  String get storageSwitchedBody =>
+      'Everything synced until now lives in the previous storage. The new one '
+      'has none of it, and nothing moves it across.\n\n'
+      'Files you edit from here on will be sent to the new storage. Anything '
+      'older stays reachable only from the storage that holds it.';
+  @override
+  String get blockedStorageRefused => 'Storage is refusing us';
+  @override
+  String get blockedStorageRefusedHint =>
+      'Your storage will not accept files — usually a wrong key, password or '
+      'path. Until that is fixed, changes are not being sent.';
+  @override
+  String get blockedStorageRefusedAction => 'Open settings';
 }

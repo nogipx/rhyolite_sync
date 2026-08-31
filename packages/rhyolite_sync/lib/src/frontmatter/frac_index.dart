@@ -44,8 +44,10 @@ bool isValidFracIndex(String s) {
 /// position from the same neighbours get the same string, which is what lets a
 /// lifted `fugue1` blob converge without any coordination (§11).
 String fracIndexBetween(String? a, String? b) {
-  assert(a == null || b == null || a.compareTo(b) < 0,
-      'fracIndexBetween($a, $b): bounds must be ordered');
+  assert(
+    a == null || b == null || a.compareTo(b) < 0,
+    'fracIndexBetween($a, $b): bounds must be ordered',
+  );
   if (a == null && b == null) return midFracIndex;
   if (a == null) return _before(b!);
   if (b == null) return _after(a);
@@ -83,7 +85,9 @@ String _before(String b) {
     }
     if (d == 1) {
       // Dropping to 0 already puts us under [b], so the tail is free.
-      buf..write('0')..write(midFracIndex);
+      buf
+        ..write('0')
+        ..write(midFracIndex);
       return buf.toString();
     }
     // d == 0: stay level and look further right. Only reachable for an index

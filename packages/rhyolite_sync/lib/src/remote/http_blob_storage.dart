@@ -68,6 +68,41 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
   /// or removed under us by the user tidying their storage.
   static const int _missingParentStatus = 409;
 
+  /// Statuses that mean "later", not "no".
+  ///
+  /// 429 is the standard one; S3 and its compatibles also answer 503 SlowDown
+  /// under the same conditions, and both carry the same instruction. Treating
+  /// them as failures is how a rate-limited backend ended a startup pass: five
+  /// throttles in a row trip the systemic-failure guard, which is the right
+  /// response to a refusal and the wrong one to a queue.
+  ///
+  /// 500/502/504 are here because hosted WebDAV really does answer that way
+  /// under load. One real pass saw two of 188 groups fail on a 500 while every
+  /// group around them succeeded — sporadic, server-side, and gone by the next
+  /// attempt. Without a retry those two notes simply did not sync, and the log
+  /// line explaining why scrolled past.
+  ///
+  /// 501, 505 and 507 are deliberately absent. They say the server will not do
+  /// this — unimplemented, wrong protocol, out of space — and repeating the
+  /// request four times only delays finding out.
+  static const Set<int> _throttleStatuses = {429, 500, 502, 503, 504};
+
+  /// Attempts per request when throttled. Small on purpose — the pass has its
+  /// own retry in the shape of the next startup, and a client that waits out
+  /// an overloaded backend forever is just a slower way of not syncing.
+  static const int _maxThrottleAttempts = 4;
+
+  /// Backoff when the server does not say how long to wait.
+  static const List<Duration> _throttleBackoff = [
+    Duration(seconds: 1),
+    Duration(seconds: 3),
+    Duration(seconds: 8),
+  ];
+
+  /// Ceiling on a server-dictated wait. `Retry-After: 3600` is a legal answer
+  /// and not one to obey inside a sync pass.
+  static const Duration _maxThrottleWait = Duration(seconds: 30);
+
   @override
   Future<Map<String, Uint8List>> download(
     List<String> blobIds, {
@@ -76,14 +111,24 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     if (blobIds.isEmpty) return {};
     final result = <String, Uint8List>{};
     final futures = <Future<void>>[];
+    BlobStorageRefused? refused;
     for (final blobId in blobIds) {
       context?.cancellationToken?.throwIfCancelled();
       futures.add(() async {
         try {
           final uri = _objectUri(blobId);
-          final response = await _request('GET', uri);
+          final response = await _request('GET', uri, context: context);
           if (response.statusCode == 200) {
             result[blobId] = response.bodyBytes;
+          } else if (response.statusCode == 401 || response.statusCode == 403) {
+            // Missing and forbidden are the same empty map to the caller, and
+            // they mean opposite things: one is a blob to heal, the other is
+            // the whole backend saying no. Undifferentiated, a wrong password
+            // reads as a vault whose content has evaporated.
+            refused ??= BlobStorageRefused(
+              response.statusCode,
+              response.reasonPhrase ?? '',
+            );
           }
         } catch (_) {
           // Skip blobs that fail to download (e.g. 404).
@@ -95,6 +140,9 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
       }
     }
     if (futures.isNotEmpty) await Future.wait(futures);
+    // Raised after the whole batch rather than from inside it, so the refusal
+    // is reported once for the request instead of racing eight workers.
+    if (refused != null) throw refused!;
     return result;
   }
 
@@ -103,15 +151,12 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
   static const int _concurrency = 8;
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     if (blobIds.isEmpty) return;
     await _runParallel(blobIds, (id) async {
       context?.cancellationToken?.throwIfCancelled();
       try {
-        await _request('DELETE', _objectUri(id));
+        await _request('DELETE', _objectUri(id), context: context);
       } catch (_) {}
     });
   }
@@ -128,22 +173,42 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
       context?.cancellationToken?.throwIfCancelled();
       final (bytes, blobId) = entry;
       try {
-        var response = await _request('PUT', _objectUri(blobId), body: bytes);
+        var response = await _request(
+          'PUT',
+          _objectUri(blobId),
+          body: bytes,
+          context: context,
+        );
         if (response.statusCode == _missingParentStatus) {
           // The vault directory is not there. Rebuild the chain and try once
           // more rather than reporting a 409 the user cannot act on — on
           // WebDAV this is the difference between "sync is broken" and a
           // directory that quietly reappears.
           await _ensureDirectories(force: true);
-          response = await _request('PUT', _objectUri(blobId), body: bytes);
+          response = await _request(
+            'PUT',
+            _objectUri(blobId),
+            body: bytes,
+            context: context,
+          );
         }
         if (response.statusCode != 200 &&
             response.statusCode != 201 &&
             response.statusCode != 204) {
-          firstError ??= Exception(
-            'HTTP blob upload failed for $blobId: '
-            '${response.statusCode} ${response.reasonPhrase}',
-          );
+          // 401/403 is not a failed upload, it is a refused storage: every
+          // later call fails the same way until its settings change. Typed so
+          // callers can say that instead of retrying forever behind a healthy
+          // looking sync.
+          firstError ??=
+              (response.statusCode == 401 || response.statusCode == 403)
+              ? BlobStorageRefused(
+                  response.statusCode,
+                  response.reasonPhrase ?? '',
+                )
+              : Exception(
+                  'HTTP blob upload failed for $blobId: '
+                  '${response.statusCode} ${response.reasonPhrase}',
+                );
         }
       } catch (e) {
         firstError ??= e;
@@ -162,7 +227,11 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     await _runParallel(blobIds, (id) async {
       context?.cancellationToken?.throwIfCancelled();
       try {
-        final response = await _request('HEAD', _objectUri(id));
+        final response = await _request(
+          'HEAD',
+          _objectUri(id),
+          context: context,
+        );
         if (response.statusCode >= 200 && response.statusCode < 300) {
           present.add(id);
         }
@@ -217,15 +286,17 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     String? token;
     for (var page = 0; page < _maxListPages; page++) {
       context?.cancellationToken?.throwIfCancelled();
-      final uri = baseUrl.replace(queryParameters: {
-        if (token != null) 'continuation-token': token,
-        'list-type': '2',
-        'max-keys': '1000',
-        'prefix': prefix,
-      });
+      final uri = baseUrl.replace(
+        queryParameters: {
+          if (token != null) 'continuation-token': token,
+          'list-type': '2',
+          'max-keys': '1000',
+          'prefix': prefix,
+        },
+      );
       final http.Response response;
       try {
-        response = await _request('GET', uri);
+        response = await _request('GET', uri, context: context);
       } catch (_) {
         return page == 0 ? null : ids;
       }
@@ -255,6 +326,7 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
         dirUri,
         body: Uint8List.fromList(utf8.encode(_propfindBody)),
         extraHeaders: const {'depth': '1', 'content-type': 'application/xml'},
+        context: context,
       );
     } catch (_) {
       return null;
@@ -339,7 +411,7 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
       final uri = baseUrl.resolve(path);
       try {
         // The status is deliberately not inspected — see the latch note below.
-        await _request('MKCOL', uri);
+        await _request('MKCOL', uri, retryThrottle: false);
       } catch (_) {
         // Nor is a thrown request fatal: the PUT that follows reports 409 if
         // the collection really is missing, and that is what reopens the latch.
@@ -361,12 +433,52 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
 
   Uri _objectUri(String blobId) => baseUrl.resolve('$prefix$blobId');
 
+  /// Sends one request, waiting out a throttled backend rather than reporting
+  /// it as a failure.
+  ///
+  /// The gRPC storage has done this all along — it retries the server's
+  /// RESOURCE_EXHAUSTED with backoff — and the HTTP one did not, so a BYO
+  /// backend under load produced a run of ordinary errors and the startup
+  /// pass's systemic-failure guard ended the pass. Same signal, opposite
+  /// outcome, purely because of which transport it arrived on.
+  ///
+  /// Retries stay inside the storage for the same reason they do there: the
+  /// object calls are idempotent (content-addressed PUT, GET, HEAD), so a
+  /// re-send is always safe, and no caller has to learn what 429 means.
+  /// [retryThrottle] is off for the one call whose status is deliberately not
+  /// read. MKCOL answers 503 on servers that simply do not implement it, and
+  /// backing off four times for a response nobody inspects would put twelve
+  /// seconds in front of every upload batch on exactly those servers.
   Future<http.Response> _request(
     String method,
     Uri uri, {
     Uint8List? body,
     Map<String, String>? extraHeaders,
+    RpcContext? context,
+    bool retryThrottle = true,
   }) async {
+    for (var attempt = 0; ; attempt++) {
+      final response = await _sendOnce(method, uri, body, extraHeaders);
+      if (!retryThrottle ||
+          !_throttleStatuses.contains(response.statusCode) ||
+          attempt >= _maxThrottleAttempts - 1) {
+        return response;
+      }
+      // Retry-After first: the server knows how long its own queue is, and no
+      // backoff curve guesses that better than being told.
+      final wait =
+          _retryAfter(response) ??
+          _throttleBackoff[attempt.clamp(0, _throttleBackoff.length - 1)];
+      await _sleep(wait, context);
+    }
+  }
+
+  Future<http.Response> _sendOnce(
+    String method,
+    Uri uri,
+    Uint8List? body,
+    Map<String, String>? extraHeaders,
+  ) async {
     final headers = auth.sign(method, uri, body);
     if (body != null) {
       headers['content-length'] = body.length.toString();
@@ -387,5 +499,34 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     } catch (e) {
       throw Exception('HTTP $method $uri failed: $e');
     }
+  }
+
+  /// `Retry-After` in delta-seconds, bounded. The HTTP-date form is legal and
+  /// deliberately unread: parsing it needs a clock this code has no business
+  /// trusting (a device with a skewed clock would compute a wait of hours),
+  /// and falling back to the backoff curve is the safe reading of it.
+  static Duration? _retryAfter(http.Response response) {
+    final raw = response.headers['retry-after'];
+    if (raw == null) return null;
+    final seconds = int.tryParse(raw.trim());
+    if (seconds == null || seconds <= 0) return null;
+    final wait = Duration(seconds: seconds);
+    return wait > _maxThrottleWait ? _maxThrottleWait : wait;
+  }
+
+  /// Waits in one-second slices so a preempted background task stops within a
+  /// second of being asked, instead of at the end of a thirty-second sleep.
+  /// The engine's maintenance tier yields the connection to interactive edits;
+  /// an uninterruptible sleep in here would hold it anyway.
+  static Future<void> _sleep(Duration total, RpcContext? context) async {
+    const slice = Duration(seconds: 1);
+    var left = total;
+    while (left > Duration.zero) {
+      context?.cancellationToken?.throwIfCancelled();
+      final step = left < slice ? left : slice;
+      await Future<void>.delayed(step);
+      left -= step;
+    }
+    context?.cancellationToken?.throwIfCancelled();
   }
 }

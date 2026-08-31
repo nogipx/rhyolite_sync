@@ -36,8 +36,8 @@ class PriorityTaskScheduler implements ITaskScheduler {
   PriorityTaskScheduler({
     this.maxConcurrent = 1,
     void Function(Object error, StackTrace stack)? onError,
-  })  : assert(maxConcurrent >= 1),
-        _onError = onError;
+  }) : assert(maxConcurrent >= 1),
+       _onError = onError;
 
   /// Maximum tasks running at once. 1 (the default) makes the scheduler a
   /// strict serializer — correct for a single connection / single thread.
@@ -228,7 +228,8 @@ class PriorityTaskScheduler implements ITaskScheduler {
     for (final t in _pending) {
       if (!t.eligible) continue;
       if (floor != null && t.priority < floor) continue;
-      if (topPending == null || t.priority > topPending) topPending = t.priority;
+      if (topPending == null || t.priority > topPending)
+        topPending = t.priority;
     }
     if (topPending == null) return;
     for (final r in _running) {

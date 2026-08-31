@@ -122,15 +122,14 @@ class FmEntryState {
     Hlc? orderHlc,
     String? lead,
     Hlc? leadHlc,
-  }) =>
-      FmEntryState(
-        hlc: hlc ?? this.hlc,
-        value: clearValue ? null : (value ?? this.value),
-        order: order ?? this.order,
-        orderHlc: orderHlc ?? this.orderHlc,
-        lead: lead ?? this.lead,
-        leadHlc: leadHlc ?? this.leadHlc,
-      );
+  }) => FmEntryState(
+    hlc: hlc ?? this.hlc,
+    value: clearValue ? null : (value ?? this.value),
+    order: order ?? this.order,
+    orderHlc: orderHlc ?? this.orderHlc,
+    lead: lead ?? this.lead,
+    leadHlc: leadHlc ?? this.leadHlc,
+  );
 
   /// §4, join of two entries for one key.
   FmEntryState join(FmEntryState other) {
@@ -279,10 +278,10 @@ FmState pruneFmTombstones(FmState state) {
 /// whose properties were all deleted has no live entries but must still ship
 /// its state, or a peer that never saw the delete simply adds them back.
 bool fmStateIsWorthStoring(FmState state) => switch (state) {
-      FmRawState() => true,
-      FmMapState(:final entries, :final trail) =>
-        entries.isNotEmpty || trail.isNotEmpty,
-    };
+  FmRawState() => true,
+  FmMapState(:final entries, :final trail) =>
+    entries.isNotEmpty || trail.isNotEmpty,
+};
 
 /// §4, join of two frontmatter components.
 FmState joinFm(FmState a, FmState b) {
@@ -331,17 +330,14 @@ FmDocument materializeFm(FmState state) {
           final byOrder = x.value.order.compareTo(y.value.order);
           return byOrder != 0 ? byOrder : x.key.compareTo(y.key);
         });
-      return FmMap(
-        [
-          for (final e in live)
-            FmEntry(
-              key: e.key,
-              value: _materializeValue(e.value.value!),
-              lead: e.value.lead,
-            ),
-        ],
-        trail: trail,
-      );
+      return FmMap([
+        for (final e in live)
+          FmEntry(
+            key: e.key,
+            value: _materializeValue(e.value.value!),
+            lead: e.value.lead,
+          ),
+      ], trail: trail);
   }
 }
 
@@ -451,8 +447,9 @@ FmValueState _stateValue(FmValue value, FmValueState? prior, Hlc now) {
     case FmOpaque(:final raw):
       return FmOpaqueValue(raw);
     case FmList(:final items):
-      final priorItems =
-          prior is FmListValue ? prior.items : const <String, FmItemState>{};
+      final priorItems = prior is FmListValue
+          ? prior.items
+          : const <String, FmItemState>{};
       final next = <String, FmItemState>{};
       String? previousOrder;
       for (final text in items) {
@@ -552,9 +549,8 @@ Fugue<String> seedFugueText(String text) {
   final tree = Fugue<String>();
   if (text.isEmpty) return tree;
   final clk = LamportClock('fm-seed');
-  tree.applyOps(
-    [for (var i = 0; i < text.length; i++) FugueOp.insert(i, text[i])],
-    clk,
-  );
+  tree.applyOps([
+    for (var i = 0; i < text.length; i++) FugueOp.insert(i, text[i]),
+  ], clk);
   return tree;
 }

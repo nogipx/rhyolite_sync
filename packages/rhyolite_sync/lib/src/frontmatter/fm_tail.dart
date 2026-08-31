@@ -66,8 +66,11 @@ FmState? readFmTail(Uint8List blob) {
     if (blob[sentinelAt + i] != _sentinel[i]) return null;
   }
   final lengthAt = sentinelAt - 4;
-  final payloadLength = ByteData.sublistView(blob, lengthAt, sentinelAt)
-      .getUint32(0, Endian.little);
+  final payloadLength = ByteData.sublistView(
+    blob,
+    lengthAt,
+    sentinelAt,
+  ).getUint32(0, Endian.little);
   final payloadStart = lengthAt - payloadLength;
   // A tree whose last bytes happen to look like the trailer would give a
   // nonsense offset. Refusing here rather than trusting it is why a false

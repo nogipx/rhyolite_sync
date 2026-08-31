@@ -32,17 +32,25 @@ void main() {
 
     test('same file in either Unicode form yields one fileId', () {
       final idComposed = const Uuid().v5(vaultId, normalizeVaultPath(composed));
-      final idDecomposed =
-          const Uuid().v5(vaultId, normalizeVaultPath(decomposed));
-      expect(idDecomposed, idComposed,
-          reason: 'NFC/NFD must collapse to a single identity');
+      final idDecomposed = const Uuid().v5(
+        vaultId,
+        normalizeVaultPath(decomposed),
+      );
+      expect(
+        idDecomposed,
+        idComposed,
+        reason: 'NFC/NFD must collapse to a single identity',
+      );
     });
 
     test('regression guard: without normalization the two forms diverge', () {
       final raw1 = const Uuid().v5(vaultId, composed);
       final raw2 = const Uuid().v5(vaultId, decomposed);
-      expect(raw2, isNot(raw1),
-          reason: 'proves NFD/NFC really split identity absent the fix');
+      expect(
+        raw2,
+        isNot(raw1),
+        reason: 'proves NFD/NFC really split identity absent the fix',
+      );
     });
   });
 

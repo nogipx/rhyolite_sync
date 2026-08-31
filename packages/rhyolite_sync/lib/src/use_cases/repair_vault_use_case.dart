@@ -106,7 +106,8 @@ class RepairVaultUseCase {
   /// stays free of those concerns. Returns null when no remote storage
   /// is configured (offline-only); the repair aborts in that case.
   final Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
-      Function(Fugue<String> seq, {FmState? fm}) uploadSequenceBlob;
+  Function(Fugue<String> seq, {FmState? fm})
+  uploadSequenceBlob;
 
   /// Caller-supplied event sink — emits the repair lifecycle events so
   /// the UI can show progress and a final summary.
@@ -120,8 +121,9 @@ class RepairVaultUseCase {
   Future<RepairResult> call() async {
     final sw = Stopwatch()..start();
     final all = await io.listFiles(vaultPath);
-    final detector =
-        FileTypeDetector(extraBinaryExtensions: forcedBinaryExtensions);
+    final detector = FileTypeDetector(
+      extraBinaryExtensions: forcedBinaryExtensions,
+    );
     final textPaths = <String>[];
     for (final abs in all) {
       final rel = abs.substring(vaultPath.length + 1);
@@ -161,11 +163,7 @@ class RepairVaultUseCase {
 
     sw.stop();
     emit(
-      SyncRepairDone(
-        repaired: repaired,
-        failed: failed,
-        elapsed: sw.elapsed,
-      ),
+      SyncRepairDone(repaired: repaired, failed: failed, elapsed: sw.elapsed),
     );
     return RepairResult(
       total: textPaths.length,

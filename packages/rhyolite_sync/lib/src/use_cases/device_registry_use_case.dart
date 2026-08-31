@@ -56,32 +56,39 @@ class DeviceRegistryUseCase {
   final String thisDeviceId;
 
   Future<List<SyncDevice>> call() async {
-    final resp =
-        await historyCaller.getHistoryHeads(GetHistoryHeadsRequest(vaultId: vaultId));
+    final resp = await historyCaller.getHistoryHeads(
+      GetHistoryHeadsRequest(vaultId: vaultId),
+    );
     final heads = resp.heads;
-    final maxHead =
-        heads.fold<int>(0, (m, h) => h.headSeq > m ? h.headSeq : m);
-    final out = heads
-        .map((h) => SyncDevice(
-              deviceId: h.deviceId,
-              name: h.deviceName.isNotEmpty ? h.deviceName : _shortId(h.deviceId),
-              headSeq: h.headSeq,
-              lastSeen: DateTime.fromMillisecondsSinceEpoch(h.updatedAtMs),
-              behindBySeq:
-                  (maxHead - h.headSeq) < 0 ? 0 : (maxHead - h.headSeq),
-              isCurrent: h.deviceId == thisDeviceId,
-              clientVersion: h.clientVersion,
-              clientKind: h.clientKind,
-            ))
-        .toList()
-      ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    final maxHead = heads.fold<int>(0, (m, h) => h.headSeq > m ? h.headSeq : m);
+    final out =
+        heads
+            .map(
+              (h) => SyncDevice(
+                deviceId: h.deviceId,
+                name: h.deviceName.isNotEmpty
+                    ? h.deviceName
+                    : _shortId(h.deviceId),
+                headSeq: h.headSeq,
+                lastSeen: DateTime.fromMillisecondsSinceEpoch(h.updatedAtMs),
+                behindBySeq: (maxHead - h.headSeq) < 0
+                    ? 0
+                    : (maxHead - h.headSeq),
+                isCurrent: h.deviceId == thisDeviceId,
+                clientVersion: h.clientVersion,
+                clientKind: h.clientKind,
+              ),
+            )
+            .toList()
+          ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
     return out;
   }
 
   /// Removes [deviceId]'s head record. Returns true when a record was removed.
   Future<bool> forget(String deviceId) async {
-    final r = await historyCaller
-        .forgetDevice(ForgetDeviceRequest(vaultId: vaultId, deviceId: deviceId));
+    final r = await historyCaller.forgetDevice(
+      ForgetDeviceRequest(vaultId: vaultId, deviceId: deviceId),
+    );
     return r.removed;
   }
 

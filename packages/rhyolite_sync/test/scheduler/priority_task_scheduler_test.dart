@@ -32,36 +32,43 @@ void main() {
       expect(order, ['b10', 'a1', 'a1-second']);
     });
 
-    test('scheduling a pending key coalesces — only the latest closure runs',
-        () async {
-      final s = PriorityTaskScheduler();
-      final ran = <String>[];
-      final gate = Completer<void>();
-      s.schedule(run: (_) async => gate.future); // hold the slot
-      s.schedule(key: 'x', run: (_) async => ran.add('run1'));
-      s.schedule(key: 'x', run: (_) async => ran.add('run2'));
-      gate.complete();
-      await s.whenIdle;
-      expect(ran, ['run2']);
-    });
+    test(
+      'scheduling a pending key coalesces — only the latest closure runs',
+      () async {
+        final s = PriorityTaskScheduler();
+        final ran = <String>[];
+        final gate = Completer<void>();
+        s.schedule(run: (_) async => gate.future); // hold the slot
+        s.schedule(key: 'x', run: (_) async => ran.add('run1'));
+        s.schedule(key: 'x', run: (_) async => ran.add('run2'));
+        gate.complete();
+        await s.whenIdle;
+        expect(ran, ['run2']);
+      },
+    );
 
-    test('a key running does NOT coalesce — a fresh task runs after it',
-        () async {
-      final s = PriorityTaskScheduler();
-      final ran = <String>[];
-      final started = Completer<void>();
-      final release = Completer<void>();
-      s.schedule(key: 'x', run: (_) async {
-        ran.add('first');
-        started.complete();
-        await release.future;
-      });
-      await started.future; // 'x' is now running
-      s.schedule(key: 'x', run: (_) async => ran.add('second'));
-      release.complete();
-      await s.whenIdle;
-      expect(ran, ['first', 'second']);
-    });
+    test(
+      'a key running does NOT coalesce — a fresh task runs after it',
+      () async {
+        final s = PriorityTaskScheduler();
+        final ran = <String>[];
+        final started = Completer<void>();
+        final release = Completer<void>();
+        s.schedule(
+          key: 'x',
+          run: (_) async {
+            ran.add('first');
+            started.complete();
+            await release.future;
+          },
+        );
+        await started.future; // 'x' is now running
+        s.schedule(key: 'x', run: (_) async => ran.add('second'));
+        release.complete();
+        await s.whenIdle;
+        expect(ran, ['first', 'second']);
+      },
+    );
 
     test('cancel drops a pending task', () async {
       final s = PriorityTaskScheduler();
@@ -79,30 +86,35 @@ void main() {
       final s = PriorityTaskScheduler();
       final started = Completer<void>();
       var observed = false;
-      s.schedule(key: 'x', run: (token) async {
-        started.complete();
-        await token.onCancel;
-        observed = token.isCancelled;
-      });
+      s.schedule(
+        key: 'x',
+        run: (token) async {
+          started.complete();
+          await token.onCancel;
+          observed = token.isCancelled;
+        },
+      );
       await started.future;
       s.cancel('x');
       await s.whenIdle;
       expect(observed, isTrue);
     });
 
-    test('min-priority gate pauses lower-priority work until cleared',
-        () async {
-      final s = PriorityTaskScheduler();
-      final ran = <String>[];
-      s.setMinPriority(10);
-      s.schedule(priority: 0, run: (_) async => ran.add('low'));
-      s.schedule(priority: 10, run: (_) async => ran.add('high'));
-      await _pump();
-      expect(ran, ['high'], reason: 'low is gated out');
-      s.clearMinPriority();
-      await s.whenIdle;
-      expect(ran, ['high', 'low']);
-    });
+    test(
+      'min-priority gate pauses lower-priority work until cleared',
+      () async {
+        final s = PriorityTaskScheduler();
+        final ran = <String>[];
+        s.setMinPriority(10);
+        s.schedule(priority: 0, run: (_) async => ran.add('low'));
+        s.schedule(priority: 10, run: (_) async => ran.add('high'));
+        await _pump();
+        expect(ran, ['high'], reason: 'low is gated out');
+        s.clearMinPriority();
+        await s.whenIdle;
+        expect(ran, ['high', 'low']);
+      },
+    );
 
     test('debounce: delay holds a task and re-scheduling resets the quiet '
         'period; only the latest closure runs once', () {
@@ -135,12 +147,14 @@ void main() {
       var maxSeen = 0;
       final gates = [Completer<void>(), Completer<void>(), Completer<void>()];
       for (final g in gates) {
-        s.schedule(run: (_) async {
-          running++;
-          maxSeen = max(maxSeen, running);
-          await g.future;
-          running--;
-        });
+        s.schedule(
+          run: (_) async {
+            running++;
+            maxSeen = max(maxSeen, running);
+            await g.future;
+            running--;
+          },
+        );
       }
       await _pump();
       expect(maxSeen, 2, reason: 'only 2 run at once');
@@ -151,17 +165,19 @@ void main() {
       expect(maxSeen, 2);
     });
 
-    test('a throwing task is isolated: onError fires, others still run',
-        () async {
-      final errors = <Object>[];
-      final s = PriorityTaskScheduler(onError: (e, _) => errors.add(e));
-      final ran = <String>[];
-      s.schedule(run: (_) async => throw StateError('boom'));
-      s.schedule(run: (_) async => ran.add('after'));
-      await s.whenIdle;
-      expect(errors, hasLength(1));
-      expect(ran, ['after']);
-    });
+    test(
+      'a throwing task is isolated: onError fires, others still run',
+      () async {
+        final errors = <Object>[];
+        final s = PriorityTaskScheduler(onError: (e, _) => errors.add(e));
+        final ran = <String>[];
+        s.schedule(run: (_) async => throw StateError('boom'));
+        s.schedule(run: (_) async => ran.add('after'));
+        await s.whenIdle;
+        expect(errors, hasLength(1));
+        expect(ran, ['after']);
+      },
+    );
 
     // The engine-lifecycle lane, as the plugin drives it. A restart the plugin
     // started by itself once wedged on a dead transport and held this single
@@ -177,55 +193,62 @@ void main() {
 
       // Automatic restart: running, and it will not finish on its own.
       final stuck = Completer<void>();
-      unawaited(s.schedule(
-        key: key,
-        priority: 500,
-        preemptible: true,
-        run: (token) async {
-          unawaited(token.onCancel.then((_) {
-            automaticSawCancel = true;
-            // What the engine does at its next phase boundary: give up.
-            if (!stuck.isCompleted) stuck.complete();
-          }));
-          await stuck.future;
-        },
-      ));
+      unawaited(
+        s.schedule(
+          key: key,
+          priority: 500,
+          preemptible: true,
+          run: (token) async {
+            unawaited(
+              token.onCancel.then((_) {
+                automaticSawCancel = true;
+                // What the engine does at its next phase boundary: give up.
+                if (!stuck.isCompleted) stuck.complete();
+              }),
+            );
+            await stuck.future;
+          },
+        ),
+      );
       await _pump();
       expect(automaticSawCancel, isFalse, reason: 'nothing to yield to yet');
 
       // The user presses Resume. Same key, but the automatic one is RUNNING,
       // so this does not coalesce onto it — it queues and preempts.
-      unawaited(s.schedule(
-        key: key,
-        priority: 1000,
-        run: (_) async => userRan = true,
-      ));
+      unawaited(
+        s.schedule(key: key, priority: 1000, run: (_) async => userRan = true),
+      );
 
       await s.whenIdle;
-      expect(automaticSawCancel, isTrue,
-          reason: 'the automatic restart must be told to yield');
+      expect(
+        automaticSawCancel,
+        isTrue,
+        reason: 'the automatic restart must be told to yield',
+      );
       expect(userRan, isTrue, reason: 'the resume must actually run');
     });
 
-    test('a higher-priority schedule preempts a running PREEMPTIBLE task',
-        () async {
-      final s = PriorityTaskScheduler();
-      final events = <String>[];
-      s.schedule(
-        priority: 10,
-        preemptible: true,
-        run: (token) async {
-          events.add('bg-start');
-          await token.onCancel; // yields when preempted
-          events.add('bg-yield');
-        },
-      );
-      await _pump();
-      expect(events, ['bg-start']);
-      s.schedule(priority: 100, run: (_) async => events.add('hi'));
-      await s.whenIdle;
-      expect(events, ['bg-start', 'bg-yield', 'hi']);
-    });
+    test(
+      'a higher-priority schedule preempts a running PREEMPTIBLE task',
+      () async {
+        final s = PriorityTaskScheduler();
+        final events = <String>[];
+        s.schedule(
+          priority: 10,
+          preemptible: true,
+          run: (token) async {
+            events.add('bg-start');
+            await token.onCancel; // yields when preempted
+            events.add('bg-yield');
+          },
+        );
+        await _pump();
+        expect(events, ['bg-start']);
+        s.schedule(priority: 100, run: (_) async => events.add('hi'));
+        await s.whenIdle;
+        expect(events, ['bg-start', 'bg-yield', 'hi']);
+      },
+    );
 
     test('a running NON-preemptible task is not preempted', () async {
       final s = PriorityTaskScheduler();

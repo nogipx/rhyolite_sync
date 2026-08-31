@@ -3,8 +3,10 @@ import 'package:test/test.dart';
 
 void main() {
   test('a diagnostic report is never synced', () {
-    expect(isNeverSynced('rhyolite-report-20260830-195822.rhyolite-log.gz'),
-        isTrue);
+    expect(
+      isNeverSynced('rhyolite-report-20260830-195822.rhyolite-log.gz'),
+      isTrue,
+    );
   });
 
   test('the format may change without the rule lapsing behind it', () {

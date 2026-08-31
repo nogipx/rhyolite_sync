@@ -9,8 +9,13 @@ class _Memory implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
 
   @override
   Future<void> upload(
@@ -26,14 +31,13 @@ class _Memory implements IBlobStorage {
   Future<Map<String, Uint8List>> download(
     List<String> ids, {
     RpcContext? context,
-  }) async =>
-      {for (final id in ids) if (store.containsKey(id)) id: store[id]!};
+  }) async => {
+    for (final id in ids)
+      if (store.containsKey(id)) id: store[id]!,
+  };
 
   @override
-  Future<void> deleteMany(
-    List<String> ids, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> ids, {RpcContext? context}) async {
     for (final id in ids) {
       store.remove(id);
     }
@@ -67,14 +71,23 @@ void main() {
         entries.add([1234567890 + i, 0, 0, null, null, null, 0, 'x']);
       }
       final payload = Uint8List.fromList(
-        utf8.encode(jsonEncode({'v': 3, 'n': ['dev-A'], 'c': entries})),
+        utf8.encode(
+          jsonEncode({
+            'v': 3,
+            'n': ['dev-A'],
+            'c': entries,
+          }),
+        ),
       );
 
       await gz.upload([(payload, 'fugue')]);
 
       final compressed = mem.store['fugue']!;
-      expect(compressed.length, lessThan(payload.length ~/ 2),
-          reason: 'Fugue JSON should compress at least 2x');
+      expect(
+        compressed.length,
+        lessThan(payload.length ~/ 2),
+        reason: 'Fugue JSON should compress at least 2x',
+      );
 
       final out = await gz.download(['fugue']);
       expect(out['fugue'], payload);

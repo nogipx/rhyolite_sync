@@ -16,60 +16,69 @@ class _FakeIO implements IPlatformIO {
 }
 
 StateRecord _rec(String fileId, {int seq = 1}) => StateRecord(
-      fileId: fileId,
-      encryptedState: 'enc-$fileId-$seq',
-      blobRef: 'ref-$fileId-$seq',
-      hlcPacked: 'h$seq',
-      contextPacked: '',
-      serverSeq: seq,
-      tombstone: false,
-    );
+  fileId: fileId,
+  encryptedState: 'enc-$fileId-$seq',
+  blobRef: 'ref-$fileId-$seq',
+  hlcPacked: 'h$seq',
+  contextPacked: '',
+  serverSeq: seq,
+  tombstone: false,
+);
 
-FileState _fs(String path, String blobRef, {bool tombstone = false, int ms = 1}) =>
-    FileState(
-      fileId: 'id',
-      path: path,
-      blobRef: blobRef,
-      sizeBytes: 0,
-      hlc: Hlc(ms, 0, 'x'),
-      tombstone: tombstone,
-    );
+FileState _fs(
+  String path,
+  String blobRef, {
+  bool tombstone = false,
+  int ms = 1,
+}) => FileState(
+  fileId: 'id',
+  path: path,
+  blobRef: blobRef,
+  sizeBytes: 0,
+  hlc: Hlc(ms, 0, 'x'),
+  tombstone: tombstone,
+);
 
 void main() {
-  test('restores files in place; skips tombstones; resolves concurrent by LWW',
-      () async {
-    final io = _FakeIO();
-    final records = [
-      _rec('a'),
-      _rec('b'),
-      _rec('c', seq: 1),
-      _rec('c', seq: 2), // concurrent versions → LWW winner (max HLC) wins
-    ];
-    final byEnvelope = <String, FileState>{
-      'enc-a-1': _fs('notes/a.md', 'ref-a-1'),
-      'enc-b-1': _fs('notes/b.md', '', tombstone: true),
-      'enc-c-1': _fs('notes/c.md', 'ref-c-1', ms: 1),
-      'enc-c-2': _fs('notes/c.md', 'ref-c-2', ms: 2), // higher HLC → winner
-    };
-    final blobs = <String, Uint8List>{
-      'ref-a-1': Uint8List.fromList([1, 2, 3]),
-      'ref-c-2': Uint8List.fromList([9]), // winner content
-    };
+  test(
+    'restores files in place; skips tombstones; resolves concurrent by LWW',
+    () async {
+      final io = _FakeIO();
+      final records = [
+        _rec('a'),
+        _rec('b'),
+        _rec('c', seq: 1),
+        _rec('c', seq: 2), // concurrent versions → LWW winner (max HLC) wins
+      ];
+      final byEnvelope = <String, FileState>{
+        'enc-a-1': _fs('notes/a.md', 'ref-a-1'),
+        'enc-b-1': _fs('notes/b.md', '', tombstone: true),
+        'enc-c-1': _fs('notes/c.md', 'ref-c-1', ms: 1),
+        'enc-c-2': _fs('notes/c.md', 'ref-c-2', ms: 2), // higher HLC → winner
+      };
+      final blobs = <String, Uint8List>{
+        'ref-a-1': Uint8List.fromList([1, 2, 3]),
+        'ref-c-2': Uint8List.fromList([9]), // winner content
+      };
 
-    final report = await RestoreBackupUseCase(
-      records: records,
-      decodeRecord: (r) async => byEnvelope[r.encryptedState]!,
-      downloadContent: (ref, path) async => blobs[ref],
-      targetIO: io,
-      targetRoot: 'vault',
-    )();
+      final report = await RestoreBackupUseCase(
+        records: records,
+        decodeRecord: (r) async => byEnvelope[r.encryptedState]!,
+        downloadContent: (ref, path) async => blobs[ref],
+        targetIO: io,
+        targetRoot: 'vault',
+      )();
 
-    expect(report.restoredFiles, 2); // a.md + c.md (LWW winner)
-    expect(report.skippedTombstones, 1);
-    expect(report.success, isTrue);
-    expect(io.writes.keys, unorderedEquals(['vault/notes/a.md', 'vault/notes/c.md']));
-    expect(io.writes['vault/notes/c.md'], [9]); // winner, not ref-c-1
-  });
+      expect(report.restoredFiles, 2); // a.md + c.md (LWW winner)
+      expect(report.skippedTombstones, 1);
+      expect(report.success, isTrue);
+      expect(
+        io.writes.keys,
+        unorderedEquals(['vault/notes/a.md', 'vault/notes/c.md']),
+      );
+      expect(io.writes['vault/notes/c.md'], [9]); // winner, not ref-c-1
+    },
+  );
 
   test('a file identical to the current vault is skipped (no churn)', () async {
     final io = _FakeIO();

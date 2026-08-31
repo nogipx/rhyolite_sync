@@ -5,23 +5,15 @@ class ChunkRef {
   final int size;
   final int order;
 
-  const ChunkRef({
-    required this.hash,
-    required this.size,
-    required this.order,
-  });
+  const ChunkRef({required this.hash, required this.size, required this.order});
 
-  Map<String, dynamic> toJson() => {
-        'hash': hash,
-        'size': size,
-        'order': order,
-      };
+  Map<String, dynamic> toJson() => {'hash': hash, 'size': size, 'order': order};
 
   factory ChunkRef.fromJson(Map<String, dynamic> json) => ChunkRef(
-        hash: json['hash'] as String,
-        size: json['size'] as int,
-        order: json['order'] as int,
-      );
+    hash: json['hash'] as String,
+    size: json['size'] as int,
+    order: json['order'] as int,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -44,24 +36,21 @@ class BlobManifest {
   final List<ChunkRef> chunks;
   final int totalSize;
 
-  const BlobManifest({
-    required this.chunks,
-    required this.totalSize,
-  });
+  const BlobManifest({required this.chunks, required this.totalSize});
 
   List<String> get chunkHashes => chunks.map((c) => c.hash).toList();
 
   Map<String, dynamic> toJson() => {
-        'chunks': chunks.map((c) => c.toJson()).toList(),
-        'totalSize': totalSize,
-      };
+    'chunks': chunks.map((c) => c.toJson()).toList(),
+    'totalSize': totalSize,
+  };
 
   factory BlobManifest.fromJson(Map<String, dynamic> json) => BlobManifest(
-        chunks: (json['chunks'] as List)
-            .map((c) => ChunkRef.fromJson(c as Map<String, dynamic>))
-            .toList(),
-        totalSize: json['totalSize'] as int,
-      );
+    chunks: (json['chunks'] as List)
+        .map((c) => ChunkRef.fromJson(c as Map<String, dynamic>))
+        .toList(),
+    totalSize: json['totalSize'] as int,
+  );
 
   @override
   String toString() =>

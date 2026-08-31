@@ -25,8 +25,13 @@ class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
   int uploads = 0;
   int downloads = 0;
 
@@ -61,10 +66,7 @@ class _MemRemote implements IBlobStorage {
   }
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     for (final id in blobIds) {
       store.remove(id);
     }
@@ -85,19 +87,23 @@ class _MemIo implements IPlatformIO {
     if (b == null) throw StateError('no file at $absolutePath');
     return b;
   }
+
   @override
   Future<void> writeFile(String absolutePath, Uint8List bytes) async {
     files[absolutePath] = bytes;
   }
+
   @override
   Future<void> deleteFile(String absolutePath) async {
     files.remove(absolutePath);
   }
+
   @override
   Future<void> moveFile(String from, String to) async {
     final b = files.remove(from);
     if (b != null) files[to] = b;
   }
+
   @override
   Future<void> deleteEmptyDirsUpTo(String dirPath, String stopAt) async {}
   @override
@@ -151,30 +157,35 @@ void main() {
       expect(remote.uploads, 0);
     });
 
-    test('upload throws when token cancels mid-flight (before remote)',
-        () async {
-      final remote = _MemRemote();
-      final local = LocalBlobStore(InMemoryBlobRepository());
-      final io = ChunkedBlobIO(
-        blobStore: local,
-        remoteBlobStorage: remote,
-        vaultId: _vaultId,
-      );
+    test(
+      'upload throws when token cancels mid-flight (before remote)',
+      () async {
+        final remote = _MemRemote();
+        final local = LocalBlobStore(InMemoryBlobRepository());
+        final io = ChunkedBlobIO(
+          blobStore: local,
+          remoteBlobStorage: remote,
+          vaultId: _vaultId,
+        );
 
-      final token = RpcCancellationToken();
-      remote.onBeforeUpload = () => token.cancel('mid-flight');
+        final token = RpcCancellationToken();
+        remote.onBeforeUpload = () => token.cancel('mid-flight');
 
-      await expectLater(
-        () => io.upload(
-          _bytes('hello world'),
-          const {},
-          context: RpcContext.withCancellation(token),
-        ),
-        throwsA(isA<RpcCancelledException>()),
-      );
-      expect(remote.uploads, 0,
-          reason: 'remote.upload must throw before counting the call');
-    });
+        await expectLater(
+          () => io.upload(
+            _bytes('hello world'),
+            const {},
+            context: RpcContext.withCancellation(token),
+          ),
+          throwsA(isA<RpcCancelledException>()),
+        );
+        expect(
+          remote.uploads,
+          0,
+          reason: 'remote.upload must throw before counting the call',
+        );
+      },
+    );
 
     test('download throws when token already cancelled', () async {
       final remote = _MemRemote();
@@ -196,13 +207,16 @@ void main() {
   });
 
   group('DiskReconciler cancellation', () {
-    Future<({
-      DiskReconciler reconciler,
-      FileStateStore store,
-      FugueStore fugueStore,
-      _MemIo io,
-      _MemRemote remote,
-    })> newFixture() async {
+    Future<
+      ({
+        DiskReconciler reconciler,
+        FileStateStore store,
+        FugueStore fugueStore,
+        _MemIo io,
+        _MemRemote remote,
+      })
+    >
+    newFixture() async {
       final env = await DataServiceFactory.inMemory();
       addTearDown(env.dispose);
       final store = FileStateStore(client: env.client, vaultId: _vaultId);
@@ -214,10 +228,10 @@ void main() {
       final remote = _MemRemote();
       String fileIdFor(String p) => const Uuid().v5(_vaultId, p);
       ChunkedBlobIO? builder() => ChunkedBlobIO(
-            blobStore: localBlobs,
-            remoteBlobStorage: remote,
-            vaultId: _vaultId,
-          );
+        blobStore: localBlobs,
+        remoteBlobStorage: remote,
+        vaultId: _vaultId,
+      );
       final reconciler = DiskReconciler(
         vaultPath: _vaultPath,
         vaultId: _vaultId,
@@ -227,9 +241,7 @@ void main() {
         store: store,
         fugueStore: fugueStore,
         chunkedIOBuilder: builder,
-        knownChunks: () => {
-          for (final s in store.allValuesFlat) ...s.chunks,
-        },
+        knownChunks: () => {for (final s in store.allValuesFlat) ...s.chunks},
         fileIdFor: fileIdFor,
         emit: (_) {},
       );
@@ -260,33 +272,44 @@ void main() {
       );
 
       final fileId = const Uuid().v5(_vaultId, 'img.bin');
-      expect(f.store.get(fileId), isNull,
-          reason: 'FileState must NOT be written when upload is cancelled');
+      expect(
+        f.store.get(fileId),
+        isNull,
+        reason: 'FileState must NOT be written when upload is cancelled',
+      );
       expect(f.remote.uploads, 0);
     });
 
-    test('text reconcile cancellation -> fugueStore + FileState untouched',
-        () async {
-      final f = await newFixture();
-      f.io.files['$_vaultPath/note.md'] = _bytes('hello world');
+    test(
+      'text reconcile cancellation -> fugueStore + FileState untouched',
+      () async {
+        final f = await newFixture();
+        f.io.files['$_vaultPath/note.md'] = _bytes('hello world');
 
-      final token = RpcCancellationToken();
-      f.remote.onBeforeUpload = () => token.cancel('user typing');
+        final token = RpcCancellationToken();
+        f.remote.onBeforeUpload = () => token.cancel('user typing');
 
-      await expectLater(
-        () => f.reconciler.reconcileWithDisk(
-          'note.md',
-          context: RpcContext.withCancellation(token),
-        ),
-        throwsA(isA<RpcCancelledException>()),
-      );
+        await expectLater(
+          () => f.reconciler.reconcileWithDisk(
+            'note.md',
+            context: RpcContext.withCancellation(token),
+          ),
+          throwsA(isA<RpcCancelledException>()),
+        );
 
-      final fileId = const Uuid().v5(_vaultId, 'note.md');
-      expect(f.store.get(fileId), isNull,
-          reason: 'FileState must NOT be written when upload is cancelled');
-      expect(await f.fugueStore.get(fileId), isNull,
-          reason: 'Sequence must NOT be cached when upload is cancelled');
-    });
+        final fileId = const Uuid().v5(_vaultId, 'note.md');
+        expect(
+          f.store.get(fileId),
+          isNull,
+          reason: 'FileState must NOT be written when upload is cancelled',
+        );
+        expect(
+          await f.fugueStore.get(fileId),
+          isNull,
+          reason: 'Sequence must NOT be cached when upload is cancelled',
+        );
+      },
+    );
 
     test(
       're-reconciling after cancellation picks the file up cleanly',

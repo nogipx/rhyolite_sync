@@ -60,19 +60,13 @@ class GzipBlobStorage implements IBlobStorage, IListableBlobStorage {
   }
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) =>
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) =>
       inner.deleteMany(blobIds, context: context);
 
   // Ids are content hashes of the plain bytes, unaffected by gzip —
   // presence is a pure passthrough.
   @override
-  Future<Set<String>> exists(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) =>
+  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) =>
       inner.exists(blobIds, context: context);
 
   /// Null from the decoder means "not a gzip stream": bytes that predate this

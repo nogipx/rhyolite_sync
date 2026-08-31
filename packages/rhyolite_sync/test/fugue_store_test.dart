@@ -68,8 +68,11 @@ void main() {
 
       final b = await _newStore(env.client);
       expect((await b.get('f1'))?.values.join(), 'abcd');
-      expect(_blob((await b.get('f1'))!), _blob((await a.get('f1'))!),
-          reason: 'reloaded tree must equal originally persisted one');
+      expect(
+        _blob((await b.get('f1'))!),
+        _blob((await a.get('f1'))!),
+        reason: 'reloaded tree must equal originally persisted one',
+      );
     });
 
     test('persistOne with null entry deletes the persisted row', () async {
@@ -101,8 +104,7 @@ void main() {
       expect(b.count, 0);
     });
 
-    test('load skips corrupt rows without failing the whole load',
-        () async {
+    test('load skips corrupt rows without failing the whole load', () async {
       final env = await DataServiceFactory.inMemory();
       addTearDown(env.dispose);
 
@@ -110,8 +112,7 @@ void main() {
       await env.client.create(
         collection: '${_vault}_fugue_store',
         id: 'good',
-        payload: FugueStore.encodeForBlob(_seedABCD())
-            as Map<String, dynamic>,
+        payload: FugueStore.encodeForBlob(_seedABCD()) as Map<String, dynamic>,
       );
       await env.client.create(
         collection: '${_vault}_fugue_store',
@@ -145,75 +146,93 @@ void main() {
       );
 
       final store = await _newStore(env.client);
-      expect((await store.get('legacy'))?.values.join(), 'abcd',
-          reason: 'upgrading must not orphan every tree already on disk');
+      expect(
+        (await store.get('legacy'))?.values.join(),
+        'abcd',
+        reason: 'upgrading must not orphan every tree already on disk',
+      );
     });
 
-    test('a legacy row rewrites itself in the compact form once edited',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      await env.client.create(
-        collection: '${_vault}_fugue_store',
-        id: 'legacy',
-        payload: FugueStore.encodeForBlob(_seedABCD()) as Map<String, dynamic>,
-      );
+    test(
+      'a legacy row rewrites itself in the compact form once edited',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        await env.client.create(
+          collection: '${_vault}_fugue_store',
+          id: 'legacy',
+          payload:
+              FugueStore.encodeForBlob(_seedABCD()) as Map<String, dynamic>,
+        );
 
-      final store = await _newStore(env.client);
-      final loaded = (await store.get('legacy'))!;
-      store.set('legacy', loaded);
-      await store.persistOne('legacy');
+        final store = await _newStore(env.client);
+        final loaded = (await store.get('legacy'))!;
+        store.set('legacy', loaded);
+        await store.persistOne('legacy');
 
-      final row = await env.client.get(
-        collection: '${_vault}_fugue_store',
-        id: 'legacy',
-      );
-      expect(row!.payload['enc'], 'fz1');
-      expect(row.payload.containsKey('b'), isFalse,
-          reason: 'the JSON block array must be gone, not merely ignored');
+        final row = await env.client.get(
+          collection: '${_vault}_fugue_store',
+          id: 'legacy',
+        );
+        expect(row!.payload['enc'], 'fz1');
+        expect(
+          row.payload.containsKey('b'),
+          isFalse,
+          reason: 'the JSON block array must be gone, not merely ignored',
+        );
 
-      // And the rewritten row still decodes to the same tree.
-      final fresh = await _newStore(env.client);
-      expect((await fresh.get('legacy'))?.values.join(), 'abcd');
-    });
+        // And the rewritten row still decodes to the same tree.
+        final fresh = await _newStore(env.client);
+        expect((await fresh.get('legacy'))?.values.join(), 'abcd');
+      },
+    );
 
-    test('the compact row is materially smaller than the JSON it replaced',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      final store = await _newStore(env.client);
+    test(
+      'the compact row is materially smaller than the JSON it replaced',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = await _newStore(env.client);
 
-      final text = _note();
-      final tree = FugueTextSync.seedFromText(text);
-      store.set('big', tree);
-      await store.persistOne('big');
+        final text = _note();
+        final tree = FugueTextSync.seedFromText(text);
+        store.set('big', tree);
+        await store.persistOne('big');
 
-      // Both measured the way sqlite stores them: jsonEncode into a TEXT
-      // column. That is the number that lands on the user's disk.
-      final legacy = utf8
-          .encode(jsonEncode(FugueStore.encodeForBlob(tree)))
-          .length;
-      final row = await env.client.get(
-        collection: '${_vault}_fugue_store',
-        id: 'big',
-      );
-      final compact = utf8.encode(jsonEncode(row!.payload)).length;
-      final plain = utf8.encode(text).length;
+        // Both measured the way sqlite stores them: jsonEncode into a TEXT
+        // column. That is the number that lands on the user's disk.
+        final legacy = utf8
+            .encode(jsonEncode(FugueStore.encodeForBlob(tree)))
+            .length;
+        final row = await env.client.get(
+          collection: '${_vault}_fugue_store',
+          id: 'big',
+        );
+        final compact = utf8.encode(jsonEncode(row!.payload)).length;
+        final plain = utf8.encode(text).length;
 
-      // ignore: avoid_print
-      print(
-        'text=${plain}B  legacy=${legacy}B (${(legacy / plain).toStringAsFixed(1)}x)  '
-        'compact=${compact}B (${(compact / plain).toStringAsFixed(1)}x)  '
-        'saved=${(100 - compact / legacy * 100).toStringAsFixed(0)}%',
-      );
+        // ignore: avoid_print
+        print(
+          'text=${plain}B  legacy=${legacy}B (${(legacy / plain).toStringAsFixed(1)}x)  '
+          'compact=${compact}B (${(compact / plain).toStringAsFixed(1)}x)  '
+          'saved=${(100 - compact / legacy * 100).toStringAsFixed(0)}%',
+        );
 
-      expect(compact, lessThan(legacy),
-          reason: 'the whole point of the change');
-      expect(compact / legacy, lessThan(0.75),
-          reason: 'base64 over the binary codec should beat JSON by a lot, '
+        expect(
+          compact,
+          lessThan(legacy),
+          reason: 'the whole point of the change',
+        );
+        expect(
+          compact / legacy,
+          lessThan(0.75),
+          reason:
+              'base64 over the binary codec should beat JSON by a lot, '
               'not by a rounding error — if this regresses, the store went '
-              'back to writing JSON somewhere');
-    });
+              'back to writing JSON somewhere',
+        );
+      },
+    );
   });
 
   group('FugueStore wire codec', () {
@@ -227,23 +246,22 @@ void main() {
 
     test('encodeBlob → tryDecodeBlob round-trips the tree (binary)', () {
       final original = FugueTextSync.seedFromText('round trip');
-      final restored = FugueStore.tryDecodeBlob(FugueStore.encodeBlob(original));
+      final restored = FugueStore.tryDecodeBlob(
+        FugueStore.encodeBlob(original),
+      );
       expect(restored, isNotNull);
       expect(restored!.values.join(), 'round trip');
       expect(_blob(restored), _blob(original));
     });
 
-    test('tryDecodeBlob rejects non-magic bytes, isLegacy flags old blobs',
-        () {
+    test('tryDecodeBlob rejects non-magic bytes, isLegacy flags old blobs', () {
       // Plain text is neither a new-format blob nor a legacy Sequence blob.
       final plain = Uint8List.fromList('just some text'.codeUnits);
       expect(FugueStore.tryDecodeBlob(plain), isNull);
       expect(FugueStore.isLegacySequenceBlob(plain), isFalse);
 
       // A legacy JSON Sequence envelope is positively detected.
-      final legacy = Uint8List.fromList(
-        utf8.encode('{"v":1,"chars":[]}'),
-      );
+      final legacy = Uint8List.fromList(utf8.encode('{"v":1,"chars":[]}'));
       expect(FugueStore.tryDecodeBlob(legacy), isNull);
       expect(FugueStore.isLegacySequenceBlob(legacy), isTrue);
     });
@@ -264,12 +282,17 @@ void main() {
       await a.persistOne('f2');
 
       final b = await _newStore(env.client);
-      expect(b.count, 2,
-          reason: 'load() must discover persisted fileIds');
-      expect(b.stats.cached, 0,
-          reason: 'load() must NOT decode any sequence upfront');
-      expect(b.peek('f1'), isNull,
-          reason: 'no Sequence in cache before first get()');
+      expect(b.count, 2, reason: 'load() must discover persisted fileIds');
+      expect(
+        b.stats.cached,
+        0,
+        reason: 'load() must NOT decode any sequence upfront',
+      );
+      expect(
+        b.peek('f1'),
+        isNull,
+        reason: 'no Sequence in cache before first get()',
+      );
     });
 
     test('get() lazy-decodes from sqlite and caches', () async {
@@ -285,13 +308,15 @@ void main() {
 
       final seq = await b.get('f1');
       expect(seq?.values.join(), 'abcd');
-      expect(b.peek('f1'), isNotNull,
-          reason: 'first get() must populate the cache');
+      expect(
+        b.peek('f1'),
+        isNotNull,
+        reason: 'first get() must populate the cache',
+      );
       expect(b.stats.cached, 1);
     });
 
-    test('get() of unknown fileId is a fast null without sqlite hit',
-        () async {
+    test('get() of unknown fileId is a fast null without sqlite hit', () async {
       final env = await DataServiceFactory.inMemory();
       addTearDown(env.dispose);
 
@@ -300,8 +325,11 @@ void main() {
       await a.persistOne('f1');
 
       final b = await _newStore(env.client);
-      expect(await b.get('ghost'), isNull,
-          reason: 'unknown fileId returns null without loading anything');
+      expect(
+        await b.get('ghost'),
+        isNull,
+        reason: 'unknown fileId returns null without loading anything',
+      );
       expect(b.stats.cached, 0);
     });
 
@@ -321,8 +349,11 @@ void main() {
       // Add a fourth — f2 should be evicted (least recently used).
       store.set('f4', FugueTextSync.seedFromText('four'));
       expect(store.stats.cached, 3);
-      expect(store.peek('f2'), isNull,
-          reason: 'least-recently-used entry must be evicted');
+      expect(
+        store.peek('f2'),
+        isNull,
+        reason: 'least-recently-used entry must be evicted',
+      );
       expect(store.peek('f1'), isNotNull);
       expect(store.peek('f3'), isNotNull);
       expect(store.peek('f4'), isNotNull);
@@ -358,8 +389,11 @@ void main() {
       await a.persistOne('f1');
 
       final b = await _newStore(env.client);
-      expect(b.peek('f1'), isNull,
-          reason: 'peek does not trigger sqlite load even for known fileId');
+      expect(
+        b.peek('f1'),
+        isNull,
+        reason: 'peek does not trigger sqlite load even for known fileId',
+      );
     });
 
     test('fileIds includes lazy-loaded entries', () async {

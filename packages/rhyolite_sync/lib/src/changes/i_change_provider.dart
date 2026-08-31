@@ -16,7 +16,11 @@ abstract interface class IChangeProvider {
   /// Use before writing a file to disk to avoid echo-back sync loops.
   /// A fallback timer ([holdFor]) auto-clears the suppression if the
   /// expected event never arrives.
-  void suppress(String path, {int count = 1, Duration holdFor = const Duration(seconds: 2)});
+  void suppress(
+    String path, {
+    int count = 1,
+    Duration holdFor = const Duration(seconds: 2),
+  });
 
   /// Removes suppression for [path].
   void unsuppress(String path);

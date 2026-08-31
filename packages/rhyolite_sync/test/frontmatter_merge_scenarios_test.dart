@@ -35,8 +35,11 @@ FmState ingest(FmState base, String note, String node) {
   final parts = splitFrontmatter(note);
   final doc = parts.region == null
       ? const FmMap([])
-      : parseFrontmatterRegion(parts.region!,
-          priorKinds: priorKinds(base), priorListKeys: priorListKeys(base));
+      : parseFrontmatterRegion(
+          parts.region!,
+          priorKinds: priorKinds(base),
+          priorListKeys: priorListKeys(base),
+        );
   return applyDiskFrontmatter(base, doc, tickOn(node));
 }
 
@@ -59,14 +62,19 @@ void main() {
   final raw = normalizeNewlines(File(_notePath).readAsStringSync());
   final body = splitFrontmatter(raw).body;
   final region = splitFrontmatter(raw).region!;
-  final fileKeys =
-      (parseFrontmatterRegion(region) as FmMap).entries.map((e) => e.key).toList();
+  final fileKeys = (parseFrontmatterRegion(region) as FmMap).entries
+      .map((e) => e.key)
+      .toList();
 
   test('CBOR tail round-trips the state byte-identically', () {
     final s = ingest(fresh('A'), raw, 'A');
     final bytes = encodeFmState(s);
     final back = decodeFmState(bytes);
-    expect(encodeFmState(back), bytes, reason: 'canonical encoding must be stable');
+    expect(
+      encodeFmState(back),
+      bytes,
+      reason: 'canonical encoding must be stable',
+    );
     expect(renderWith(back, body), renderWith(s, body));
     print('fm tail size = ${bytes.length} bytes for a ${raw.length}-char note');
   });
@@ -136,16 +144,27 @@ void main() {
     );
     final next = ingest(base, edited, 'A');
     print('tags: ${listOf(next, 'tags')}');
-    expect(listOf(next, 'tags'),
-        ['status/wip', 'project/single', 'area/sales', 'priority/a', 'category/work']);
+    expect(listOf(next, 'tags'), [
+      'status/wip',
+      'project/single',
+      'area/sales',
+      'priority/a',
+      'category/work',
+    ]);
   });
 
   test('the same task checked off on two devices keeps both edits', () {
     final base = ingest(fresh('A'), raw, 'A');
     const open =
         '- [ ] #task/next_action #category/work уточнить сроки 📅 2026-09-08';
-    final aNote = raw.replaceFirst(open, '$open ✅ 2026-08-21'.replaceFirst('- [ ]', '- [x]'));
-    final bNote = raw.replaceFirst(open, '$open ✅ 2026-08-22'.replaceFirst('- [ ]', '- [x]'));
+    final aNote = raw.replaceFirst(
+      open,
+      '$open ✅ 2026-08-21'.replaceFirst('- [ ]', '- [x]'),
+    );
+    final bNote = raw.replaceFirst(
+      open,
+      '$open ✅ 2026-08-22'.replaceFirst('- [ ]', '- [x]'),
+    );
     final a = ingest(base, aNote, 'A');
     final b = ingest(base, bNote, 'B');
     final items = listOf(joinFm(a, b), 'tasks');
@@ -164,35 +183,52 @@ void main() {
     // them would need stable per-item ids — a wire-format change that re-opens
     // the duplicate-tag bug. If that is ever taken on, this test is the one to
     // rewrite, deliberately.
-    expect(items, containsAll([
-      '- [x] #task/next_action #category/work уточнить сроки 📅 2026-09-08 ✅ 2026-08-21',
-      '- [x] #task/next_action #category/work уточнить сроки 📅 2026-09-08 ✅ 2026-08-22',
-    ]), reason: 'neither device may lose its edit');
-    expect(items.contains(open), isFalse,
-        reason: 'the unedited original is superseded on both sides');
+    expect(
+      items,
+      containsAll([
+        '- [x] #task/next_action #category/work уточнить сроки 📅 2026-09-08 ✅ 2026-08-21',
+        '- [x] #task/next_action #category/work уточнить сроки 📅 2026-09-08 ✅ 2026-08-22',
+      ]),
+      reason: 'neither device may lose its edit',
+    );
+    expect(
+      items.contains(open),
+      isFalse,
+      reason: 'the unedited original is superseded on both sides',
+    );
     expect(items.length, 5, reason: 'the other three tasks are untouched');
 
     // And it is a join: order-independent, so both devices show the same list.
     expect(listOf(joinFm(b, a), 'tasks'), items, reason: 'commutative');
   });
 
-  test('Obsidian rewrites `aliases: []` as `aliases:` — does the kind hold?', () {
-    final base = ingest(fresh('A'), raw, 'A');
-    // What Obsidian's Properties UI emits for an empty list.
-    final obsidianForm = raw.replaceFirst('aliases: []', 'aliases:');
-    final next = ingest(base, obsidianForm, 'A');
-    final entry =
-        (materializeFm(next) as FmMap).entries.firstWhere((e) => e.key == 'aliases');
-    print('after Obsidian rewrite, aliases is: ${entry.value}');
-    print('rendered: ${renderEntry(entry).trim()}');
-    expect(entry.value, const FmList([]),
-        reason: 'an emptied list must not silently become a text property');
-  });
+  test(
+    'Obsidian rewrites `aliases: []` as `aliases:` — does the kind hold?',
+    () {
+      final base = ingest(fresh('A'), raw, 'A');
+      // What Obsidian's Properties UI emits for an empty list.
+      final obsidianForm = raw.replaceFirst('aliases: []', 'aliases:');
+      final next = ingest(base, obsidianForm, 'A');
+      final entry = (materializeFm(next) as FmMap).entries.firstWhere(
+        (e) => e.key == 'aliases',
+      );
+      print('after Obsidian rewrite, aliases is: ${entry.value}');
+      print('rendered: ${renderEntry(entry).trim()}');
+      expect(
+        entry.value,
+        const FmList([]),
+        reason: 'an emptied list must not silently become a text property',
+      );
+    },
+  );
 
   test('idempotent re-ingest of an unchanged file does not re-clock', () {
     final one = ingest(fresh('A'), raw, 'A');
     final two = ingest(one, raw, 'A');
-    expect(encodeFmState(two), encodeFmState(one),
-        reason: 'an unchanged file must not change the blob');
+    expect(
+      encodeFmState(two),
+      encodeFmState(one),
+      reason: 'an unchanged file must not change the blob',
+    );
   });
 }

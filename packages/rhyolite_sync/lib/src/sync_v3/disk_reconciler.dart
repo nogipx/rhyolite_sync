@@ -11,6 +11,56 @@ import '../frontmatter/frontmatter_document.dart';
 import '../frontmatter/frontmatter_parser.dart';
 import '../frontmatter/frontmatter_split.dart';
 
+/// Everything a text reconcile worked out before it needed the network.
+///
+/// Exists so a caller with many files to push can do the network part for all
+/// of them at once. The startup pass had no way to: [DiskReconciler] decided,
+/// uploaded and committed in one call, so 188 notes cost 376 round trips while
+/// 188 binaries would have cost 48 — the binary path groups eight files behind
+/// one pair of requests and text had no equivalent. On a backend where the
+/// round trip is cheap that never showed; on a BYO WebDAV it was the whole
+/// wait.
+class TextReconcilePlan {
+  const TextReconcilePlan({
+    required this.relPath,
+    required this.fileId,
+    required this.blobBytes,
+    required this.sequence,
+    required this.fm,
+    required this.charCount,
+  });
+
+  final String relPath;
+  final String fileId;
+
+  /// The encoded Fugue tree, frontmatter tail included. Exactly the bytes
+  /// [DiskReconciler] would have uploaded itself.
+  final Uint8List blobBytes;
+
+  final Fugue<String> sequence;
+  final FmState? fm;
+  final int charCount;
+}
+
+/// What [DiskReconciler.planTextReconcile] concluded.
+///
+/// Most reconciles never reach the network — an unedited note, a delete, a
+/// format this build cannot read — and those are settled in the planning call
+/// itself. Only the rest carry a [plan].
+class TextReconcileOutcome {
+  /// Finished without needing an upload. [changed] is what `reconcileWithDisk`
+  /// would have returned.
+  const TextReconcileOutcome.settled(this.changed) : plan = null;
+
+  /// Produced bytes; the caller uploads them and calls
+  /// [DiskReconciler.commitTextReconcile].
+  const TextReconcileOutcome.needsUpload(TextReconcilePlan this.plan)
+    : changed = false;
+
+  final bool changed;
+  final TextReconcilePlan? plan;
+}
+
 /// Holds the disk ↔ CRDT-store reconcile logic in one place.
 ///
 /// Three entry points share a single rule "reconcile-then-act":
@@ -143,10 +193,34 @@ class DiskReconciler {
 
   /// Records a path's disk signature in both the in-session cache and the
   /// persistent store (keyed by the same fileId startup uses).
-  void _setStat(String relPath, int mtimeMs, int sizeBytes) {
-    _statCache[relPath] = (mtimeMs: mtimeMs, sizeBytes: sizeBytes);
-    _sigStore?.set(_fileIdFor(relPath), mtimeMs, sizeBytes);
+  /// [blobRef] is what the signature is evidence for — the value whose bytes
+  /// are now on disk. Null when that cannot be named: a union view is not any
+  /// single value's content, and a reader must not treat it as one.
+  void _setStat(String relPath, int mtimeMs, int sizeBytes, {String? blobRef}) {
+    _statCache[relPath] = (
+      mtimeMs: mtimeMs,
+      sizeBytes: sizeBytes,
+      blobRef: blobRef,
+    );
+    _sigStore?.set(_fileIdFor(relPath), mtimeMs, sizeBytes, blobRef: blobRef);
   }
+
+  /// Per-file disk-write lines kept before the rest are counted instead of
+  /// logged, and the counter behind it.
+  ///
+  /// One line per file is the right amount of detail for an ordinary pull and
+  /// the wrong amount for a first sync: 9000 files is 9000 lines, and a real
+  /// report came back 98% one INFO line with two other faults evicted from it.
+  /// A slow write is exempt — that is the line anyone is actually looking for,
+  /// and there are never many of them.
+  static const int _maxWriteSamples = 20;
+  static const int _alwaysLogAboveMs = 200;
+  int _writeSamples = 0;
+
+  /// Whether this disk-write line is worth keeping: the first few of a run, or
+  /// any that took long enough to be the answer to a question.
+  bool _sampleWriteLine(int elapsedMs) =>
+      elapsedMs >= _alwaysLogAboveMs || ++_writeSamples <= _maxWriteSamples;
 
   /// Drops a path's disk signature from both caches (file gone / renamed).
   void _dropStat(String relPath) {
@@ -164,7 +238,10 @@ class DiskReconciler {
   /// Reinstantiated on engine restart, but mirrored to [_sigStore] so a cold
   /// start still short-circuits via the persisted signature (a miss here falls
   /// back to [_sigStore] in [reconcileWithDisk]).
-  final Map<String, ({int mtimeMs, int sizeBytes})> _statCache = {};
+  /// Same shape as the persisted signature, so the two are interchangeable at
+  /// the read site and carry the same evidence.
+  final Map<String, ({int mtimeMs, int sizeBytes, String? blobRef})>
+  _statCache = {};
 
   /// Reconciles [relPath] with on-disk state. Returns true when the
   /// reconcile produced a state mutation that should be pushed.
@@ -173,10 +250,7 @@ class DiskReconciler {
   /// is checked before any chunk upload and before the commit-to-store
   /// step; if it fires mid-flight, no local mutation is persisted, so
   /// the file stays "dirty on disk" and the next reconcile picks it up.
-  Future<bool> reconcileWithDisk(
-    String relPath, {
-    RpcContext? context,
-  }) async {
+  Future<bool> reconcileWithDisk(String relPath, {RpcContext? context}) async {
     // Stat short-circuit: if neither mtime nor size moved since we last
     // ran reconcile for this path, disk is by definition still in sync
     // with what the store knows. POSIX mtime is reliable for "did the
@@ -224,11 +298,13 @@ class DiskReconciler {
     final limit = _maxFileSizeBytes();
     if (stat != null && limit != null && limit > 0 && stat.sizeBytes > limit) {
       _sizeBlocked.add(relPath);
-      _emit(SyncFileSizeBlocked(
-        path: relPath,
-        sizeBytes: stat.sizeBytes,
-        limitBytes: limit,
-      ));
+      _emit(
+        SyncFileSizeBlocked(
+          path: relPath,
+          sizeBytes: stat.sizeBytes,
+          limitBytes: limit,
+        ),
+      );
       return false;
     }
     // Not over the limit (deleted, shrank, or the tier limit rose): if this
@@ -257,7 +333,14 @@ class DiskReconciler {
     // so its recreation triggers a real reconcile.
     final postStat = await io.statFile(absPath);
     if (postStat != null) {
-      _setStat(relPath, postStat.mtimeMs, postStat.sizeBytes);
+      // Null while the register is contested — store.get collapses to null on
+      // a conflict, and disk then holds a view rather than a value.
+      _setStat(
+        relPath,
+        postStat.mtimeMs,
+        postStat.sizeBytes,
+        blobRef: store.get(_fileIdFor(relPath))?.blobRef,
+      );
     } else {
       _dropStat(relPath);
     }
@@ -281,19 +364,65 @@ class DiskReconciler {
   /// (blob unavailable): the caller MUST NOT advance the LCA, otherwise
   /// the already-synced short-circuit (1) permanently skips the file and
   /// it stays missing on disk.
-  Future<bool> writeFileToDisk(
-    FileState state, {
-    RpcContext? context,
-  }) async {
+  /// Whether the file on disk provably holds [state]'s content already.
+  ///
+  /// The proof has two halves and needs both. The signature says which blob
+  /// the file held when it was last written by this device, and the stat says
+  /// the file has not moved since. Either alone is not enough — and the
+  /// tempting shortcut of comparing the signature against the value in the
+  /// STORE is the unsound one: by the time this runs the register has already
+  /// joined the incoming record, so the stored value IS the peer's, and a
+  /// stale signature would then vouch for content the disk has never seen.
+  /// That mistake drops a peer's edit silently, which is why the blobRef is
+  /// carried on the signature itself.
+  ///
+  /// Conservative everywhere else too: a signature written before that field
+  /// existed, or taken for a multi-value union view, carries no blobRef and
+  /// proves nothing, so this falls through to the download-and-compare path
+  /// that shipped before it.
+  Future<bool> _diskAlreadyHolds(FileState state) async {
+    if (state.blobRef.isEmpty || state.tombstone) return false;
+    final sig =
+        _statCache[state.path] ?? _sigStore?.get(_fileIdFor(state.path));
+    if (sig == null || sig.blobRef != state.blobRef) return false;
+    final stat = await io.statFile('$vaultPath/${state.path}');
+    if (stat == null) return false;
+    return stat.mtimeMs == sig.mtimeMs && stat.sizeBytes == sig.sizeBytes;
+  }
+
+  Future<bool> writeFileToDisk(FileState state, {RpcContext? context}) async {
     // (1) Already materialised by this device — skip everything.
     final lastRef = store.lastSyncedBlobRefFor(state.fileId);
     if (state.blobRef.isNotEmpty && state.blobRef == lastRef) {
-      _log.info(
-        'disk write bytes=0 '
-        'download=0ms compare=0ms write=0ms total=0ms '
-        'result=skipped-already-synced',
-        data: {'path': LogPath(state.path)},
-      );
+      if (_sampleWriteLine(0)) {
+        _log.info(
+          'disk write bytes=0 '
+          'download=0ms compare=0ms write=0ms total=0ms '
+          'result=skipped-already-synced',
+          data: {'path': LogPath(state.path)},
+        );
+      }
+      return true;
+    }
+
+    // (1b) Our own work coming back. The guard above cannot catch it: a push
+    // deliberately does not advance the LCA, so the first pull that hands our
+    // record back finds it cold and fetches the blob to compare it against the
+    // very file it was made from.
+    //
+    // This IS the convergence point the LCA is for — the server holds this
+    // value and so do we — so recording it here is not a shortcut but the step
+    // that was missing. Every later pull then stops at (1).
+    if (await _diskAlreadyHolds(state)) {
+      store.recordSyncedBlobRef(state.fileId, state.blobRef);
+      if (_sampleWriteLine(0)) {
+        _log.info(
+          'disk write bytes=0 '
+          'download=0ms compare=0ms write=0ms total=0ms '
+          'result=skipped-own-echo',
+          data: {'path': LogPath(state.path)},
+        );
+      }
       return true;
     }
 
@@ -309,13 +438,15 @@ class DiskReconciler {
           state.blobRef,
           context: context,
           onProgress: monitor
-              ? (sent, total) => _emit(SyncBlobTransfer(
+              ? (sent, total) => _emit(
+                  SyncBlobTransfer(
                     path: state.path,
                     upload: false,
                     sentBytes: sent,
                     totalBytes: total,
                     done: false,
-                  ))
+                  ),
+                )
               : null,
         );
       } on UnsupportedCipherVersion catch (e) {
@@ -340,13 +471,15 @@ class DiskReconciler {
         );
       } finally {
         if (monitor) {
-          _emit(SyncBlobTransfer(
-            path: state.path,
-            upload: false,
-            sentBytes: state.sizeBytes,
-            totalBytes: state.sizeBytes,
-            done: true,
-          ));
+          _emit(
+            SyncBlobTransfer(
+              path: state.path,
+              upload: false,
+              sentBytes: state.sizeBytes,
+              totalBytes: state.sizeBytes,
+              done: true,
+            ),
+          );
         }
       }
       swDownload.stop();
@@ -448,15 +581,17 @@ class DiskReconciler {
         if (eq) {
           skippedIdentical = true;
           swWriteTotal.stop();
-          _log.info(
-            'disk write bytes=${bytes.length} '
-            'download=${swDownload.elapsedMilliseconds}ms '
-            'compare=${swCompare.elapsedMilliseconds}ms '
-            'write=0ms '
-            'total=${swWriteTotal.elapsedMilliseconds}ms '
-            'result=skipped-identical',
-            data: {'path': LogPath(state.path)},
-          );
+          if (_sampleWriteLine(swWriteTotal.elapsedMilliseconds)) {
+            _log.info(
+              'disk write bytes=${bytes.length} '
+              'download=${swDownload.elapsedMilliseconds}ms '
+              'compare=${swCompare.elapsedMilliseconds}ms '
+              'write=0ms '
+              'total=${swWriteTotal.elapsedMilliseconds}ms '
+              'result=skipped-identical',
+              data: {'path': LogPath(state.path)},
+            );
+          }
           return true;
         }
       } catch (_) {
@@ -488,7 +623,8 @@ class DiskReconciler {
       //
       // Costs nothing in the case the old behaviour was written for: after a
       // local wipe the disk content EQUALS the remote, so (2) already returned.
-      final everRead = _statCache[state.path] != null ||
+      final everRead =
+          _statCache[state.path] != null ||
           _sigStore?.get(_fileIdFor(state.path)) != null;
       if (lastRef == null && !everRead) {
         swWriteTotal.stop();
@@ -511,19 +647,26 @@ class DiskReconciler {
     // redo a full reconcile against bytes that already match the store.
     final postWriteStat = await io.statFile(fullPath);
     if (postWriteStat != null) {
-      _setStat(state.path, postWriteStat.mtimeMs, postWriteStat.sizeBytes);
+      _setStat(
+        state.path,
+        postWriteStat.mtimeMs,
+        postWriteStat.sizeBytes,
+        blobRef: state.blobRef,
+      );
     }
     _emit(SyncFilePulled(fileId: state.fileId, nodeCount: 0, path: state.path));
     swWriteTotal.stop();
-    _log.info(
-      'disk write bytes=${bytes.length} '
-      'download=${swDownload.elapsedMilliseconds}ms '
-      'compare=${swCompare.elapsedMilliseconds}ms '
-      'write=${swWrite.elapsedMilliseconds}ms '
-      'total=${swWriteTotal.elapsedMilliseconds}ms '
-      'result=${skippedIdentical ? 'unreachable' : 'written'}',
-      data: {'path': LogPath(state.path)},
-    );
+    if (_sampleWriteLine(swWriteTotal.elapsedMilliseconds)) {
+      _log.info(
+        'disk write bytes=${bytes.length} '
+        'download=${swDownload.elapsedMilliseconds}ms '
+        'compare=${swCompare.elapsedMilliseconds}ms '
+        'write=${swWrite.elapsedMilliseconds}ms '
+        'total=${swWriteTotal.elapsedMilliseconds}ms '
+        'result=${skippedIdentical ? 'unreachable' : 'written'}',
+        data: {'path': LogPath(state.path)},
+      );
+    }
     return true;
   }
 
@@ -624,7 +767,21 @@ class DiskReconciler {
   }) async {
     final cachedFm = await _fmStore?.get(fileId);
     final cachedBody = await fugueStore.get(fileId);
-    if (cachedFm != null && cachedBody != null) {
+    // The body alone is enough. Requiring the frontmatter half too looked
+    // symmetric and was not: [_persistDocument] writes the body ALWAYS and the
+    // fm only when there is one to write, so a note that has never carried a
+    // property is permanently body-cached and fm-empty — and that is most
+    // notes. Each of them re-downloaded its own blob on EVERY reconcile: the
+    // pre-join one on every pull, and the one behind every edit, purely to
+    // read a tail that was never written. It is why a startup that uploaded
+    // 188 notes turned around and fetched 185 of them straight back.
+    //
+    // The two rows are written together, so their absence together is the
+    // honest reading: this note has no frontmatter state. The one case that
+    // slips past is a crash between those two awaits, and it is already
+    // handled downstream — a tail-less side is lifted from its own text under
+    // its own clock, exactly as a peer predating the tail is.
+    if (cachedBody != null) {
       return (fm: cachedFm, body: cachedBody);
     }
 
@@ -700,10 +857,7 @@ class DiskReconciler {
     return true;
   }
 
-  Future<bool> _reconcileBinary(
-    String relPath, {
-    RpcContext? context,
-  }) async {
+  Future<bool> _reconcileBinary(String relPath, {RpcContext? context}) async {
     final absPath = '$vaultPath/$relPath';
     final fileId = _fileIdFor(relPath);
     final current = store.get(fileId);
@@ -746,24 +900,28 @@ class DiskReconciler {
         _knownChunks(),
         context: context,
         onProgress: monitor
-            ? (sent, total) => _emit(SyncBlobTransfer(
+            ? (sent, total) => _emit(
+                SyncBlobTransfer(
                   path: relPath,
                   upload: true,
                   sentBytes: sent,
                   totalBytes: total,
                   done: false,
-                ))
+                ),
+              )
             : null,
       );
     } finally {
       if (monitor) {
-        _emit(SyncBlobTransfer(
-          path: relPath,
-          upload: true,
-          sentBytes: bytes.length,
-          totalBytes: bytes.length,
-          done: true,
-        ));
+        _emit(
+          SyncBlobTransfer(
+            path: relPath,
+            upload: true,
+            sentBytes: bytes.length,
+            totalBytes: bytes.length,
+            done: true,
+          ),
+        );
       }
     }
 
@@ -814,7 +972,50 @@ class DiskReconciler {
     return true;
   }
 
-  Future<bool> _reconcileText(
+  Future<bool> _reconcileText(String relPath, {RpcContext? context}) async {
+    final outcome = await planTextReconcile(relPath, context: context);
+    final plan = outcome.plan;
+    if (plan == null) return outcome.changed;
+
+    final chunkedIO = _chunkedIOBuilder();
+    if (chunkedIO == null) {
+      _log.warning(
+        'Chunked IO unavailable (no remote storage)',
+        data: {'path': LogPath(relPath)},
+      );
+      return false;
+    }
+    final swUpload = Stopwatch()..start();
+    _log.info('text reconcile upload-begin', data: {'path': LogPath(relPath)});
+    final result = await chunkedIO.upload(
+      plan.blobBytes,
+      _knownChunks(),
+      context: context,
+      // See [commitTextReconcile]: these bytes ARE the tree, which the commit
+      // writes before the FileState that names them.
+      cacheLocally: false,
+    );
+    swUpload.stop();
+    _log.info(
+      'text reconcile upload-done upload=${swUpload.elapsedMilliseconds}ms',
+      data: {'path': LogPath(relPath)},
+    );
+    return commitTextReconcile(
+      plan,
+      manifestHash: result.manifestHash,
+      chunkHashes: result.chunkHashes,
+      context: context,
+    );
+  }
+
+  /// Everything a text reconcile decides before it touches the network.
+  ///
+  /// Split out so the startup pass can plan a group of files, upload them in
+  /// one pair of requests, and commit them — the round-trip shape the binary
+  /// path has always had. [_reconcileText] is now this, one upload, and
+  /// [commitTextReconcile], in that order; the interactive path behaves
+  /// exactly as it did.
+  Future<TextReconcileOutcome> planTextReconcile(
     String relPath, {
     RpcContext? context,
   }) async {
@@ -823,14 +1024,16 @@ class DiskReconciler {
     final current = store.get(fileId);
 
     if (!await io.fileExists(absPath)) {
-      if (current == null || current.tombstone) return false;
+      if (current == null || current.tombstone) {
+        return const TextReconcileOutcome.settled(false);
+      }
       final hlc = store.nextHlc();
       store.applyLocal(
         current.copyWith(hlc: hlc, tombstone: true, blobRef: '', sizeBytes: 0),
       );
       await store.persistOne(fileId);
       await fugueStore.remove(fileId);
-      return true;
+      return const TextReconcileOutcome.settled(true);
     }
 
     final swTotal = Stopwatch()..start();
@@ -840,7 +1043,7 @@ class DiskReconciler {
     // Skip empty new/tombstoned files — see _reconcileBinary. No Fugue seed
     // for a 0-byte note until it actually has content.
     if (bytes.isEmpty && (current == null || current.tombstone)) {
-      return false;
+      return const TextReconcileOutcome.settled(false);
     }
 
     final newText = utf8.decode(bytes, allowMalformed: true);
@@ -864,7 +1067,7 @@ class DiskReconciler {
         data: {'path': LogPath(relPath)},
       );
       _emit(SyncFileFormatUnsupported(path: relPath));
-      return false;
+      return const TextReconcileOutcome.settled(false);
     }
     final oldSequence = document.body;
     swSeed.stop();
@@ -909,7 +1112,8 @@ class DiskReconciler {
     FmState? newFm;
     var fmChanged = false;
     if (withFm) {
-      final base = document.fm ??
+      final base =
+          document.fm ??
           FmMapState(
             entries: const {},
             fmHlc: store.nextHlc(),
@@ -963,40 +1167,50 @@ class DiskReconciler {
     if (identical(newSequence, oldSequence) &&
         !fmChanged &&
         (current != null || store.hasConflict(fileId))) {
-      return false;
+      return const TextReconcileOutcome.settled(false);
     }
 
-    final swUpload = Stopwatch()..start();
-    _log.info('text reconcile upload-begin', data: {'path': LogPath(relPath)});
-    final upload = await _uploadSequenceBlob(
-      newSequence,
-      fm: newFm,
-      context: context,
-    );
-    swUpload.stop();
-    _log.info(
-      'text reconcile upload-done '
-      'upload=${swUpload.elapsedMilliseconds}ms',
-      data: {'path': LogPath(relPath)},
-    );
-    if (upload == null) {
-      _log.warning(
-        'Chunked IO unavailable (no remote storage)',
-        data: {'path': LogPath(relPath)},
-      );
-      return false;
-    }
     swTotal.stop();
     _log.info(
-      'text reconcile chars=${newText.length} '
+      'text reconcile planned chars=${newText.length} '
       'elements=${newSequence.elementCount} '
-      'blob=${upload.blobSize}B '
       'seed=${swSeed.elapsedMilliseconds}ms '
       'diff=${swDiff.elapsedMilliseconds}ms '
-      'upload=${swUpload.elapsedMilliseconds}ms '
-      'total=${swTotal.elapsedMilliseconds}ms',
+      'plan=${swTotal.elapsedMilliseconds}ms',
       data: {'path': LogPath(relPath)},
     );
+
+    return TextReconcileOutcome.needsUpload(
+      TextReconcilePlan(
+        relPath: relPath,
+        fileId: fileId,
+        blobBytes: _encodeSequenceBlob(newSequence, fm: newFm),
+        sequence: newSequence,
+        fm: newFm,
+        charCount: newText.length,
+      ),
+    );
+  }
+
+  /// Records what [planTextReconcile] produced, now that its bytes are on the
+  /// server. Returns whether the file's state changed.
+  ///
+  /// The order here is the invariant: the tree is written BEFORE the FileState
+  /// that names its blob, so no persisted state ever references a blobRef whose
+  /// tree is missing. That is what lets the upload skip the local blob cache —
+  /// regeneration from the tree is a complete substitute.
+  Future<bool> commitTextReconcile(
+    TextReconcilePlan plan, {
+    required String manifestHash,
+    required List<String> chunkHashes,
+    RpcContext? context,
+  }) async {
+    final relPath = plan.relPath;
+    final fileId = plan.fileId;
+    final absPath = '$vaultPath/$relPath';
+    // Re-read rather than carried through the plan: the upload took real time
+    // and a pull may have applied a peer's version of this file inside it.
+    final current = store.get(fileId);
 
     // Last check before any persist — typing during upload aborts
     // here, leaving fugueStore and FileState untouched. Disk still
@@ -1007,9 +1221,9 @@ class DiskReconciler {
     // (new tombstones) but bytes didn't. Cache the tree, skip the
     // FileState bump.
     if (current != null &&
-        current.blobRef == upload.manifestHash &&
+        current.blobRef == manifestHash &&
         !current.tombstone) {
-      await _persistDocument(fileId, newSequence, newFm);
+      await _persistDocument(fileId, plan.sequence, plan.fm);
       return false;
     }
 
@@ -1033,21 +1247,34 @@ class DiskReconciler {
       return false;
     }
 
-    await _persistDocument(fileId, newSequence, newFm);
+    await _persistDocument(fileId, plan.sequence, plan.fm);
 
     final hlc = store.nextHlc();
     store.applyLocal(
       FileState(
         fileId: fileId,
         path: relPath,
-        blobRef: upload.manifestHash,
-        sizeBytes: upload.blobSize,
+        blobRef: manifestHash,
+        sizeBytes: plan.blobBytes.length,
         hlc: hlc,
         tombstone: false,
-        chunks: upload.chunkHashes,
+        chunks: chunkHashes,
       ),
     );
     await store.persistOne(fileId);
+    // The signature, and what it is evidence for. [reconcileWithDisk] records
+    // this at its tail for the interactive path, but the startup pass calls
+    // plan/commit directly so it can batch its uploads — without this, every
+    // note it pushed would be read in full again on the next start.
+    final postStat = await io.statFile(absPath);
+    if (postStat != null) {
+      _setStat(
+        relPath,
+        postStat.mtimeMs,
+        postStat.sizeBytes,
+        blobRef: manifestHash,
+      );
+    }
     return true;
   }
 
@@ -1056,11 +1283,7 @@ class DiskReconciler {
   /// Exposed for the conflict-resolution path in the engine; the same
   /// upload is used internally by [_reconcileText].
   Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
-  uploadSequenceBlob(
-    Fugue<String> seq, {
-    FmState? fm,
-    RpcContext? context,
-  }) =>
+  uploadSequenceBlob(Fugue<String> seq, {FmState? fm, RpcContext? context}) =>
       _uploadSequenceBlob(seq, fm: fm, context: context);
 
   /// Exposed for the conflict-resolution path in the engine — needs
@@ -1105,14 +1328,10 @@ class DiskReconciler {
     };
   }
 
-  Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
-  _uploadSequenceBlob(
-    Fugue<String> seq, {
-    FmState? fm,
-    RpcContext? context,
-  }) async {
-    final chunkedIO = _chunkedIOBuilder();
-    if (chunkedIO == null) return null;
+  /// Serialises a tree (plus its frontmatter tail) to the exact bytes that go
+  /// on the wire. Separated from the upload so a caller can plan several files
+  /// and send them together.
+  Uint8List _encodeSequenceBlob(Fugue<String> seq, {FmState? fm}) {
     final swEncode = Stopwatch()..start();
     // Magic-prefixed compact binary — self-identifying, ~2 B/char, so peers
     // decode it back with FugueStore.tryDecodeBlob and old clients reject it.
@@ -1128,6 +1347,18 @@ class DiskReconciler {
         'encode=${swEncode.elapsedMilliseconds}ms',
       );
     }
+    return bytes;
+  }
+
+  Future<({String manifestHash, List<String> chunkHashes, int blobSize})?>
+  _uploadSequenceBlob(
+    Fugue<String> seq, {
+    FmState? fm,
+    RpcContext? context,
+  }) async {
+    final chunkedIO = _chunkedIOBuilder();
+    if (chunkedIO == null) return null;
+    final bytes = _encodeSequenceBlob(seq, fm: fm);
     final result = await chunkedIO.upload(
       bytes,
       _knownChunks(),

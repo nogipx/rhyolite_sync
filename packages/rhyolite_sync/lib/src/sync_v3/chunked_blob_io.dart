@@ -37,9 +37,9 @@ class ChunkedBlobIO {
     Uint8List? blobIdKey,
     ContentDefinedChunker? chunker,
     this.maxDownloadBytes,
-  })  : _hasher = hasherFor(blobIdKey),
-        _chunker =
-            chunker ?? ContentDefinedChunker(blobIdHasher: hasherFor(blobIdKey));
+  }) : _hasher = hasherFor(blobIdKey),
+       _chunker =
+           chunker ?? ContentDefinedChunker(blobIdHasher: hasherFor(blobIdKey));
 
   final LocalBlobStore blobStore;
   final IBlobStorage remoteBlobStorage;
@@ -63,8 +63,8 @@ class ChunkedBlobIO {
   /// — a mismatch makes every file look changed and re-upload every startup.
   static String Function(Uint8List) hasherFor(Uint8List? blobIdKey) =>
       blobIdKey == null
-          ? ((b) => sha256.convert(b).toString())
-          : ((b) => Hmac(sha256, blobIdKey).convert(b).toString());
+      ? ((b) => sha256.convert(b).toString())
+      : ((b) => Hmac(sha256, blobIdKey).convert(b).toString());
 
   /// Chunk the file, upload missing chunks + manifest, mirror everything
   /// into the local cache. Returns (manifestHash, ordered chunk hashes).
@@ -78,6 +78,7 @@ class ChunkedBlobIO {
     Set<String> knownChunks, {
     RpcContext? context,
     void Function(int sent, int total)? onProgress,
+
     /// Whether to mirror the produced chunks into the local cache.
     ///
     /// False for content the vault can rebuild on its own — a note's blob is
@@ -157,10 +158,9 @@ class ChunkedBlobIO {
 
     if (!knownChunks.contains(manifestHash)) {
       token?.throwIfCancelled();
-      await remoteBlobStorage.upload(
-        [(manifestPlain, manifestHash)],
-        context: context,
-      );
+      await remoteBlobStorage.upload([
+        (manifestPlain, manifestHash),
+      ], context: context);
     }
     onProgress?.call(total, total);
 
@@ -192,42 +192,56 @@ class ChunkedBlobIO {
     Set<String> knownChunks, {
     RpcContext? context,
     void Function(int fileIndex, int sent, int total)? onFileProgress,
+
+    /// As on [upload]: false for content the vault can rebuild on its own.
+    /// A note's blob IS its Fugue tree, which the FugueStore already holds,
+    /// so mirroring it here would keep a second copy in the same database.
+    bool cacheLocally = true,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
     if (files.isEmpty) return const [];
 
     // --- build (CPU: rolling hash + sha256 over every byte) --------------
-    final built = <({
-      BlobManifest manifest,
-      Map<String, Uint8List> chunkBytes,
-      List<String> orderedHashes,
-      Uint8List manifestPlain,
-      String manifestHash,
-    })>[];
+    final built =
+        <
+          ({
+            BlobManifest manifest,
+            Map<String, Uint8List> chunkBytes,
+            List<String> orderedHashes,
+            Uint8List manifestPlain,
+            String manifestHash,
+          })
+        >[];
     for (final bytes in files) {
       token?.throwIfCancelled();
       built.add(await _build(bytes));
     }
 
     // Mirror everything into the local cache, as the per-file path does.
-    for (final b in built) {
-      for (final entry in b.chunkBytes.entries) {
-        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+    if (cacheLocally) {
+      for (final b in built) {
+        for (final entry in b.chunkBytes.entries) {
+          await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+        }
+        await blobStore.write(
+          b.manifestPlain,
+          b.manifestHash,
+          vaultId: vaultId,
+        );
       }
-      await blobStore.write(b.manifestPlain, b.manifestHash, vaultId: vaultId);
     }
 
     // --- phase 1: every chunk of every file ------------------------------
     const batchLimitBytes = 2 * 1024 * 1024;
     final sent = List<int>.filled(built.length, 0);
     void report(int i) => onFileProgress?.call(
-          i,
-          sent[i] > built[i].manifest.totalSize
-              ? built[i].manifest.totalSize
-              : sent[i],
-          built[i].manifest.totalSize,
-        );
+      i,
+      sent[i] > built[i].manifest.totalSize
+          ? built[i].manifest.totalSize
+          : sent[i],
+      built[i].manifest.totalSize,
+    );
 
     // Deduped across the batch: two files sharing a chunk send it once.
     final queued = <String>{};
@@ -320,6 +334,7 @@ class ChunkedBlobIO {
   Future<void> prefetchAll(
     List<String> manifestHashes, {
     RpcContext? context,
+
     /// Reports a file's transfer as its chunks land, keyed by manifest hash.
     ///
     /// Without it a pull is silent about WHAT it is moving: the applier used
@@ -388,8 +403,10 @@ class ChunkedBlobIO {
       // out of the warm-up entirely; the applier's own guard rejects it again.
       final max = maxDownloadBytes;
       if (max != null && max > 0) {
-        final declared =
-            parsed.chunks.fold<int>(0, (a, r) => a + (r.size < 0 ? 0 : r.size));
+        final declared = parsed.chunks.fold<int>(
+          0,
+          (a, r) => a + (r.size < 0 ? 0 : r.size),
+        );
         if (parsed.size > max || declared > max) continue;
       }
       totalOf[hash] = parsed.size;
@@ -487,13 +504,15 @@ class ChunkedBlobIO {
   /// field name, would produce a manifest hash that looks plausible and
   /// matches nothing.
   Future<
-      ({
-        BlobManifest manifest,
-        Map<String, Uint8List> chunkBytes,
-        List<String> orderedHashes,
-        Uint8List manifestPlain,
-        String manifestHash,
-      })> _build(Uint8List bytes) async {
+    ({
+      BlobManifest manifest,
+      Map<String, Uint8List> chunkBytes,
+      List<String> orderedHashes,
+      Uint8List manifestPlain,
+      String manifestHash,
+    })
+  >
+  _build(Uint8List bytes) async {
     final result = await _chunker(bytes);
     final manifest = result.manifest;
     final manifestJson = jsonEncode({
@@ -505,8 +524,7 @@ class ChunkedBlobIO {
     return (
       manifest: manifest,
       chunkBytes: result.chunks,
-      orderedHashes:
-          manifest.chunks.map((c) => c.hash).toList(growable: false),
+      orderedHashes: manifest.chunks.map((c) => c.hash).toList(growable: false),
       manifestPlain: manifestPlain,
       manifestHash: _hasher(manifestPlain),
     );
@@ -532,10 +550,7 @@ class ChunkedBlobIO {
   /// why healing from disk needs no mtime check to be safe.
   Future<Map<String, Uint8List>> recompute(Uint8List bytes) async {
     final built = await _build(bytes);
-    return {
-      ...built.chunkBytes,
-      built.manifestHash: built.manifestPlain,
-    };
+    return {...built.chunkBytes, built.manifestHash: built.manifestPlain};
   }
 
   /// Fetch manifest by hash, fetch any chunks not in the local cache, and
@@ -556,10 +571,9 @@ class ChunkedBlobIO {
       manifestPlain = null;
     }
     if (manifestPlain == null) {
-      final got = await remoteBlobStorage.download(
-        [manifestHash],
-        context: context,
-      );
+      final got = await remoteBlobStorage.download([
+        manifestHash,
+      ], context: context);
       manifestPlain = got[manifestHash];
       if (manifestPlain == null) return null;
       // A backend that returns the wrong bytes for a content-addressed id is
@@ -580,8 +594,10 @@ class ChunkedBlobIO {
     // into memory.
     final max = maxDownloadBytes;
     if (max != null && max > 0) {
-      final declaredChunkTotal =
-          chunkRefs.fold<int>(0, (a, r) => a + (r.size < 0 ? 0 : r.size));
+      final declaredChunkTotal = chunkRefs.fold<int>(
+        0,
+        (a, r) => a + (r.size < 0 ? 0 : r.size),
+      );
       if (size > max || declaredChunkTotal > max) return null;
     }
 

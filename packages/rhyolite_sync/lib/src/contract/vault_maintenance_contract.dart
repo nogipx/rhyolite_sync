@@ -27,10 +27,7 @@ class SweepOrphanBlobsRequest implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'dryRun': dryRun,
-      };
+  Map<String, dynamic> toJson() => {'vaultId': vaultId, 'dryRun': dryRun};
 }
 
 class SweepOrphanBlobsResponse implements IRpcSerializable {
@@ -64,12 +61,12 @@ class SweepOrphanBlobsResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'totalBlobs': totalBlobs,
-        'totalBytes': totalBytes,
-        'orphanBlobs': orphanBlobs,
-        'orphanBytes': orphanBytes,
-        'deletedBlobs': deletedBlobs,
-      };
+    'totalBlobs': totalBlobs,
+    'totalBytes': totalBytes,
+    'orphanBlobs': orphanBlobs,
+    'orphanBytes': orphanBytes,
+    'deletedBlobs': deletedBlobs,
+  };
 }
 
 /// Reclaims tombstone rows (deleted files) from the vault's state once every
@@ -79,7 +76,10 @@ class SweepOrphanBlobsResponse implements IRpcSerializable {
 /// delete). Content recovery of a deleted file is via history / restore points,
 /// not this marker.
 class SweepStableTombstonesRequest implements IRpcSerializable {
-  const SweepStableTombstonesRequest({required this.vaultId, this.dryRun = true});
+  const SweepStableTombstonesRequest({
+    required this.vaultId,
+    this.dryRun = true,
+  });
 
   final String vaultId;
   final bool dryRun;
@@ -119,10 +119,10 @@ class SweepStableTombstonesResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'totalTombstones': totalTombstones,
-        'stableTombstones': stableTombstones,
-        'deletedTombstones': deletedTombstones,
-      };
+    'totalTombstones': totalTombstones,
+    'stableTombstones': stableTombstones,
+    'deletedTombstones': deletedTombstones,
+  };
 }
 
 /// Targeted release of blobs a client believes it just superseded — the
@@ -149,8 +149,9 @@ class ReleaseBlobsRequest implements IRpcSerializable {
   factory ReleaseBlobsRequest.fromJson(Map<String, dynamic> json) =>
       ReleaseBlobsRequest(
         vaultId: json['vaultId'] as String,
-        blobIds:
-            ((json['blobIds'] as List?) ?? const []).whereType<String>().toList(),
+        blobIds: ((json['blobIds'] as List?) ?? const [])
+            .whereType<String>()
+            .toList(),
       );
 
   @override
@@ -180,10 +181,10 @@ class ReleaseBlobsResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'requested': requested,
-        'stillReferenced': stillReferenced,
-        'deletedBlobs': deletedBlobs,
-      };
+    'requested': requested,
+    'stillReferenced': stillReferenced,
+    'deletedBlobs': deletedBlobs,
+  };
 }
 
 /// "Which of these blob ids does nothing reference any more?"
@@ -211,8 +212,9 @@ class ClassifyBlobsRequest implements IRpcSerializable {
   factory ClassifyBlobsRequest.fromJson(Map<String, dynamic> json) =>
       ClassifyBlobsRequest(
         vaultId: json['vaultId'] as String,
-        blobIds:
-            ((json['blobIds'] as List?) ?? const []).whereType<String>().toList(),
+        blobIds: ((json['blobIds'] as List?) ?? const [])
+            .whereType<String>()
+            .toList(),
       );
 
   @override
@@ -241,9 +243,9 @@ class ClassifyBlobsResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'requested': requested,
-        'deadBlobIds': deadBlobIds,
-      };
+    'requested': requested,
+    'deadBlobIds': deadBlobIds,
+  };
 }
 
 @RpcService(

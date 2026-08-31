@@ -40,10 +40,7 @@ void main() {
     });
 
     test('missing key -> not equal', () {
-      expect(
-        jsonCanonicalEqual(_b('{"a":1,"b":2}'), _b('{"a":1}')),
-        isFalse,
-      );
+      expect(jsonCanonicalEqual(_b('{"a":1,"b":2}'), _b('{"a":1}')), isFalse);
     });
 
     test('array order is significant -> not equal', () {

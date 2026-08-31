@@ -126,7 +126,8 @@ class FieldMapCodec extends ResourceCrdtCodec {
 
     // Upserts: new or changed leaves.
     newLeaves.forEach((key, value) {
-      final changed = !present.containsKey(key) ||
+      final changed =
+          !present.containsKey(key) ||
           canonicalJson(present[key]) != canonicalJson(value);
       if (changed) {
         result = result.put(
@@ -207,8 +208,9 @@ Object? _unflatten(Map<String, Object?> leaves) {
     if (path.isEmpty) return entry.value; // top-level scalar (uncommon)
     var cursor = root;
     for (var i = 0; i < path.length - 1; i++) {
-      cursor = cursor.putIfAbsent(path[i], () => <String, Object?>{})
-          as Map<String, Object?>;
+      cursor =
+          cursor.putIfAbsent(path[i], () => <String, Object?>{})
+              as Map<String, Object?>;
     }
     cursor[path.last] = entry.value;
   }

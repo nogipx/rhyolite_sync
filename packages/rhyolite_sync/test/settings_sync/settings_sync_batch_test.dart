@@ -30,8 +30,10 @@ class _CountingRemote implements IStateSyncContract {
   bool failNext = false;
 
   @override
-  Future<StatePutResponse> putStates(StatePutRequest request,
-      {RpcContext? context}) async {
+  Future<StatePutResponse> putStates(
+    StatePutRequest request, {
+    RpcContext? context,
+  }) async {
     if (failNext) {
       failNext = false;
       throw StateError('connection dropped');
@@ -65,19 +67,22 @@ class _CountingRemote implements IStateSyncContract {
   }
 
   @override
-  Future<StateGetResponse> getStates(StateGetRequest request,
-          {RpcContext? context}) async =>
-      StateGetResponse(records: const [], cursor: seq, epoch: 0);
+  Future<StateGetResponse> getStates(
+    StateGetRequest request, {
+    RpcContext? context,
+  }) async => StateGetResponse(records: const [], cursor: seq, epoch: 0);
 
   @override
-  Future<StateWipeResponse> wipeVault(StateWipeRequest request,
-          {RpcContext? context}) async =>
-      const StateWipeResponse(epoch: 1);
+  Future<StateWipeResponse> wipeVault(
+    StateWipeRequest request, {
+    RpcContext? context,
+  }) async => const StateWipeResponse(epoch: 1);
 
   @override
-  Future<StatePurgeResponse> purgeVault(StatePurgeRequest request,
-          {RpcContext? context}) async =>
-      const StatePurgeResponse();
+  Future<StatePurgeResponse> purgeVault(
+    StatePurgeRequest request, {
+    RpcContext? context,
+  }) async => const StatePurgeResponse();
 }
 
 Uint8List _json(Map<String, Object?> m) =>
@@ -106,8 +111,11 @@ void main() {
     for (var i = 0; i < 5; i++) {
       await sync.applyLocalChange('r$i.json', _json({'k': i}));
     }
-    expect(remote.pushes.length, 5,
-        reason: 'this is the behaviour the batch exists to replace');
+    expect(
+      remote.pushes.length,
+      5,
+      reason: 'this is the behaviour the batch exists to replace',
+    );
   });
 
   test('a batch sends every changed resource in ONE request', () async {
@@ -132,20 +140,25 @@ void main() {
     expect(remote.pushes, isEmpty);
   });
 
-  test('a throw inside the batch still publishes what already changed',
-      () async {
-    await expectLater(
-      sync.batched(() async {
-        await sync.applyLocalChange('a.json', _json({'k': 1}));
-        await sync.applyLocalChange('b.json', _json({'k': 2}));
-        throw StateError('a malformed file blew up mid-scan');
-      }),
-      throwsStateError,
-    );
-    expect(remote.pushes.length, 1,
-        reason: 'deferring a push must never be able to lose a write');
-    expect(remote.pushes.single.length, 2);
-  });
+  test(
+    'a throw inside the batch still publishes what already changed',
+    () async {
+      await expectLater(
+        sync.batched(() async {
+          await sync.applyLocalChange('a.json', _json({'k': 1}));
+          await sync.applyLocalChange('b.json', _json({'k': 2}));
+          throw StateError('a malformed file blew up mid-scan');
+        }),
+        throwsStateError,
+      );
+      expect(
+        remote.pushes.length,
+        1,
+        reason: 'deferring a push must never be able to lose a write',
+      );
+      expect(remote.pushes.single.length, 2);
+    },
+  );
 
   test('nesting is safe — only the outermost section flushes', () async {
     await sync.batched(() async {
@@ -175,42 +188,61 @@ void main() {
       // One item may exceed the cap on its own — nothing can be done about
       // that. A batch of several must not.
       if (push.items > 1) {
-        expect(push.bytes, lessThanOrEqualTo(1 << 20),
-            reason: 'a multi-item request must stay under the cap');
+        expect(
+          push.bytes,
+          lessThanOrEqualTo(1 << 20),
+          reason: 'a multi-item request must stay under the cap',
+        );
       }
     }
     expect(remote.pushes.expand((p) => p).length, 7);
   });
 
-  test('a single state larger than the cap is sent alone, not dropped',
-      () async {
-    final huge = List.filled(2 * 1024 * 1024, 'x').join();
-    await sync.batched(() async {
-      await sync.applyLocalChange('a.json', _json({'k': 1}));
-      await sync.applyLocalChange('huge.json', _json({'v': huge}));
-      await sync.applyLocalChange('b.json', _json({'k': 2}));
-    });
-    final hugePush =
-        remote.byteSizes.firstWhere((p) => p.bytes > (1 << 20));
-    expect(hugePush.items, 1, reason: 'it must not drag siblings over the cap');
-    expect(remote.pushes.expand((p) => p).length, 3,
-        reason: 'and every resource must still be sent');
-  });
+  test(
+    'a single state larger than the cap is sent alone, not dropped',
+    () async {
+      final huge = List.filled(2 * 1024 * 1024, 'x').join();
+      await sync.batched(() async {
+        await sync.applyLocalChange('a.json', _json({'k': 1}));
+        await sync.applyLocalChange('huge.json', _json({'v': huge}));
+        await sync.applyLocalChange('b.json', _json({'k': 2}));
+      });
+      final hugePush = remote.byteSizes.firstWhere((p) => p.bytes > (1 << 20));
+      expect(
+        hugePush.items,
+        1,
+        reason: 'it must not drag siblings over the cap',
+      );
+      expect(
+        remote.pushes.expand((p) => p).length,
+        3,
+        reason: 'and every resource must still be sent',
+      );
+    },
+  );
 
-  test('an oversized batch is split rather than sent as one huge request',
-      () async {
-    // Each state is ~200 KB, so the 1 MiB cap forces more than one request.
-    final big = List.filled(200 * 1024, 'x').join();
-    await sync.batched(() async {
-      for (var i = 0; i < 8; i++) {
-        await sync.applyLocalChange('big$i.json', _json({'v': big}));
-      }
-    });
-    expect(remote.pushes.length, greaterThan(1),
-        reason: 'the request itself must stay bounded');
-    expect(remote.pushes.expand((p) => p).length, 8,
-        reason: 'and every resource must still be sent exactly once');
-  });
+  test(
+    'an oversized batch is split rather than sent as one huge request',
+    () async {
+      // Each state is ~200 KB, so the 1 MiB cap forces more than one request.
+      final big = List.filled(200 * 1024, 'x').join();
+      await sync.batched(() async {
+        for (var i = 0; i < 8; i++) {
+          await sync.applyLocalChange('big$i.json', _json({'v': big}));
+        }
+      });
+      expect(
+        remote.pushes.length,
+        greaterThan(1),
+        reason: 'the request itself must stay bounded',
+      );
+      expect(
+        remote.pushes.expand((p) => p).length,
+        8,
+        reason: 'and every resource must still be sent exactly once',
+      );
+    },
+  );
 
   group('the server refusing an item', () {
     test('does not stop its accepted siblings from being committed', () async {
@@ -230,8 +262,11 @@ void main() {
       await sync.batched(() async {
         await sync.applyLocalChange('ok1.json', _json({'k': 1}));
       });
-      expect(remote.pushes, isEmpty,
-          reason: 'an accepted resource must not be re-sent');
+      expect(
+        remote.pushes,
+        isEmpty,
+        reason: 'an accepted resource must not be re-sent',
+      );
     });
 
     test('is reported rather than swallowed', () async {
@@ -251,33 +286,44 @@ void main() {
       );
       await sync2.batched(() async {
         await sync2.applyLocalChange(
-            'big.json', _json({'v': List.filled(4096, 'x').join()}));
+          'big.json',
+          _json({'v': List.filled(4096, 'x').join()}),
+        );
       });
       expect(logged.where((l) => l.contains('server refused')), isNotEmpty);
       expect(logged.join(), contains('state_size'));
     });
 
-    test('does not claim the write: the next push carries the same context',
-        () async {
-      remote.rejectAtLeastBytes = 1024;
-      final big = List.filled(4096, 'x').join();
-      await sync.batched(() async {
-        await sync.applyLocalChange('big.json', _json({'v': big}));
-      });
-      final firstContext = remote.sent.single.contextPacked;
+    test(
+      'does not claim the write: the next push carries the same context',
+      () async {
+        remote.rejectAtLeastBytes = 1024;
+        final big = List.filled(4096, 'x').join();
+        await sync.batched(() async {
+          await sync.applyLocalChange('big.json', _json({'v': big}));
+        });
+        final firstContext = remote.sent.single.contextPacked;
 
-      // A NEW version of the same resource — the block is keyed on the payload,
-      // so this must be attempted rather than skipped forever.
-      remote.sent.clear();
-      await sync.batched(() async {
-        await sync.applyLocalChange('big.json', _json({'v': '${big}more'}));
-      });
-      expect(remote.sent, hasLength(1),
-          reason: 'a changed payload must be retried, not blocked');
-      expect(remote.sent.single.contextPacked, firstContext,
-          reason: 'the refused write must not have advanced what we claim to '
-              'have seen');
-    });
+        // A NEW version of the same resource — the block is keyed on the payload,
+        // so this must be attempted rather than skipped forever.
+        remote.sent.clear();
+        await sync.batched(() async {
+          await sync.applyLocalChange('big.json', _json({'v': '${big}more'}));
+        });
+        expect(
+          remote.sent,
+          hasLength(1),
+          reason: 'a changed payload must be retried, not blocked',
+        );
+        expect(
+          remote.sent.single.contextPacked,
+          firstContext,
+          reason:
+              'the refused write must not have advanced what we claim to '
+              'have seen',
+        );
+      },
+    );
 
     test('the same refused payload is not sent again', () async {
       remote.rejectAtLeastBytes = 1024;
@@ -317,8 +363,11 @@ void main() {
         await sync.applyLocalChange('c.json', _json({'k': 3}));
       });
       final sent = remote.pushes.expand((p) => p).toSet();
-      expect(sent.length, 3,
-          reason: 'a.json and b.json must be retried alongside c.json');
+      expect(
+        sent.length,
+        3,
+        reason: 'a.json and b.json must be retried alongside c.json',
+      );
     });
   });
 }

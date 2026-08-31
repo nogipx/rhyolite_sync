@@ -56,7 +56,10 @@ class FakePlatformIO implements IPlatformIO {
   Future<FileStatInfo?> statFile(String absolutePath) async {
     final b = files[absolutePath];
     if (b == null) return null;
-    return FileStatInfo(mtimeMs: _mtime[absolutePath] ?? 0, sizeBytes: b.length);
+    return FileStatInfo(
+      mtimeMs: _mtime[absolutePath] ?? 0,
+      sizeBytes: b.length,
+    );
   }
 }
 

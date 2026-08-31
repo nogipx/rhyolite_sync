@@ -13,47 +13,49 @@ class _IdentityCipher implements IVaultCipher {
 
 /// Rebuilds the pull record from a put item, as the server would.
 StateRecord _asRecord(StatePutItem item, int seq) => StateRecord(
-      fileId: item.fileId,
-      encryptedState: item.encryptedState,
-      blobRef: item.blobRef,
-      hlcPacked: item.hlcPacked,
-      contextPacked: item.contextPacked,
-      serverSeq: seq,
-      tombstone: item.tombstone,
-      chunks: item.chunks,
-    );
+  fileId: item.fileId,
+  encryptedState: item.encryptedState,
+  blobRef: item.blobRef,
+  hlcPacked: item.hlcPacked,
+  contextPacked: item.contextPacked,
+  serverSeq: seq,
+  tombstone: item.tombstone,
+  chunks: item.chunks,
+);
 
 void main() {
-  test('encode -> decode round-trips a FileState and its causal context',
-      () async {
-    final codec = StateRecordCodec(cipher: _IdentityCipher());
-    final hlc = Hlc(1234, 7, 'device-A');
-    final ctx = CausalContext.from({'device-A': hlc});
-    final state = FileState(
-      fileId: 'file-1',
-      path: 'notes/a.md',
-      blobRef: 'manifest-hash',
-      sizeBytes: 42,
-      hlc: hlc,
-      tombstone: false,
-      chunks: const ['c1', 'c2'],
-    );
+  test(
+    'encode -> decode round-trips a FileState and its causal context',
+    () async {
+      final codec = StateRecordCodec(cipher: _IdentityCipher());
+      final hlc = Hlc(1234, 7, 'device-A');
+      final ctx = CausalContext.from({'device-A': hlc});
+      final state = FileState(
+        fileId: 'file-1',
+        path: 'notes/a.md',
+        blobRef: 'manifest-hash',
+        sizeBytes: 42,
+        hlc: hlc,
+        tombstone: false,
+        chunks: const ['c1', 'c2'],
+      );
 
-    final item = await codec.encode(state, ctx);
-    expect(item.fileId, 'file-1');
-    expect(item.blobRef, 'manifest-hash');
-    expect(item.chunks, const ['c1', 'c2']);
+      final item = await codec.encode(state, ctx);
+      expect(item.fileId, 'file-1');
+      expect(item.blobRef, 'manifest-hash');
+      expect(item.chunks, const ['c1', 'c2']);
 
-    final decoded = await codec.decode(_asRecord(item, 1));
-    expect(decoded.value.fileId, state.fileId);
-    expect(decoded.value.path, state.path);
-    expect(decoded.value.blobRef, state.blobRef);
-    expect(decoded.value.sizeBytes, state.sizeBytes);
-    expect(decoded.value.hlc.pack(), state.hlc.pack());
-    expect(decoded.value.tombstone, isFalse);
-    expect(decoded.value.chunks, const ['c1', 'c2']);
-    expect(decoded.context.pack(), ctx.pack());
-  });
+      final decoded = await codec.decode(_asRecord(item, 1));
+      expect(decoded.value.fileId, state.fileId);
+      expect(decoded.value.path, state.path);
+      expect(decoded.value.blobRef, state.blobRef);
+      expect(decoded.value.sizeBytes, state.sizeBytes);
+      expect(decoded.value.hlc.pack(), state.hlc.pack());
+      expect(decoded.value.tombstone, isFalse);
+      expect(decoded.value.chunks, const ['c1', 'c2']);
+      expect(decoded.context.pack(), ctx.pack());
+    },
+  );
 
   test('tombstone encodes with empty blobRef and no chunks', () async {
     final codec = StateRecordCodec(cipher: _IdentityCipher());

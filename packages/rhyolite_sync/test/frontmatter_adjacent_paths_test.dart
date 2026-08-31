@@ -59,8 +59,10 @@ void main() {
       // remote_applier materialises the losing side before writing it beside
       // the winner. A raw tail here would make the copy unopenable.
       final loser = blobOf('---\nx: 2\n---\nloser body\n', fm: build('x: 2\n'));
-      expect(utf8.decode(materializeFileContent(loser, 'n.md')!),
-          '---\nx: 2\n---\nloser body\n');
+      expect(
+        utf8.decode(materializeFileContent(loser, 'n.md')!),
+        '---\nx: 2\n---\nloser body\n',
+      );
     });
 
     test('a blob written before tails existed still reads', () {
@@ -71,8 +73,10 @@ void main() {
       // The .excalidraw.md case: synced as text, reclassified binary later.
       // The Fugue check is path-independent precisely so this still projects.
       final tailed = blobOf(note, fm: build('title: Note\n'));
-      expect(utf8.decode(materializeFileContent(tailed, 'd.excalidraw.md')!),
-          note);
+      expect(
+        utf8.decode(materializeFileContent(tailed, 'd.excalidraw.md')!),
+        note,
+      );
     });
   });
 
@@ -86,15 +90,20 @@ void main() {
       // twice, the exact file this whole effort is about.
       final union = deterministicLineUnion([a, b]);
       expect('x:'.allMatches(union).length, 2);
-      expect(splitFrontmatter(union).region, isNotNull,
-          reason: 'one region, not two');
+      expect(
+        splitFrontmatter(union).region,
+        isNotNull,
+        reason: 'one region, not two',
+      );
     });
 
     test('joining the frontmatter gives a valid region and keeps the union '
         'of bodies', () {
       final union = deterministicLineUnion([a, b]);
-      final joined = joinFm(build('x: 1\ntags:\n  - a\n'),
-          build('x: 2\ntags:\n  - b\n', node: 'device-b'));
+      final joined = joinFm(
+        build('x: 1\ntags:\n  - a\n'),
+        build('x: 2\ntags:\n  - b\n', node: 'device-b'),
+      );
 
       final view = renderNote(
         materializeFm(joined),
@@ -102,19 +111,22 @@ void main() {
       );
 
       expect('x:'.allMatches(view).length, 1, reason: 'one key');
-      final tags = (materializeFm(joined) as FmMap)
-          .entries
-          .firstWhere((e) => e.key == 'tags')
-          .value as FmList;
-      expect(tags.items, containsAll(['a', 'b']),
-          reason: 'the list still merges');
+      final tags =
+          (materializeFm(joined) as FmMap).entries
+                  .firstWhere((e) => e.key == 'tags')
+                  .value
+              as FmList;
+      expect(
+        tags.items,
+        containsAll(['a', 'b']),
+        reason: 'the list still merges',
+      );
       // Nothing from either body is dropped — that is what this branch is for.
       expect(view, contains('body from A'));
       expect(view, contains('body from B'));
     });
 
-    test('a partial view must NOT be rendered — it would drop the other side',
-        () {
+    test('a partial view must NOT be rendered — it would drop the other side', () {
       // The mixed-version case, which is what a real vault looks like during a
       // rollout. Only one device carries state; the other's frontmatter edits
       // exist solely in its text, and the character join has already kept them.
@@ -124,10 +136,15 @@ void main() {
       final onlyOurs = build('x: 1\ntags:\n  - a\n');
 
       // What the guard prevents:
-      final wrong =
-          renderNote(materializeFm(onlyOurs), splitFrontmatter(union).body);
-      expect(wrong, isNot(contains('x: 2')),
-          reason: 'this is the loss the guard exists to prevent');
+      final wrong = renderNote(
+        materializeFm(onlyOurs),
+        splitFrontmatter(union).body,
+      );
+      expect(
+        wrong,
+        isNot(contains('x: 2')),
+        reason: 'this is the loss the guard exists to prevent',
+      );
 
       // What the guard leaves in place: the union, both values intact.
       expect(union, contains('x: 1'));

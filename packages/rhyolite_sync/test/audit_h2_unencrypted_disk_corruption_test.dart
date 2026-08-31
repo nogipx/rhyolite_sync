@@ -61,10 +61,10 @@ Future<_Fx> _newApplier(IBlobStorage remote) async {
   final events = <SyncEngineEvent>[];
 
   ChunkedBlobIO? builder() => ChunkedBlobIO(
-        blobStore: appLocal,
-        remoteBlobStorage: remote,
-        vaultId: _vaultId,
-      );
+    blobStore: appLocal,
+    remoteBlobStorage: remote,
+    vaultId: _vaultId,
+  );
 
   final reconciler = DiskReconciler(
     vaultPath: _vaultPath,
@@ -99,10 +99,20 @@ Future<_Fx> _newApplier(IBlobStorage remote) async {
     log: LogScope.noop,
   );
 
-  return (applier: applier, store: store, io: io, appLocal: appLocal, codec: codec);
+  return (
+    applier: applier,
+    store: store,
+    io: io,
+    appLocal: appLocal,
+    codec: codec,
+  );
 }
 
-Future<StateRecord> _record(StateRecordCodec codec, FileState state, int seq) async {
+Future<StateRecord> _record(
+  StateRecordCodec codec,
+  FileState state,
+  int seq,
+) async {
   final ctx = CausalContext.from({state.hlc.nodeId: state.hlc});
   final item = await codec.encode(state, ctx);
   return StateRecord(
@@ -133,129 +143,120 @@ Future<({String manifestHash, List<String> chunkHashes})> _seedRemote(
 
 void main() {
   group('H2 (FIXED) — corruption never reaches disk', () {
-    test(
-      'corrupt chunk on remote (no cipher) -> nothing written, NOT marked '
-      'synced (a later pull retries)',
-      () async {
-        final backing = FakeBlobStorage();
-        final f = await _newApplier(backing);
-        final fileId = _fileIdFor('img.bin'); // binary -> written as-is
+    test('corrupt chunk on remote (no cipher) -> nothing written, NOT marked '
+        'synced (a later pull retries)', () async {
+      final backing = FakeBlobStorage();
+      final f = await _newApplier(backing);
+      final fileId = _fileIdFor('img.bin'); // binary -> written as-is
 
-        final original = _bytes('the authentic binary payload');
-        final up = await _seedRemote(backing, original);
+      final original = _bytes('the authentic binary payload');
+      final up = await _seedRemote(backing, original);
 
-        // Inject the fault: one chunk now returns wrong bytes of right length.
-        corruptSameLength(backing.store, up.chunkHashes.first);
+      // Inject the fault: one chunk now returns wrong bytes of right length.
+      corruptSameLength(backing.store, up.chunkHashes.first);
 
-        final state = FileState(
-          fileId: fileId,
-          path: 'img.bin',
-          blobRef: up.manifestHash,
-          sizeBytes: original.length,
-          hlc: Hlc(1000, 0, 'device-A'),
-          chunks: up.chunkHashes,
-        );
+      final state = FileState(
+        fileId: fileId,
+        path: 'img.bin',
+        blobRef: up.manifestHash,
+        sizeBytes: original.length,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: up.chunkHashes,
+      );
 
-        await f.applier.apply(
-          fileId,
-          [await _record(f.codec, state, 1)],
-          _UnusedResolver(),
-        );
+      await f.applier.apply(fileId, [
+        await _record(f.codec, state, 1),
+      ], _UnusedResolver());
 
-        expect(
-          f.io.files.containsKey('$_vaultPath/img.bin'),
-          isFalse,
-          reason: 'download rejected the mismatched chunk (null) -> '
-              'writeFileToDisk wrote nothing; no plain-path disk corruption',
-        );
-        expect(
-          f.store.lastSyncedBlobRefFor(fileId),
-          isNull,
-          reason: 'not marked synced -> a later pull retries once the backend '
-              'serves the correct chunk',
-        );
-      },
-    );
+      expect(
+        f.io.files.containsKey('$_vaultPath/img.bin'),
+        isFalse,
+        reason:
+            'download rejected the mismatched chunk (null) -> '
+            'writeFileToDisk wrote nothing; no plain-path disk corruption',
+      );
+      expect(
+        f.store.lastSyncedBlobRefFor(fileId),
+        isNull,
+        reason:
+            'not marked synced -> a later pull retries once the backend '
+            'serves the correct chunk',
+      );
+    });
 
-    test(
-      'corrupt chunk on remote (with cipher) -> GCM tag breaks decrypt, '
-      'nothing written',
-      () async {
-        // E2EE blob path: EncryptedBlobStorage over the same backing.
-        final backing = FakeBlobStorage();
-        final cipher = VaultCipher.fromRawKey(Uint8List(32)); // fast, no Argon2
-        final encRemote = EncryptedBlobStorage(inner: backing, cipher: cipher);
-        final f = await _newApplier(encRemote);
-        final fileId = _fileIdFor('img.bin');
+    test('corrupt chunk on remote (with cipher) -> GCM tag breaks decrypt, '
+        'nothing written', () async {
+      // E2EE blob path: EncryptedBlobStorage over the same backing.
+      final backing = FakeBlobStorage();
+      final cipher = VaultCipher.fromRawKey(Uint8List(32)); // fast, no Argon2
+      final encRemote = EncryptedBlobStorage(inner: backing, cipher: cipher);
+      final f = await _newApplier(encRemote);
+      final fileId = _fileIdFor('img.bin');
 
-        final original = _bytes('the authentic binary payload');
-        final up = await _seedRemote(encRemote, original);
+      final original = _bytes('the authentic binary payload');
+      final up = await _seedRemote(encRemote, original);
 
-        // Tamper with the stored CIPHERTEXT of one chunk (flip a MAC byte).
-        final ct = backing.store[up.chunkHashes.first]!;
-        final tampered = Uint8List.fromList(ct);
-        tampered[tampered.length - 1] ^= 0xFF; // breaks the AES-GCM auth tag
-        backing.store[up.chunkHashes.first] = tampered;
+      // Tamper with the stored CIPHERTEXT of one chunk (flip a MAC byte).
+      final ct = backing.store[up.chunkHashes.first]!;
+      final tampered = Uint8List.fromList(ct);
+      tampered[tampered.length - 1] ^= 0xFF; // breaks the AES-GCM auth tag
+      backing.store[up.chunkHashes.first] = tampered;
 
-        final state = FileState(
-          fileId: fileId,
-          path: 'img.bin',
-          blobRef: up.manifestHash,
-          sizeBytes: original.length,
-          hlc: Hlc(1000, 0, 'device-A'),
-          chunks: up.chunkHashes,
-        );
+      final state = FileState(
+        fileId: fileId,
+        path: 'img.bin',
+        blobRef: up.manifestHash,
+        sizeBytes: original.length,
+        hlc: Hlc(1000, 0, 'device-A'),
+        chunks: up.chunkHashes,
+      );
 
-        await f.applier.apply(
-          fileId,
-          [await _record(f.codec, state, 1)],
-          _UnusedResolver(),
-        );
+      await f.applier.apply(fileId, [
+        await _record(f.codec, state, 1),
+      ], _UnusedResolver());
 
-        expect(
-          f.io.files.containsKey('$_vaultPath/img.bin'),
-          isFalse,
-          reason: 'decrypt failed (GCM tag) -> download returned null -> '
-              'nothing written; corruption cannot reach disk under E2EE',
-        );
-        expect(
-          f.store.lastSyncedBlobRefFor(fileId),
-          isNull,
-          reason: 'not marked synced -> a later pull retries (no silent loss)',
-        );
-      },
-    );
+      expect(
+        f.io.files.containsKey('$_vaultPath/img.bin'),
+        isFalse,
+        reason:
+            'decrypt failed (GCM tag) -> download returned null -> '
+            'nothing written; corruption cannot reach disk under E2EE',
+      );
+      expect(
+        f.store.lastSyncedBlobRefFor(fileId),
+        isNull,
+        reason: 'not marked synced -> a later pull retries (no silent loss)',
+      );
+    });
 
-    test(
-      'ChunkedBlobIO.download THROWS on a tampered ciphertext chunk '
-      '(the protection is AES-GCM, not a content check)',
-      () async {
-        final backing = FakeBlobStorage();
-        final cipher = VaultCipher.fromRawKey(Uint8List(32));
-        final encRemote = EncryptedBlobStorage(inner: backing, cipher: cipher);
+    test('ChunkedBlobIO.download THROWS on a tampered ciphertext chunk '
+        '(the protection is AES-GCM, not a content check)', () async {
+      final backing = FakeBlobStorage();
+      final cipher = VaultCipher.fromRawKey(Uint8List(32));
+      final encRemote = EncryptedBlobStorage(inner: backing, cipher: cipher);
 
-        final original = _bytes('secret note body');
-        final up = await _seedRemote(encRemote, original);
+      final original = _bytes('secret note body');
+      final up = await _seedRemote(encRemote, original);
 
-        final ct = backing.store[up.chunkHashes.first]!;
-        final tampered = Uint8List.fromList(ct);
-        tampered[tampered.length - 1] ^= 0xFF;
-        backing.store[up.chunkHashes.first] = tampered;
+      final ct = backing.store[up.chunkHashes.first]!;
+      final tampered = Uint8List.fromList(ct);
+      tampered[tampered.length - 1] ^= 0xFF;
+      backing.store[up.chunkHashes.first] = tampered;
 
-        final consumer = ChunkedBlobIO(
-          blobStore: LocalBlobStore(InMemoryBlobRepository()),
-          remoteBlobStorage: encRemote,
-          vaultId: _vaultId,
-        );
+      final consumer = ChunkedBlobIO(
+        blobStore: LocalBlobStore(InMemoryBlobRepository()),
+        remoteBlobStorage: encRemote,
+        vaultId: _vaultId,
+      );
 
-        await expectLater(
-          () => consumer.download(up.manifestHash),
-          throwsA(anything),
-          reason: 'a tampered chunk under E2EE fails the AES-GCM MAC and '
-              'raises — it is never silently assembled',
-        );
-      },
-    );
+      await expectLater(
+        () => consumer.download(up.manifestHash),
+        throwsA(anything),
+        reason:
+            'a tampered chunk under E2EE fails the AES-GCM MAC and '
+            'raises — it is never silently assembled',
+      );
+    });
   });
 }
 

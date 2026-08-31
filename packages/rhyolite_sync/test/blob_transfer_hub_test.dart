@@ -11,8 +11,13 @@ class _ControllableStorage implements IBlobStorage {
   final Map<String, Uint8List> bytes = {};
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (bytes.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (bytes.containsKey(id)) id,
+  };
   int uploadCalls = 0;
   int downloadCalls = 0;
   int deleteCalls = 0;
@@ -75,10 +80,7 @@ class _ControllableStorage implements IBlobStorage {
   }
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     deleteCalls++;
     context?.cancellationToken?.throwIfCancelled();
     for (final id in blobIds) {
@@ -147,27 +149,32 @@ void main() {
       expect(errors, isEmpty, reason: 'errors reaching the zone are orphans');
     });
 
-    test('dedups concurrent downloads of the same blob into one inner call',
-        () async {
-      final storage = _ControllableStorage();
-      storage.bytes['x'] = Uint8List.fromList([1, 2, 3]);
-      final gate = storage.downloadGate('x');
+    test(
+      'dedups concurrent downloads of the same blob into one inner call',
+      () async {
+        final storage = _ControllableStorage();
+        storage.bytes['x'] = Uint8List.fromList([1, 2, 3]);
+        final gate = storage.downloadGate('x');
 
-      final hub = BlobTransferHub(inner: storage);
+        final hub = BlobTransferHub(inner: storage);
 
-      final f1 = hub.download(['x']);
-      final f2 = hub.download(['x']);
-      await Future<void>.delayed(Duration.zero);
+        final f1 = hub.download(['x']);
+        final f2 = hub.download(['x']);
+        await Future<void>.delayed(Duration.zero);
 
-      gate.complete();
-      final r1 = await f1;
-      final r2 = await f2;
+        gate.complete();
+        final r1 = await f1;
+        final r2 = await f2;
 
-      expect(r1['x'], [1, 2, 3]);
-      expect(r2['x'], [1, 2, 3]);
-      expect(storage.downloadCalls, 1,
-          reason: 'second download must subscribe, not re-fetch');
-    });
+        expect(r1['x'], [1, 2, 3]);
+        expect(r2['x'], [1, 2, 3]);
+        expect(
+          storage.downloadCalls,
+          1,
+          reason: 'second download must subscribe, not re-fetch',
+        );
+      },
+    );
 
     test('dedups concurrent uploads of the same blob id', () async {
       final storage = _ControllableStorage();
@@ -187,8 +194,7 @@ void main() {
       expect(storage.uploadCalls, 1);
     });
 
-    test('caller cancellation detaches without killing shared task',
-        () async {
+    test('caller cancellation detaches without killing shared task', () async {
       final storage = _ControllableStorage();
       storage.bytes['x'] = Uint8List.fromList([7]);
       final gate = storage.downloadGate('x');
@@ -221,10 +227,12 @@ void main() {
 
       final tokenA = RpcCancellationToken();
       final tokenB = RpcCancellationToken();
-      final fA =
-          hub.download(['x'], context: RpcContext.withCancellation(tokenA));
-      final fB =
-          hub.download(['x'], context: RpcContext.withCancellation(tokenB));
+      final fA = hub.download([
+        'x',
+      ], context: RpcContext.withCancellation(tokenA));
+      final fB = hub.download([
+        'x',
+      ], context: RpcContext.withCancellation(tokenB));
       await Future<void>.delayed(Duration.zero);
 
       tokenA.cancel();
@@ -260,9 +268,11 @@ void main() {
 
     test('respects maxConcurrent', () async {
       final storage = _ControllableStorage();
-      final gates = ['a', 'b', 'c']
-          .map((id) => MapEntry(id, storage.downloadGate(id)))
-          .toList();
+      final gates = [
+        'a',
+        'b',
+        'c',
+      ].map((id) => MapEntry(id, storage.downloadGate(id))).toList();
       for (final e in gates) {
         storage.bytes[e.key] = Uint8List.fromList([1]);
       }
@@ -302,36 +312,44 @@ void main() {
       final got = await hub.download([for (var i = 0; i < 8; i++) 'b$i']);
 
       expect(got.length, 8, reason: 'every id must still come back');
-      expect(storage.downloadCalls, 1,
-          reason: 'the list is the point — one request, not one per id');
+      expect(
+        storage.downloadCalls,
+        1,
+        reason: 'the list is the point — one request, not one per id',
+      );
     });
 
-    test('an id already in flight joins its call instead of opening another',
-        () async {
-      // Dedup is the hub's other job and grouping must not cost it: a second
-      // caller wanting a blob someone is already fetching still waits on that
-      // fetch.
-      final storage = _ControllableStorage();
-      storage.bytes['shared'] = Uint8List.fromList([1]);
-      storage.bytes['other'] = Uint8List.fromList([2]);
-      final gate = storage.downloadGate('shared');
-      final hub = BlobTransferHub(inner: storage);
-      addTearDown(hub.dispose);
+    test(
+      'an id already in flight joins its call instead of opening another',
+      () async {
+        // Dedup is the hub's other job and grouping must not cost it: a second
+        // caller wanting a blob someone is already fetching still waits on that
+        // fetch.
+        final storage = _ControllableStorage();
+        storage.bytes['shared'] = Uint8List.fromList([1]);
+        storage.bytes['other'] = Uint8List.fromList([2]);
+        final gate = storage.downloadGate('shared');
+        final hub = BlobTransferHub(inner: storage);
+        addTearDown(hub.dispose);
 
-      final first = hub.download(['shared']);
-      await Future<void>.delayed(Duration.zero);
-      expect(storage.downloadCalls, 1);
+        final first = hub.download(['shared']);
+        await Future<void>.delayed(Duration.zero);
+        expect(storage.downloadCalls, 1);
 
-      // 'shared' joins the in-flight call; only 'other' is new.
-      final second = hub.download(['shared', 'other']);
-      await Future<void>.delayed(Duration.zero);
-      expect(storage.downloadCalls, 2,
-          reason: 'one more call for the fresh id, not for the joined one');
+        // 'shared' joins the in-flight call; only 'other' is new.
+        final second = hub.download(['shared', 'other']);
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          storage.downloadCalls,
+          2,
+          reason: 'one more call for the fresh id, not for the joined one',
+        );
 
-      gate.complete();
-      expect((await first)['shared'], isNotNull);
-      expect((await second).keys.toSet(), {'shared', 'other'});
-    });
+        gate.complete();
+        expect((await first)['shared'], isNotNull);
+        expect((await second).keys.toSet(), {'shared', 'other'});
+      },
+    );
 
     test('one caller walking away does not cancel its neighbours in the '
         'same call', () async {
@@ -351,83 +369,96 @@ void main() {
 
       // A second caller asks for one of them and immediately gives up.
       final leaving = RpcCancellationToken();
-      final abandoned = hub.download(
-        ['leave'],
-        context: RpcContext.withCancellation(leaving),
-      );
+      final abandoned = hub.download([
+        'leave',
+      ], context: RpcContext.withCancellation(leaving));
       leaving.cancel('gone');
       await abandoned.then((_) {}, onError: (_) {});
       await Future<void>.delayed(Duration.zero);
 
       gate.complete();
       final got = await staying;
-      expect(got.keys.toSet(), {'keep', 'leave'},
-          reason: 'the caller that stayed must still get everything it asked '
-              'for, including the id the other one abandoned');
+      expect(
+        got.keys.toSet(),
+        {'keep', 'leave'},
+        reason:
+            'the caller that stayed must still get everything it asked '
+            'for, including the id the other one abandoned',
+      );
     });
 
-    test('a rejoined upload is not cancelled when the OTHER ids leave',
-        () async {
-      // The batch used to count live tasks down, decrementing whenever a task
-      // reached zero subscribers. But a task stays in the map until it
-      // completes, so it can be joined again afterwards — and then reach zero
-      // a second time, decrementing twice for one slot. The count hits zero
-      // while somebody is still waiting, and their upload is cancelled.
-      //
-      // Reaching it needs three callers: one to put both ids in a batch, one
-      // to keep the second id alive while the first drops to zero, and one to
-      // rejoin the first.
-      final storage = _ControllableStorage();
-      final gate = storage.uploadGate('a'); // keeps the call in flight
-      final hub = BlobTransferHub(inner: storage);
-      addTearDown(hub.dispose);
+    test(
+      'a rejoined upload is not cancelled when the OTHER ids leave',
+      () async {
+        // The batch used to count live tasks down, decrementing whenever a task
+        // reached zero subscribers. But a task stays in the map until it
+        // completes, so it can be joined again afterwards — and then reach zero
+        // a second time, decrementing twice for one slot. The count hits zero
+        // while somebody is still waiting, and their upload is cancelled.
+        //
+        // Reaching it needs three callers: one to put both ids in a batch, one
+        // to keep the second id alive while the first drops to zero, and one to
+        // rejoin the first.
+        final storage = _ControllableStorage();
+        final gate = storage.uploadGate('a'); // keeps the call in flight
+        final hub = BlobTransferHub(inner: storage);
+        addTearDown(hub.dispose);
 
-      final bytesA = Uint8List.fromList([1]);
-      final bytesB = Uint8List.fromList([2]);
+        final bytesA = Uint8List.fromList([1]);
+        final bytesB = Uint8List.fromList([2]);
 
-      final tokenX = RpcCancellationToken();
-      final x = hub.upload(
-        [(bytesA, 'a'), (bytesB, 'b')],
-        context: RpcContext.withCancellation(tokenX),
-      );
-      await Future<void>.delayed(Duration.zero);
+        final tokenX = RpcCancellationToken();
+        final x = hub.upload([
+          (bytesA, 'a'),
+          (bytesB, 'b'),
+        ], context: RpcContext.withCancellation(tokenX));
+        await Future<void>.delayed(Duration.zero);
 
-      // W keeps 'b' subscribed, so X leaving cannot take the batch down.
-      final tokenW = RpcCancellationToken();
-      final w = hub.upload(
-        [(bytesB, 'b')],
-        context: RpcContext.withCancellation(tokenW),
-      );
-      await Future<void>.delayed(Duration.zero);
+        // W keeps 'b' subscribed, so X leaving cannot take the batch down.
+        final tokenW = RpcCancellationToken();
+        final w = hub.upload([
+          (bytesB, 'b'),
+        ], context: RpcContext.withCancellation(tokenW));
+        await Future<void>.delayed(Duration.zero);
 
-      // X goes: 'a' reaches zero subscribers (one decrement), 'b' does not.
-      tokenX.cancel('gone');
-      await x.then((_) {}, onError: (_) {});
-      await Future<void>.delayed(Duration.zero);
+        // X goes: 'a' reaches zero subscribers (one decrement), 'b' does not.
+        tokenX.cancel('gone');
+        await x.then((_) {}, onError: (_) {});
+        await Future<void>.delayed(Duration.zero);
 
-      // Z comes back for 'a'. Invisible to a counter already decremented.
-      final z = hub.upload([(bytesA, 'a')]);
-      await Future<void>.delayed(Duration.zero);
+        // Z comes back for 'a'. Invisible to a counter already decremented.
+        final z = hub.upload([(bytesA, 'a')]);
+        await Future<void>.delayed(Duration.zero);
 
-      // W goes: 'b' reaches zero. Under the counter that is the second
-      // decrement of a two-slot batch — cancel, with Z still waiting.
-      tokenW.cancel('gone');
-      await w.then((_) {}, onError: (_) {});
-      await Future<void>.delayed(Duration.zero);
+        // W goes: 'b' reaches zero. Under the counter that is the second
+        // decrement of a two-slot batch — cancel, with Z still waiting.
+        tokenW.cancel('gone');
+        await w.then((_) {}, onError: (_) {});
+        await Future<void>.delayed(Duration.zero);
 
-      gate.complete();
-      await z;
-      expect(storage.bytes['a'], isNotNull,
-          reason: 'Z was waiting on this upload and nothing had a right to '
-              'cancel it');
-    });
+        gate.complete();
+        await z;
+        expect(
+          storage.bytes['a'],
+          isNotNull,
+          reason:
+              'Z was waiting on this upload and nothing had a right to '
+              'cancel it',
+        );
+      },
+    );
 
     test('disposed hub rejects new calls', () async {
       final hub = BlobTransferHub(inner: _ControllableStorage());
       hub.dispose();
-      expect(() => hub.download(['x']), throwsStateError);
-      expect(() => hub.upload([(Uint8List(0), 'x')]), throwsStateError);
-      expect(() => hub.deleteMany(['x']), throwsStateError);
+      // A distinct type, not a StateError: callers need to tell "the session
+      // that owned this hub is gone" from a transient failure, and the startup
+      // diff decides whether to abort on exactly that. Matching a message
+      // string instead would be one rewording away from grinding on.
+      const disposed = TypeMatcher<BlobTransferHubDisposed>();
+      expect(() => hub.download(['x']), throwsA(disposed));
+      expect(() => hub.upload([(Uint8List(0), 'x')]), throwsA(disposed));
+      expect(() => hub.deleteMany(['x']), throwsA(disposed));
     });
   });
 }

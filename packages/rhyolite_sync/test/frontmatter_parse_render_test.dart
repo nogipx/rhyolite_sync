@@ -56,13 +56,18 @@ void main() {
     test('flat scalars and block lists are placed', () {
       final d = region('created: 2026-08-03\ntags:\n  - work\n  - home\n');
       expect((d as FmMap).entries.map((e) => e.key), ['created', 'tags']);
-      expect(entryOf(d, 'created').value, const FmScalar(ScalarKind.date, '2026-08-03'));
+      expect(
+        entryOf(d, 'created').value,
+        const FmScalar(ScalarKind.date, '2026-08-03'),
+      );
       expect(entryOf(d, 'tags').value, const FmList(['work', 'home']));
     });
 
     test('a flow list is the same ListVal as the block form', () {
-      expect(entryOf(region('tags: [work, home]\n'), 'tags').value,
-          const FmList(['work', 'home']));
+      expect(
+        entryOf(region('tags: [work, home]\n'), 'tags').value,
+        const FmList(['work', 'home']),
+      );
     });
 
     test('the six property types are told apart', () {
@@ -74,14 +79,23 @@ void main() {
       expect(entryOf(d, 'b').value, const FmScalar(ScalarKind.number, '42'));
       expect(entryOf(d, 'c').value, const FmScalar(ScalarKind.number, '1.5'));
       expect(entryOf(d, 'd').value, const FmScalar(ScalarKind.boolean, 'true'));
-      expect(entryOf(d, 'e').value, const FmScalar(ScalarKind.date, '2026-08-03'));
-      expect(entryOf(d, 'f').value,
-          const FmScalar(ScalarKind.datetime, '2026-08-03T06:14'));
+      expect(
+        entryOf(d, 'e').value,
+        const FmScalar(ScalarKind.date, '2026-08-03'),
+      );
+      expect(
+        entryOf(d, 'f').value,
+        const FmScalar(ScalarKind.datetime, '2026-08-03T06:14'),
+      );
     });
 
     test('keys may be quoted, spaced, Cyrillic or hold a colon', () {
       final d = region('"my key": a\nкнига: б\n"a: b": c\n');
-      expect((d as FmMap).entries.map((e) => e.key), ['my key', 'книга', 'a: b']);
+      expect((d as FmMap).entries.map((e) => e.key), [
+        'my key',
+        'книга',
+        'a: b',
+      ]);
     });
 
     test('an empty value keeps the kind it already had', () {
@@ -98,20 +112,22 @@ void main() {
       expect(entryOf(d, 'z').value, const FmScalar(ScalarKind.number, '2'));
     });
 
-    test('multi-line scalars, lists of mappings, anchors and tags are Opaque',
-        () {
-      for (final src in [
-        'k: |\n  line one\n  line two\n',
-        'k: >-\n  folded\n',
-        'k:\n  - title: a\n    url: b\n',
-        'k: &anchor value\n',
-        'k: *alias\n',
-        'k: !!str 5\n',
-        'k: {a: 1}\n',
-      ]) {
-        expect(entryOf(region(src), 'k').value, isA<FmOpaque>(), reason: src);
-      }
-    });
+    test(
+      'multi-line scalars, lists of mappings, anchors and tags are Opaque',
+      () {
+        for (final src in [
+          'k: |\n  line one\n  line two\n',
+          'k: >-\n  folded\n',
+          'k:\n  - title: a\n    url: b\n',
+          'k: &anchor value\n',
+          'k: *alias\n',
+          'k: !!str 5\n',
+          'k: {a: 1}\n',
+        ]) {
+          expect(entryOf(region(src), 'k').value, isA<FmOpaque>(), reason: src);
+        }
+      },
+    );
 
     test('an inline comment makes the value Opaque rather than losing it', () {
       final d = region('status: draft   # TODO убрать\nnext: 1\n');
@@ -143,8 +159,10 @@ void main() {
         'related:\n  - "[[2026-07-31]]"\nrelated:\n  - "[[2026-07-27]]"\n',
       );
       expect((d as FmMap).entries, hasLength(1));
-      expect(entryOf(d, 'related').value,
-          const FmList(['[[2026-07-31]]', '[[2026-07-27]]']));
+      expect(
+        entryOf(d, 'related').value,
+        const FmList(['[[2026-07-31]]', '[[2026-07-27]]']),
+      );
     });
 
     test('two scalars under one key are last-wins by file order', () {
@@ -159,15 +177,21 @@ void main() {
 
     test('text that would read back as another kind is quoted', () {
       for (final text in ['true', 'false', '42', '1.5', '2026-08-03', '007']) {
-        expect(rendered(FmScalar(ScalarKind.text, text)), 'k: "$text"\n',
-            reason: text);
+        expect(
+          rendered(FmScalar(ScalarKind.text, text)),
+          'k: "$text"\n',
+          reason: text,
+        );
       }
     });
 
     test('values ambiguous across YAML versions are quoted', () {
       for (final text in ['yes', 'no', 'on', 'off', 'null', '~']) {
-        expect(rendered(FmScalar(ScalarKind.text, text)), 'k: "$text"\n',
-            reason: text);
+        expect(
+          rendered(FmScalar(ScalarKind.text, text)),
+          'k: "$text"\n',
+          reason: text,
+        );
       }
     });
 
@@ -177,17 +201,36 @@ void main() {
     });
 
     test('punctuation, colons, comments and stray spaces are quoted', () {
-      for (final text in ['[a]', '{a}', '#tag', 'a: b', 'a #c', ' pad', 'pad ',
-        '*ref', '&anc', '@x', 'a:']) {
-        expect(rendered(FmScalar(ScalarKind.text, text)), 'k: "$text"\n',
-            reason: text);
+      for (final text in [
+        '[a]',
+        '{a}',
+        '#tag',
+        'a: b',
+        'a #c',
+        ' pad',
+        'pad ',
+        '*ref',
+        '&anc',
+        '@x',
+        'a:',
+      ]) {
+        expect(
+          rendered(FmScalar(ScalarKind.text, text)),
+          'k: "$text"\n',
+          reason: text,
+        );
       }
     });
 
     test('ordinary text and wikilinks stay bare', () {
-      expect(rendered(const FmScalar(ScalarKind.text, 'hello world')),
-          'k: hello world\n');
-      expect(rendered(const FmScalar(ScalarKind.text, 'Привет')), 'k: Привет\n');
+      expect(
+        rendered(const FmScalar(ScalarKind.text, 'hello world')),
+        'k: hello world\n',
+      );
+      expect(
+        rendered(const FmScalar(ScalarKind.text, 'Привет')),
+        'k: Привет\n',
+      );
     });
 
     test('a real number stays bare — quoting it would change its type', () {
@@ -196,8 +239,10 @@ void main() {
     });
 
     test('a list always renders block, whatever it was parsed from', () {
-      expect(rendered(const FmList(['work', 'home'])),
-          'k:\n  - work\n  - home\n');
+      expect(
+        rendered(const FmList(['work', 'home'])),
+        'k:\n  - work\n  - home\n',
+      );
     });
 
     test('a wikilink item is quoted because [ opens a construct', () {

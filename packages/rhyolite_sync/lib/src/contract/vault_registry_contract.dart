@@ -40,11 +40,11 @@ class VaultRegistryEntry implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'vaultName': vaultName,
-        if (verificationToken != null) 'verificationToken': verificationToken,
-        if (deletedAt != null) 'deletedAt': deletedAt,
-      };
+    'vaultId': vaultId,
+    'vaultName': vaultName,
+    if (verificationToken != null) 'verificationToken': verificationToken,
+    if (deletedAt != null) 'deletedAt': deletedAt,
+  };
 }
 
 class ListVaultsRequest implements IRpcSerializable {
@@ -65,16 +65,18 @@ class ListVaultsResponse implements IRpcSerializable {
   factory ListVaultsResponse.fromJson(Map<String, dynamic> json) =>
       ListVaultsResponse(
         vaults: ((json['vaults'] as List?) ?? const [])
-            .map((e) => VaultRegistryEntry.fromJson(
-                  Map<String, dynamic>.from(e as Map),
-                ))
+            .map(
+              (e) => VaultRegistryEntry.fromJson(
+                Map<String, dynamic>.from(e as Map),
+              ),
+            )
             .toList(),
       );
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaults': vaults.map((v) => v.toJson()).toList(),
-      };
+    'vaults': vaults.map((v) => v.toJson()).toList(),
+  };
 }
 
 class CreateVaultRequest implements IRpcSerializable {
@@ -97,10 +99,10 @@ class CreateVaultRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'vaultName': vaultName,
-        if (verificationToken != null) 'verificationToken': verificationToken,
-      };
+    'vaultId': vaultId,
+    'vaultName': vaultName,
+    if (verificationToken != null) 'verificationToken': verificationToken,
+  };
 }
 
 class UpdateVaultTokenRequest implements IRpcSerializable {
@@ -120,9 +122,9 @@ class UpdateVaultTokenRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'verificationToken': verificationToken,
-      };
+    'vaultId': vaultId,
+    'verificationToken': verificationToken,
+  };
 }
 
 class VaultMetaRequest implements IRpcSerializable {
@@ -148,8 +150,8 @@ class VaultMetaResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        if (encryptedMeta != null) 'encryptedMeta': encryptedMeta,
-      };
+    if (encryptedMeta != null) 'encryptedMeta': encryptedMeta,
+  };
 }
 
 class SetVaultMetaRequest implements IRpcSerializable {
@@ -169,9 +171,9 @@ class SetVaultMetaRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'encryptedMeta': encryptedMeta,
-      };
+    'vaultId': vaultId,
+    'encryptedMeta': encryptedMeta,
+  };
 }
 
 class VaultAck implements IRpcSerializable {
@@ -203,7 +205,10 @@ class DeleteVaultRequest implements IRpcSerializable {
 /// Self-host vault registry + encrypted meta storage, served by the sync
 /// server directly (no account service). Managed deployments don't register a
 /// responder for this — their vault list comes from the account service.
-@RpcService(name: 'RhyoliteVaultRegistry', transferMode: RpcDataTransferMode.codec)
+@RpcService(
+  name: 'RhyoliteVaultRegistry',
+  transferMode: RpcDataTransferMode.codec,
+)
 abstract class IVaultRegistryContract {
   @RpcMethod.unary(name: 'listVaults')
   Future<ListVaultsResponse> listVaults(

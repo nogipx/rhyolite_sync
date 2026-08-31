@@ -19,7 +19,10 @@ import 'fugue_store.dart';
 /// backup restore and the backup diff view all go through it, so none of them
 /// ever writes/shows the raw `\0fg1` serialization.
 Uint8List? materializeFileContent(Uint8List bytes, String path) {
-  switch (classifyBlob(bytes, isTextPath: const FileTypeDetector().isText(path))) {
+  switch (classifyBlob(
+    bytes,
+    isTextPath: const FileTypeDetector().isText(path),
+  )) {
     case BlobKind.fugue:
       // Non-null by construction — classifyBlob got `fugue` from this decode.
       final fugue = FugueStore.tryDecodeBlob(bytes)!;

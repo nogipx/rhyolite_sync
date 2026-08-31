@@ -27,8 +27,7 @@ void main() {
 
   // "Byte-identical" is checked through the deterministic wire codec — Fugue
   // (unlike the old Sequence) intentionally has no value `==`.
-  Matcher bytesOf(Fugue<String> f) =>
-      equals(FugueStore.encodeBlob(f).toList());
+  Matcher bytesOf(Fugue<String> f) => equals(FugueStore.encodeBlob(f).toList());
   List<int> bytes(Fugue<String> f) => FugueStore.encodeBlob(f).toList();
 
   group('FugueTextSync.seedFromText', () {
@@ -78,14 +77,20 @@ void main() {
       expect(identical(after, s), isTrue);
     });
 
-    test('a real edit returns a fresh instance (not the same object)',
-        () async {
-      final s = seed('hello');
-      final after = await applyText(s, 'hellp', clockOf('A'));
-      expect(identical(after, s), isFalse,
-          reason: 'a changed tree must be a new instance for the identical() '
-              'short-circuit in the reconciler to work');
-    });
+    test(
+      'a real edit returns a fresh instance (not the same object)',
+      () async {
+        final s = seed('hello');
+        final after = await applyText(s, 'hellp', clockOf('A'));
+        expect(
+          identical(after, s),
+          isFalse,
+          reason:
+              'a changed tree must be a new instance for the identical() '
+              'short-circuit in the reconciler to work',
+        );
+      },
+    );
 
     test('insert into empty', () async {
       final after = await applyText(Fugue<String>(), 'hello', clockOf('A'));
@@ -96,8 +101,11 @@ void main() {
       final after = await applyText(seed('hello'), '', clockOf('A'));
       expect(after.values.join(), '');
       expect(after.length, 0);
-      expect(after.elementCount, greaterThan(0),
-          reason: 'tombstones remain so the delete converges with peers');
+      expect(
+        after.elementCount,
+        greaterThan(0),
+        reason: 'tombstones remain so the delete converges with peers',
+      );
     });
 
     test('append at tail', () async {
@@ -116,22 +124,31 @@ void main() {
     });
 
     test('replace a word with a different one', () async {
-      final after =
-          await applyText(seed('hello world'), 'hello there', clockOf('A'));
+      final after = await applyText(
+        seed('hello world'),
+        'hello there',
+        clockOf('A'),
+      );
       expect(after.values.join(), 'hello there');
     });
 
     test('delete a middle slice', () async {
       final after = await applyText(
-          seed('hello beautiful world'), 'hello world', clockOf('A'));
+        seed('hello beautiful world'),
+        'hello world',
+        clockOf('A'),
+      );
       expect(after.values.join(), 'hello world');
     });
   });
 
   group('FugueTextSync.applyTextSnapshot — unicode', () {
     test('cyrillic edit', () async {
-      final after =
-          await applyText(seed('привет'), 'привет, мир', clockOf('A'));
+      final after = await applyText(
+        seed('привет'),
+        'привет, мир',
+        clockOf('A'),
+      );
       expect(after.values.join(), 'привет, мир');
     });
 
@@ -146,41 +163,56 @@ void main() {
       final clk = clockOf('A');
       var s = Fugue<String>();
       const snapshots = [
-        'h', 'he', 'hel', 'hell', 'hello', 'hello!', 'hello world',
-        'hello world!', 'hello there world!', 'hello there world',
+        'h',
+        'he',
+        'hel',
+        'hell',
+        'hello',
+        'hello!',
+        'hello world',
+        'hello world!',
+        'hello there world!',
+        'hello there world',
         'hi there world',
       ];
       for (final snap in snapshots) {
         s = await applyText(s, snap, clk);
-        expect(s.values.join(), snap,
-            reason: 'projection diverges after snapshot=$snap');
+        expect(
+          s.values.join(),
+          snap,
+          reason: 'projection diverges after snapshot=$snap',
+        );
       }
     });
 
-    test('tombstones survive the diff loop without affecting projection',
-        () async {
-      final clk = clockOf('A');
-      var s = seed('hello world');
-      s = await applyText(s, 'hello', clk);
-      s = await applyText(s, 'hi', clk);
-      expect(s.values.join(), 'hi');
-      // Structure must still carry enough metadata to converge with a peer
-      // that hasn't seen the deletions yet.
-      expect(s.elementCount, greaterThan(2));
-    });
+    test(
+      'tombstones survive the diff loop without affecting projection',
+      () async {
+        final clk = clockOf('A');
+        var s = seed('hello world');
+        s = await applyText(s, 'hello', clk);
+        s = await applyText(s, 'hi', clk);
+        expect(s.values.join(), 'hi');
+        // Structure must still carry enough metadata to converge with a peer
+        // that hasn't seen the deletions yet.
+        expect(s.elementCount, greaterThan(2));
+      },
+    );
 
-    test('a whole-file reconcile round-trips through the binary codec',
-        () async {
-      const text = '# Title\n\nA paragraph, then another line.\nDone.';
-      final clk = clockOf('A');
-      final tree = await applyText(Fugue<String>(), text, clk);
-      // The projection is the disk text…
-      expect(tree.values.join(), text);
-      // …and it survives a serialize → deserialize round-trip unchanged.
-      final restored = FugueStore.tryDecodeBlob(FugueStore.encodeBlob(tree));
-      expect(restored, isNotNull);
-      expect(restored!.values.join(), text);
-    });
+    test(
+      'a whole-file reconcile round-trips through the binary codec',
+      () async {
+        const text = '# Title\n\nA paragraph, then another line.\nDone.';
+        final clk = clockOf('A');
+        final tree = await applyText(Fugue<String>(), text, clk);
+        // The projection is the disk text…
+        expect(tree.values.join(), text);
+        // …and it survives a serialize → deserialize round-trip unchanged.
+        final restored = FugueStore.tryDecodeBlob(FugueStore.encodeBlob(tree));
+        expect(restored, isNotNull);
+        expect(restored!.values.join(), text);
+      },
+    );
   });
 
   group('FugueTextSync.applyTextSnapshot — clock dominance (observe)', () {
@@ -188,32 +220,41 @@ void main() {
     // land at the requested visible index. `observe` is what makes the fresh
     // dot dominate the (higher-counter) existing content; without it the
     // insert can be misordered across the tree.
-    test('edit against peer-ahead content lands at the requested index',
-        () async {
-      // Peer B seeded + typed a lot, so its dots carry high counters.
-      final peer = clockOf('B');
-      var remote = await applyText(Fugue<String>(), 'abcdef', peer);
-      for (var i = 0; i < 50; i++) {
-        remote = await applyText(remote, 'abcdef${'!' * (i + 1)}', peer);
-      }
-      // Local device pulls that tree and inserts 'X' at index 3.
-      final local = clockOf('A');
-      local.observeAll(remote.dots);
-      final before = remote.values.join();
-      final target = '${before.substring(0, 3)}X${before.substring(3)}';
-      final edited = await FugueTextSync.applyTextSnapshot(
-        oldFugue: remote,
-        newText: target,
-        clock: local,
-      );
-      expect(edited.values.join(), target,
-          reason: 'the inserted char must land exactly at index 3');
-      // The minted dot must dominate everything it was inserted next to.
-      final maxExisting =
-          remote.dots.map((d) => d.counter).fold<int>(0, (a, b) => a > b ? a : b);
-      expect(local.value, greaterThan(maxExisting),
-          reason: 'observe must lift the clock above peer-ahead counters');
-    });
+    test(
+      'edit against peer-ahead content lands at the requested index',
+      () async {
+        // Peer B seeded + typed a lot, so its dots carry high counters.
+        final peer = clockOf('B');
+        var remote = await applyText(Fugue<String>(), 'abcdef', peer);
+        for (var i = 0; i < 50; i++) {
+          remote = await applyText(remote, 'abcdef${'!' * (i + 1)}', peer);
+        }
+        // Local device pulls that tree and inserts 'X' at index 3.
+        final local = clockOf('A');
+        local.observeAll(remote.dots);
+        final before = remote.values.join();
+        final target = '${before.substring(0, 3)}X${before.substring(3)}';
+        final edited = await FugueTextSync.applyTextSnapshot(
+          oldFugue: remote,
+          newText: target,
+          clock: local,
+        );
+        expect(
+          edited.values.join(),
+          target,
+          reason: 'the inserted char must land exactly at index 3',
+        );
+        // The minted dot must dominate everything it was inserted next to.
+        final maxExisting = remote.dots
+            .map((d) => d.counter)
+            .fold<int>(0, (a, b) => a > b ? a : b);
+        expect(
+          local.value,
+          greaterThan(maxExisting),
+          reason: 'observe must lift the clock above peer-ahead counters',
+        );
+      },
+    );
   });
 
   group('FugueTextSync.applyTextSnapshot — large offline edit', () {
@@ -222,19 +263,24 @@ void main() {
     // became "a shorter fresh seed" instead of a tombstone, and a concurrent
     // char-join resurrected the deleted text. A deadline-bounded diff keeps
     // the deletion as a real tombstone, so the merge honours it.
-    test('a large deletion stays a tombstone and is not resurrected on merge',
-        () async {
-      // Big enough to have tripped the old budget ((old+new)*|Δlen| > 5e6):
-      // 4000 -> 2000 chars ≈ 12e6.
-      final baseText = 'x' * 2000 + 'y' * 2000;
-      final base = seed(baseText); // peer B keeps this untouched
-      // Device A deletes the whole 'y' half offline.
-      final a = await applyText(base.clone(), 'x' * 2000, clockOf('A'));
-      expect(a.values.join(), 'x' * 2000);
-      // Merging A's deletion with B's untouched copy must keep it deleted.
-      expect(a.join(base).values.join(), 'x' * 2000,
-          reason: 'a large deletion must survive the merge, not resurrect');
-    });
+    test(
+      'a large deletion stays a tombstone and is not resurrected on merge',
+      () async {
+        // Big enough to have tripped the old budget ((old+new)*|Δlen| > 5e6):
+        // 4000 -> 2000 chars ≈ 12e6.
+        final baseText = 'x' * 2000 + 'y' * 2000;
+        final base = seed(baseText); // peer B keeps this untouched
+        // Device A deletes the whole 'y' half offline.
+        final a = await applyText(base.clone(), 'x' * 2000, clockOf('A'));
+        expect(a.values.join(), 'x' * 2000);
+        // Merging A's deletion with B's untouched copy must keep it deleted.
+        expect(
+          a.join(base).values.join(),
+          'x' * 2000,
+          reason: 'a large deletion must survive the merge, not resurrect',
+        );
+      },
+    );
 
     test('a large edit still round-trips to the new text', () async {
       final base = seed('a' * 3000);
@@ -244,21 +290,26 @@ void main() {
   });
 
   group('FugueTextSync.applyTextSnapshot — convergence', () {
-    test('two devices typing concurrently on top of a shared base merge',
-        () async {
-      final base = seed('hello world');
-      final a = await applyText(base.clone(), 'hello beautiful world',
-          clockOf('A'));
-      final b = await applyText(base.clone(), 'hello world!', clockOf('B'));
-      final merged = a.join(b);
-      final out = merged.values.join();
-      expect(out.contains('hello'), isTrue);
-      expect(out.contains('beautiful'), isTrue);
-      expect(out.contains('world'), isTrue);
-      expect(out.contains('!'), isTrue);
-      // Symmetric merge produces the same projection.
-      expect(b.join(a).values.join(), out);
-    });
+    test(
+      'two devices typing concurrently on top of a shared base merge',
+      () async {
+        final base = seed('hello world');
+        final a = await applyText(
+          base.clone(),
+          'hello beautiful world',
+          clockOf('A'),
+        );
+        final b = await applyText(base.clone(), 'hello world!', clockOf('B'));
+        final merged = a.join(b);
+        final out = merged.values.join();
+        expect(out.contains('hello'), isTrue);
+        expect(out.contains('beautiful'), isTrue);
+        expect(out.contains('world'), isTrue);
+        expect(out.contains('!'), isTrue);
+        // Symmetric merge produces the same projection.
+        expect(b.join(a).values.join(), out);
+      },
+    );
 
     // Regression guard: the content-duplication bug observed on local-DB wipe
     // (2026-06-04). Two devices independently first-seed the SAME plain text
@@ -266,28 +317,33 @@ void main() {
     // device-local dots, the two trees would have disjoint histories and a
     // later `join` would concatenate them (`text + text`). The fix routes the
     // empty case through the deterministic [seedFromText].
-    test(
-      'two devices independently first-seeding the same text converge '
-      '(regression: post-wipe content duplication)',
-      () async {
-        const text =
-            '# Заметка\n\nКонтент который существует на обоих устройствах '
-            'одинаково. Если CRDT не сходится, после wipe всё удвоится.';
-        final a = await applyText(Fugue<String>(), text, clockOf('A'));
-        final b = await applyText(Fugue<String>(), text, clockOf('B'));
+    test('two devices independently first-seeding the same text converge '
+        '(regression: post-wipe content duplication)', () async {
+      const text =
+          '# Заметка\n\nКонтент который существует на обоих устройствах '
+          'одинаково. Если CRDT не сходится, после wipe всё удвоится.';
+      final a = await applyText(Fugue<String>(), text, clockOf('A'));
+      final b = await applyText(Fugue<String>(), text, clockOf('B'));
 
-        // Independent seeds of identical text must be byte-identical.
-        expect(bytes(a), bytesOf(b),
-            reason: 'independent first-seeds of the same text must produce '
-                'identical trees (otherwise the join below duplicates)');
+      // Independent seeds of identical text must be byte-identical.
+      expect(
+        bytes(a),
+        bytesOf(b),
+        reason:
+            'independent first-seeds of the same text must produce '
+            'identical trees (otherwise the join below duplicates)',
+      );
 
-        // The user-visible check: joining the two seeds must NOT double.
-        final merged = a.join(b);
-        expect(merged.values.join(), text,
-            reason: 'CRDT join of two first-seeds must project to the '
-                'original text, not text+text');
-        expect(b.join(a).values.join(), text);
-      },
-    );
+      // The user-visible check: joining the two seeds must NOT double.
+      final merged = a.join(b);
+      expect(
+        merged.values.join(),
+        text,
+        reason:
+            'CRDT join of two first-seeds must project to the '
+            'original text, not text+text',
+      );
+      expect(b.join(a).values.join(), text);
+    });
   });
 }

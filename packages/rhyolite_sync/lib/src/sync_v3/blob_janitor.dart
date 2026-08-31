@@ -55,8 +55,9 @@ class BlobJanitor {
   /// marker is no longer needed (content stays recoverable via history / restore
   /// points). Server-authoritative (it reads device heads itself). [dryRun]
   /// (default) only reports; pass false to delete. Null when not connected.
-  Future<SweepStableTombstonesResponse?> sweepStableTombstones(
-      {bool dryRun = true}) async {
+  Future<SweepStableTombstonesResponse?> sweepStableTombstones({
+    bool dryRun = true,
+  }) async {
     final caller = maintenanceCaller;
     if (caller == null) return null;
     return caller.sweepStableTombstones(

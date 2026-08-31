@@ -1267,6 +1267,7 @@ class SyncPanel {
         SyncStartBlock.noVault => S.blockedNoVaultHint,
         SyncStartBlock.locked => S.blockedLockedHint,
         SyncStartBlock.noServer => S.blockedNoServerHint,
+        SyncStartBlock.storageRefused => S.blockedStorageRefusedHint,
         null => '',
       };
     } else {
@@ -1573,6 +1574,7 @@ class SyncPanel {
   static String _blockAction(SyncStartBlock block) => switch (block) {
     SyncStartBlock.signedOut => S.signInButton,
     SyncStartBlock.noVault => S.connectVaultButton,
+    SyncStartBlock.storageRefused => S.blockedStorageRefusedAction,
     SyncStartBlock.locked => S.unlock,
     SyncStartBlock.noServer => S.settingsButton,
   };
@@ -1582,6 +1584,7 @@ class SyncPanel {
     SyncStartBlock.noVault => 'database',
     SyncStartBlock.locked => 'key',
     SyncStartBlock.noServer => 'settings',
+    SyncStartBlock.storageRefused => 'cloud-off',
   };
 
   /// The primary button is one element whose meaning follows the status, so the
@@ -1624,6 +1627,9 @@ class SyncPanel {
       SyncStartBlock.noVault => _onConnectVault,
       SyncStartBlock.locked => _onUnlock,
       SyncStartBlock.noServer => null,
+      // Straight to settings: the credentials are what has to change, and no
+      // shorter path exists.
+      SyncStartBlock.storageRefused => null,
     };
     if (direct == null) {
       _onOpenSettings();
@@ -1870,6 +1876,7 @@ class SyncPanel {
       SyncStartBlock.noVault => S.blockedNoVault,
       SyncStartBlock.locked => S.blockedLocked,
       SyncStartBlock.noServer => S.blockedNoServer,
+      SyncStartBlock.storageRefused => S.blockedStorageRefused,
       null => S.syncStopped,
     },
     _Status.connecting => _connectAttempt <= 2 ? S.connecting : S.reconnecting,
@@ -1963,6 +1970,12 @@ enum SyncStartBlock {
   /// A vault is configured but its key is absent: the passphrase prompt was
   /// dismissed, so nothing can be encrypted or decrypted.
   locked,
+
+  /// The blob backend refused this device — wrong credentials, or no
+  /// permission. Nothing retries its way out of it, and until someone changes
+  /// the storage settings every edit is dropped, so it belongs here with the
+  /// other missing preconditions rather than in an error that scrolls past.
+  storageRefused,
 
   /// Self-host without a usable server URL/token, or a build with no account
   /// service compiled in.

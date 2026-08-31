@@ -1,4 +1,3 @@
-
 /// Renders a parsed frontmatter document back to note bytes.
 ///
 /// The quoting rule is a DEFINITION, not a list of special cases: a value is
@@ -117,8 +116,7 @@ String renderScalar(FmScalar scalar) {
 /// The characters that, in first position, start something other than a plain
 /// scalar: collections, anchors, aliases, tags, block scalars, directives,
 /// comments, quotes, and the reserved `@` and backtick.
-bool _opensAConstruct(String c) =>
-    '[]{}>|*&!%@#,?:-\'"`'.contains(c);
+bool _opensAConstruct(String c) => '[]{}>|*&!%@#,?:-\'"`'.contains(c);
 
 String _quote(String s) {
   final buf = StringBuffer('"');

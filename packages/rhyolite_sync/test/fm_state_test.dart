@@ -46,8 +46,10 @@ void main() {
         final hi = at == keys.length ? null : keys[at];
         final mid = fracIndexBetween(lo, hi);
         expect(isValidFracIndex(mid), isTrue, reason: 'lo=$lo hi=$hi -> $mid');
-        if (lo != null) expect(lo.compareTo(mid) < 0, isTrue, reason: '$lo < $mid');
-        if (hi != null) expect(mid.compareTo(hi) < 0, isTrue, reason: '$mid < $hi');
+        if (lo != null)
+          expect(lo.compareTo(mid) < 0, isTrue, reason: '$lo < $mid');
+        if (hi != null)
+          expect(mid.compareTo(hi) < 0, isTrue, reason: '$mid < $hi');
         keys = [...keys.sublist(0, at), mid, ...keys.sublist(at)];
       }
       final sorted = [...keys]..sort();
@@ -81,7 +83,11 @@ void main() {
     List<FmState> corpus() {
       final a = _Device('device-a');
       final b = _Device('device-b');
-      final base = ingest(emptyMap(a.tick()), 'x: 1\ntags:\n  - work\n', a.tick());
+      final base = ingest(
+        emptyMap(a.tick()),
+        'x: 1\ntags:\n  - work\n',
+        a.tick(),
+      );
       return [
         base,
         ingest(base, 'x: 2\ntags:\n  - work\n', a.tick()),
@@ -152,7 +158,10 @@ void main() {
       final merged = materializeFm(joinFm(onA, onB)) as FmMap;
       expect(merged.entries, hasLength(1), reason: 'one key, not two');
       final items = (merged.entries.single.value as FmList).items;
-      expect(items, containsAll(['[[2026-07-01]]', '[[2026-07-31]]', '[[2026-07-27]]']));
+      expect(
+        items,
+        containsAll(['[[2026-07-01]]', '[[2026-07-31]]', '[[2026-07-27]]']),
+      );
       expect(items, hasLength(3));
     });
 
@@ -186,7 +195,11 @@ void main() {
         a.tick(),
       );
       final deleted = ingest(base, 'y: 2\nz: 3\n', a.tick());
-      final readded = ingest(deleted, '# about x\nx: 9\ny: 2\nz: 3\n', a.tick());
+      final readded = ingest(
+        deleted,
+        '# about x\nx: 9\ny: 2\nz: 3\n',
+        a.tick(),
+      );
 
       final doc = materializeFm(readded) as FmMap;
       expect(doc.entries.map((e) => e.key), ['x', 'y', 'z']);
@@ -250,8 +263,11 @@ void main() {
     test('returns the same instance when there is nothing to reclaim', () {
       final a = _Device('a');
       final clean = ingest(emptyMap(a.tick()), 'x: 1\n', a.tick());
-      expect(identical(pruneFmTombstones(clean), clean), isTrue,
-          reason: 'callers use identity to skip a pointless write');
+      expect(
+        identical(pruneFmTombstones(clean), clean),
+        isTrue,
+        reason: 'callers use identity to skip a pointless write',
+      );
     });
 
     test('pruning too early resurrects — which is why the caller gates it', () {
@@ -262,8 +278,11 @@ void main() {
       final base = ingest(emptyMap(a.tick()), 'x: 1\n', a.tick());
       final deleted = ingest(base, '', a.tick());
 
-      expect((materializeFm(joinFm(deleted, base)) as FmMap).entries, isEmpty,
-          reason: 'with the tombstone, the delete holds');
+      expect(
+        (materializeFm(joinFm(deleted, base)) as FmMap).entries,
+        isEmpty,
+        reason: 'with the tombstone, the delete holds',
+      );
       expect(
         (materializeFm(joinFm(pruneFmTombstones(deleted), base)) as FmMap)
             .entries,
@@ -273,7 +292,10 @@ void main() {
     });
 
     test('a RawFm has nothing to reclaim', () {
-      final raw = FmRawState(tree: seedFugueText('- list\n'), fmHlc: _Device('a').tick());
+      final raw = FmRawState(
+        tree: seedFugueText('- list\n'),
+        fmHlc: _Device('a').tick(),
+      );
       expect(identical(pruneFmTombstones(raw), raw), isTrue);
     });
   });

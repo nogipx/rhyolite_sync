@@ -64,7 +64,9 @@ class NotifyCoordinator {
     _sub = null;
     try {
       _subscriber = NotifySubscriber.endpoint(endpoint);
-      _sub = _subscriber!.subscribe(topic).listen(
+      _sub = _subscriber!
+          .subscribe(topic)
+          .listen(
             (event) {
               _backoff = _minBackoff; // healthy delivery → reset backoff
               onNotify(event.payload['sourceClientId'] as String?);

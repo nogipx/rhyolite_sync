@@ -50,16 +50,15 @@ class FileState {
     Hlc? hlc,
     bool? tombstone,
     List<String>? chunks,
-  }) =>
-      FileState(
-        fileId: fileId,
-        path: path ?? this.path,
-        blobRef: blobRef ?? this.blobRef,
-        sizeBytes: sizeBytes ?? this.sizeBytes,
-        hlc: hlc ?? this.hlc,
-        tombstone: tombstone ?? this.tombstone,
-        chunks: chunks ?? this.chunks,
-      );
+  }) => FileState(
+    fileId: fileId,
+    path: path ?? this.path,
+    blobRef: blobRef ?? this.blobRef,
+    sizeBytes: sizeBytes ?? this.sizeBytes,
+    hlc: hlc ?? this.hlc,
+    tombstone: tombstone ?? this.tombstone,
+    chunks: chunks ?? this.chunks,
+  );
 
   /// Schema version for both the local persisted [toJson] form and the
   /// encrypted [toWirePayload] form. Incremented on any breaking change.
@@ -73,15 +72,15 @@ class FileState {
   static const int schemaVersion = 2;
 
   Map<String, dynamic> toJson() => {
-        'v': schemaVersion,
-        'fileId': fileId,
-        'path': path,
-        'blobRef': blobRef,
-        'sizeBytes': sizeBytes,
-        'hlc': hlc.pack(),
-        if (tombstone) 'tombstone': true,
-        if (chunks.isNotEmpty) 'chunks': chunks,
-      };
+    'v': schemaVersion,
+    'fileId': fileId,
+    'path': path,
+    'blobRef': blobRef,
+    'sizeBytes': sizeBytes,
+    'hlc': hlc.pack(),
+    if (tombstone) 'tombstone': true,
+    if (chunks.isNotEmpty) 'chunks': chunks,
+  };
 
   factory FileState.fromJson(Map<String, dynamic> json) {
     final v = (json['v'] as int?) ?? 1;
@@ -106,12 +105,12 @@ class FileState {
   /// in here because it is sent as a plain field on the wire envelope so
   /// the server can index it for GC.
   Map<String, dynamic> toWirePayload() => {
-        'v': schemaVersion,
-        'path': path,
-        'blobRef': blobRef,
-        'sizeBytes': sizeBytes,
-        if (tombstone) 'tombstone': true,
-      };
+    'v': schemaVersion,
+    'path': path,
+    'blobRef': blobRef,
+    'sizeBytes': sizeBytes,
+    if (tombstone) 'tombstone': true,
+  };
 
   static Map<String, dynamic> wirePayloadFromBytes(List<int> bytes) {
     final json = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
@@ -147,12 +146,12 @@ class FileState {
 
   @override
   int get hashCode => Object.hash(
-        fileId,
-        path,
-        blobRef,
-        sizeBytes,
-        hlc,
-        tombstone,
-        Object.hashAll(chunks),
-      );
+    fileId,
+    path,
+    blobRef,
+    sizeBytes,
+    hlc,
+    tombstone,
+    Object.hashAll(chunks),
+  );
 }

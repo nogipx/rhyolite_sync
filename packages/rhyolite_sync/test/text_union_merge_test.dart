@@ -9,8 +9,7 @@ void main() {
     test('order-independent for two inputs', () {
       const a = 'shared\nalpha';
       const b = 'shared\nbeta';
-      expect(deterministicLineUnion([a, b]),
-          deterministicLineUnion([b, a]));
+      expect(deterministicLineUnion([a, b]), deterministicLineUnion([b, a]));
     });
 
     test('lossless — every line of every input survives', () {
@@ -66,9 +65,13 @@ void main() {
         [c, b, a],
       ];
       final results = perms.map(deterministicLineUnion).toSet();
-      expect(results, hasLength(1),
-          reason: 'every device, whatever order it observed the values, '
-              'must compute the same union: $results');
+      expect(
+        results,
+        hasLength(1),
+        reason:
+            'every device, whatever order it observed the values, '
+            'must compute the same union: $results',
+      );
       // And it is lossless across all three.
       final u = results.single;
       expect(u, contains('from A'));

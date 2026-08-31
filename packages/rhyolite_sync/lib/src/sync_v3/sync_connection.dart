@@ -146,11 +146,10 @@ class WebSocketSyncConnection implements SyncConnection {
   IHistoryContract get historyCaller => _historyCaller!;
 
   @override
-  Stream<SyncConnState> get stateChanges =>
-      _connection!.state.expand((s) {
-        final mapped = _mapState(s);
-        return mapped == null ? const <SyncConnState>[] : [mapped];
-      });
+  Stream<SyncConnState> get stateChanges => _connection!.state.expand((s) {
+    final mapped = _mapState(s);
+    return mapped == null ? const <SyncConnState>[] : [mapped];
+  });
 
   @override
   Future<void> dispose() async {

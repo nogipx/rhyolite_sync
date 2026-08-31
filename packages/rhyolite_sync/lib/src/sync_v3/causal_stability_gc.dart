@@ -247,9 +247,7 @@ class CausalStabilityGc {
     if (heads.isEmpty) return const <String, int>{};
     final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
     final staleMs = staleHeadAge.inMilliseconds;
-    final active = heads
-        .where((h) => nowMs - h.updatedAtMs < staleMs)
-        .toList();
+    final active = heads.where((h) => nowMs - h.updatedAtMs < staleMs).toList();
     if (active.isEmpty) return const <String, int>{};
 
     final vvs = <Map<String, int>>[];

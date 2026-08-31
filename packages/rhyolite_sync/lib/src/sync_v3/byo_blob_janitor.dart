@@ -13,9 +13,9 @@ class ByoSweepPlan {
   /// is too old to classify. Distinct from "found nothing" — the UI must not
   /// report a clean bucket it never managed to read.
   const ByoSweepPlan.unsupported()
-      : totalBlobs = 0,
-        deadBlobIds = const [],
-        unsupported = true;
+    : totalBlobs = 0,
+      deadBlobIds = const [],
+      unsupported = true;
 
   /// Objects seen in the user's bucket under this vault's prefix.
   final int totalBlobs;

@@ -97,9 +97,7 @@ class FileTypeDetector {
   /// conflict-copy keeps both versions intact instead, which is what a drawing
   /// needs. This is a WIRE-FORMAT decision and must stay identical across all
   /// devices and releases.
-  static const _forceBinarySuffixes = <String>{
-    '.excalidraw.md',
-  };
+  static const _forceBinarySuffixes = <String>{'.excalidraw.md'};
 
   bool shouldChunk(String path) {
     if (_isForcedBinary(path)) return true;

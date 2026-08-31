@@ -26,8 +26,7 @@ String deterministicLineUnion(List<String> texts) {
 
   // Canonical order: sort by content hash so union(A,B) == union(B,A) and
   // every device folds in the same sequence.
-  final sorted = [...inputs]
-    ..sort((a, b) => _sha(a).compareTo(_sha(b)));
+  final sorted = [...inputs]..sort((a, b) => _sha(a).compareTo(_sha(b)));
 
   var acc = sorted.first;
   for (var i = 1; i < sorted.length; i++) {
@@ -42,8 +41,7 @@ String deterministicLineUnion(List<String> texts) {
 /// on the LCS path.
 const int _pairBudget = 200000;
 
-String _sha(String text) =>
-    sha256.convert(utf8.encode(text)).toString();
+String _sha(String text) => sha256.convert(utf8.encode(text)).toString();
 
 /// Union of two texts already in canonical (hash) order: [x] before [y].
 String _union2(String x, String y) {

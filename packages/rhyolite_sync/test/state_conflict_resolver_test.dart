@@ -27,15 +27,14 @@ FileState _state(
   required Hlc hlc,
   int size = 0,
   bool tombstone = false,
-}) =>
-    FileState(
-      fileId: fileId,
-      path: path,
-      blobRef: blobRef,
-      sizeBytes: size,
-      hlc: hlc,
-      tombstone: tombstone,
-    );
+}) => FileState(
+  fileId: fileId,
+  path: path,
+  blobRef: blobRef,
+  sizeBytes: size,
+  hlc: hlc,
+  tombstone: tombstone,
+);
 
 void main() {
   late FileStateStore store;
@@ -77,26 +76,27 @@ void main() {
       expect(merged.hlc, Hlc(200, 0, 'B'));
     });
 
-    test('tombstone vs edit → edit wins, tombstone becomes conflict-copy',
-        () async {
-      final ref = await _writeBlob(blobStore, 'still here');
-      final edit = _state('f1', blobRef: ref, hlc: Hlc(100, 0, 'A'));
-      final tomb = _state(
-        'f1',
-        blobRef: '',
-        hlc: Hlc(200, 0, 'B'),
-        tombstone: true,
-      );
-
-      final outcome = await resolver.resolve([edit, tomb]);
-      expect(outcome, isA<StateMergeConflictCopy>());
-      final c = outcome as StateMergeConflictCopy;
-      expect(c.winner.tombstone, isFalse);
-      expect(c.loser.tombstone, isTrue);
-    });
-
     test(
-        'tombstone vs stale-base live (blobRef == LCA) → delete wins, '
+      'tombstone vs edit → edit wins, tombstone becomes conflict-copy',
+      () async {
+        final ref = await _writeBlob(blobStore, 'still here');
+        final edit = _state('f1', blobRef: ref, hlc: Hlc(100, 0, 'A'));
+        final tomb = _state(
+          'f1',
+          blobRef: '',
+          hlc: Hlc(200, 0, 'B'),
+          tombstone: true,
+        );
+
+        final outcome = await resolver.resolve([edit, tomb]);
+        expect(outcome, isA<StateMergeConflictCopy>());
+        final c = outcome as StateMergeConflictCopy;
+        expect(c.winner.tombstone, isFalse);
+        expect(c.loser.tombstone, isTrue);
+      },
+    );
+
+    test('tombstone vs stale-base live (blobRef == LCA) → delete wins, '
         'no resurrect', () async {
       // The live side is byte-identical to the last converged version (its
       // blobRef equals the LCA). A peer that merely still has the file on disk
@@ -104,59 +104,82 @@ void main() {
       // delete must win.
       final ref = await _writeBlob(blobStore, 'unchanged since sync');
       final stale = _state('f1', blobRef: ref, hlc: Hlc(100, 0, 'B'));
-      final tomb = _state('f1',
-          blobRef: '', hlc: Hlc(200, 0, 'A'), tombstone: true);
+      final tomb = _state(
+        'f1',
+        blobRef: '',
+        hlc: Hlc(200, 0, 'A'),
+        tombstone: true,
+      );
 
       final outcome = await resolver.resolve([stale, tomb], baseRef: ref);
       expect(outcome, isA<StateMergeMerged>());
-      expect((outcome as StateMergeMerged).merged.tombstone, isTrue,
-          reason: 'a stale-base live copy must not resurrect over a delete');
+      expect(
+        (outcome as StateMergeMerged).merged.tombstone,
+        isTrue,
+        reason: 'a stale-base live copy must not resurrect over a delete',
+      );
     });
 
-    test('tombstone vs genuine edit (blobRef != LCA) → edit still wins',
-        () async {
-      // The live side diverged from the LCA — a real concurrent edit. Add-wins
-      // must be preserved.
-      final baseR = await _writeBlob(blobStore, 'base');
-      final editR = await _writeBlob(blobStore, 'a genuine later edit');
-      final edit = _state('f1', blobRef: editR, hlc: Hlc(100, 0, 'B'));
-      final tomb = _state('f1',
-          blobRef: '', hlc: Hlc(200, 0, 'A'), tombstone: true);
+    test(
+      'tombstone vs genuine edit (blobRef != LCA) → edit still wins',
+      () async {
+        // The live side diverged from the LCA — a real concurrent edit. Add-wins
+        // must be preserved.
+        final baseR = await _writeBlob(blobStore, 'base');
+        final editR = await _writeBlob(blobStore, 'a genuine later edit');
+        final edit = _state('f1', blobRef: editR, hlc: Hlc(100, 0, 'B'));
+        final tomb = _state(
+          'f1',
+          blobRef: '',
+          hlc: Hlc(200, 0, 'A'),
+          tombstone: true,
+        );
 
-      final outcome = await resolver.resolve([edit, tomb], baseRef: baseR);
-      expect(outcome, isA<StateMergeConflictCopy>());
-      final c = outcome as StateMergeConflictCopy;
-      expect(c.winner.tombstone, isFalse);
-      expect(c.winner.blobRef, editR);
-    });
+        final outcome = await resolver.resolve([edit, tomb], baseRef: baseR);
+        expect(outcome, isA<StateMergeConflictCopy>());
+        final c = outcome as StateMergeConflictCopy;
+        expect(c.winner.tombstone, isFalse);
+        expect(c.winner.blobRef, editR);
+      },
+    );
   });
 
   group('StateConflictResolver — N>2 preserves every value (L1-5)', () {
-    test('three concurrent divergent values -> all preserved, none dropped',
-        () async {
-      final refA = await _writeBlob(blobStore, 'content A');
-      final refB = await _writeBlob(blobStore, 'content B');
-      final refC = await _writeBlob(blobStore, 'content C');
-      final a = _state('f1', blobRef: refA, hlc: Hlc(100, 0, 'A'));
-      final b = _state('f1', blobRef: refB, hlc: Hlc(200, 0, 'B'));
-      final c = _state('f1', blobRef: refC, hlc: Hlc(300, 0, 'C'));
+    test(
+      'three concurrent divergent values -> all preserved, none dropped',
+      () async {
+        final refA = await _writeBlob(blobStore, 'content A');
+        final refB = await _writeBlob(blobStore, 'content B');
+        final refC = await _writeBlob(blobStore, 'content C');
+        final a = _state('f1', blobRef: refA, hlc: Hlc(100, 0, 'A'));
+        final b = _state('f1', blobRef: refB, hlc: Hlc(200, 0, 'B'));
+        final c = _state('f1', blobRef: refC, hlc: Hlc(300, 0, 'C'));
 
-      // No baseRef -> no 3-way merge; every pair is a genuine conflict.
-      final outcome = await resolver.resolve([a, b, c]);
+        // No baseRef -> no 3-way merge; every pair is a genuine conflict.
+        final outcome = await resolver.resolve([a, b, c]);
 
-      expect(outcome, isA<StateMergeMultiConflict>(),
-          reason: 'N>2 conflict must not collapse to one copy and drop the '
-              'rest of the divergent versions');
-      final m = outcome as StateMergeMultiConflict;
-      expect(m.winner.blobRef, refC, reason: 'canonical winner is max-HLC');
-      final preserved = m.parts
-          .whereType<StateMergeConflictCopy>()
-          .map((p) => p.loser.blobRef)
-          .toSet();
-      expect(preserved, containsAll(<String>{refA, refB}),
-          reason: 'both non-winning versions must be retained as conflict '
-              'copies, not silently dropped');
-    });
+        expect(
+          outcome,
+          isA<StateMergeMultiConflict>(),
+          reason:
+              'N>2 conflict must not collapse to one copy and drop the '
+              'rest of the divergent versions',
+        );
+        final m = outcome as StateMergeMultiConflict;
+        expect(m.winner.blobRef, refC, reason: 'canonical winner is max-HLC');
+        final preserved = m.parts
+            .whereType<StateMergeConflictCopy>()
+            .map((p) => p.loser.blobRef)
+            .toSet();
+        expect(
+          preserved,
+          containsAll(<String>{refA, refB}),
+          reason:
+              'both non-winning versions must be retained as conflict '
+              'copies, not silently dropped',
+        );
+      },
+    );
   });
 
   group('StateConflictResolver — no content merge', () {
@@ -166,23 +189,36 @@ void main() {
     // producing exactly the broken structured documents the classification
     // exists to prevent. Concurrent versions are now always kept whole: LWW
     // winner plus a conflict-copy of the loser.
-    test('text-looking divergence with a base still yields conflict-copy',
-        () async {
-      final baseRef = await _writeBlob(blobStore, 'line A\nline B\nline C\n');
-      final localRef =
-          await _writeBlob(blobStore, 'line A modified\nline B\nline C\n');
-      final remoteRef =
-          await _writeBlob(blobStore, 'line A\nline B\nline C modified\n');
+    test(
+      'text-looking divergence with a base still yields conflict-copy',
+      () async {
+        final baseRef = await _writeBlob(blobStore, 'line A\nline B\nline C\n');
+        final localRef = await _writeBlob(
+          blobStore,
+          'line A modified\nline B\nline C\n',
+        );
+        final remoteRef = await _writeBlob(
+          blobStore,
+          'line A\nline B\nline C modified\n',
+        );
 
-      final local = _state('f1', blobRef: localRef, hlc: Hlc(100, 0, 'A'));
-      final remote = _state('f1', blobRef: remoteRef, hlc: Hlc(150, 0, 'B'));
+        final local = _state('f1', blobRef: localRef, hlc: Hlc(100, 0, 'A'));
+        final remote = _state('f1', blobRef: remoteRef, hlc: Hlc(150, 0, 'B'));
 
-      final outcome = await resolver.resolve([local, remote], baseRef: baseRef);
-      expect(outcome, isA<StateMergeConflictCopy>());
-      final c = outcome as StateMergeConflictCopy;
-      expect(c.winner.blobRef, remoteRef, reason: 'higher HLC wins');
-      expect(c.loser.blobRef, localRef, reason: 'loser is preserved, not merged');
-    });
+        final outcome = await resolver.resolve([
+          local,
+          remote,
+        ], baseRef: baseRef);
+        expect(outcome, isA<StateMergeConflictCopy>());
+        final c = outcome as StateMergeConflictCopy;
+        expect(c.winner.blobRef, remoteRef, reason: 'higher HLC wins');
+        expect(
+          c.loser.blobRef,
+          localRef,
+          reason: 'loser is preserved, not merged',
+        );
+      },
+    );
 
     test('no base available → conflict-copy', () async {
       final localRef = await _writeBlob(blobStore, 'local content');
@@ -220,8 +256,7 @@ void main() {
   });
 
   group('StateConflictResolver — conflict-copy paths', () {
-    test('appends "(conflict <stamp> from <node>)" before extension',
-        () async {
+    test('appends "(conflict <stamp> from <node>)" before extension', () async {
       final localRef = await _writeBlob(blobStore, 'L');
       final remoteRef = await _writeBlob(blobStore, 'R');
       final local = _state(
@@ -305,95 +340,62 @@ void main() {
       },
     );
 
-    test(
-      'unreachable loser blob, no base path → WinnerOnlyLossy',
-      () async {
-        // No lastSyncedBlobRef → resolver skips 3-way merge entirely
-        // and goes straight to LWW; the recoverability check still
-        // fires.
-        final localRef = await _writeBlob(blobStore, 'alice content');
-        final bobBlobRef =
-            sha256.convert(utf8.encode('bob content')).toString();
+    test('unreachable loser blob, no base path → WinnerOnlyLossy', () async {
+      // No lastSyncedBlobRef → resolver skips 3-way merge entirely
+      // and goes straight to LWW; the recoverability check still
+      // fires.
+      final localRef = await _writeBlob(blobStore, 'alice content');
+      final bobBlobRef = sha256.convert(utf8.encode('bob content')).toString();
 
-        final local = _state(
-          'f2',
-          blobRef: localRef,
-          hlc: Hlc(200, 0, 'A'),
-        );
-        final remote = _state(
-          'f2',
-          blobRef: bobBlobRef,
-          hlc: Hlc(100, 0, 'B'),
-        );
+      final local = _state('f2', blobRef: localRef, hlc: Hlc(200, 0, 'A'));
+      final remote = _state('f2', blobRef: bobBlobRef, hlc: Hlc(100, 0, 'B'));
 
-        final outcome = await resolver.resolve([local, remote]);
-        expect(outcome, isA<StateMergeWinnerOnlyLossy>());
-        final l = outcome as StateMergeWinnerOnlyLossy;
-        expect(l.lostBlobRef, bobBlobRef);
-      },
-    );
+      final outcome = await resolver.resolve([local, remote]);
+      expect(outcome, isA<StateMergeWinnerOnlyLossy>());
+      final l = outcome as StateMergeWinnerOnlyLossy;
+      expect(l.lostBlobRef, bobBlobRef);
+    });
 
-    test(
-      'ConflictCopy is returned when loser bytes ARE cached',
-      () async {
-        // Positive case: when the loser's blob is in the local cache,
-        // ConflictCopy is correct and its recoverability promise holds.
-        final aliceRef = await _writeBlob(blobStore, 'alice content');
-        final bobRef = await _writeBlob(blobStore, 'bob content');
+    test('ConflictCopy is returned when loser bytes ARE cached', () async {
+      // Positive case: when the loser's blob is in the local cache,
+      // ConflictCopy is correct and its recoverability promise holds.
+      final aliceRef = await _writeBlob(blobStore, 'alice content');
+      final bobRef = await _writeBlob(blobStore, 'bob content');
 
-        final local = _state(
-          'f3',
-          blobRef: aliceRef,
-          hlc: Hlc(200, 0, 'A'),
-        );
-        final remote = _state(
-          'f3',
-          blobRef: bobRef,
-          hlc: Hlc(100, 0, 'B'),
-        );
+      final local = _state('f3', blobRef: aliceRef, hlc: Hlc(200, 0, 'A'));
+      final remote = _state('f3', blobRef: bobRef, hlc: Hlc(100, 0, 'B'));
 
-        final outcome = await resolver.resolve([local, remote]);
-        expect(outcome, isA<StateMergeConflictCopy>());
-        final c = outcome as StateMergeConflictCopy;
+      final outcome = await resolver.resolve([local, remote]);
+      expect(outcome, isA<StateMergeConflictCopy>());
+      final c = outcome as StateMergeConflictCopy;
 
-        final loserBytes = await blobStore.read(
-          c.loser.blobRef,
-          vaultId: _v,
-        );
-        expect(loserBytes, isNotNull);
-      },
-    );
+      final loserBytes = await blobStore.read(c.loser.blobRef, vaultId: _v);
+      expect(loserBytes, isNotNull);
+    });
 
-    test(
-      'tombstone-vs-edit ConflictCopy: loser is the tombstone, '
-      'no recoverability promise needed',
-      () async {
-        // This is the "expected silent" case: tombstone has no content,
-        // so there is genuinely nothing to write.
-        final localRef = await _writeBlob(blobStore, 'alice edits');
-        final local = _state(
-          'f3',
-          blobRef: localRef,
-          hlc: Hlc(200, 0, 'A'),
-        );
-        final tombstoned = _state(
-          'f3',
-          blobRef: '',
-          hlc: Hlc(100, 0, 'B'),
-          tombstone: true,
-        );
+    test('tombstone-vs-edit ConflictCopy: loser is the tombstone, '
+        'no recoverability promise needed', () async {
+      // This is the "expected silent" case: tombstone has no content,
+      // so there is genuinely nothing to write.
+      final localRef = await _writeBlob(blobStore, 'alice edits');
+      final local = _state('f3', blobRef: localRef, hlc: Hlc(200, 0, 'A'));
+      final tombstoned = _state(
+        'f3',
+        blobRef: '',
+        hlc: Hlc(100, 0, 'B'),
+        tombstone: true,
+      );
 
-        final outcome = await resolver.resolve([local, tombstoned]);
-        expect(outcome, isA<StateMergeConflictCopy>());
-        final c = outcome as StateMergeConflictCopy;
+      final outcome = await resolver.resolve([local, tombstoned]);
+      expect(outcome, isA<StateMergeConflictCopy>());
+      final c = outcome as StateMergeConflictCopy;
 
-        // The loser here MUST be the tombstone — that is the
-        // documented add-wins semantics.
-        expect(c.loser.tombstone, isTrue);
-        expect(c.loser.blobRef, isEmpty);
-        // We do NOT require recoverability in this case — the
-        // tombstone genuinely has no content to write.
-      },
-    );
+      // The loser here MUST be the tombstone — that is the
+      // documented add-wins semantics.
+      expect(c.loser.tombstone, isTrue);
+      expect(c.loser.blobRef, isEmpty);
+      // We do NOT require recoverability in this case — the
+      // tombstone genuinely has no content to write.
+    });
   });
 }

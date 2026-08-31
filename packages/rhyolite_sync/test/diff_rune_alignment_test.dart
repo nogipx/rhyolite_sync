@@ -17,11 +17,11 @@ bool _isLow(int u) => u >= 0xDC00 && u <= 0xDFFF;
 
 /// True when every boundary of every chunk falls on a rune boundary.
 bool runeAligned(List<Diff> diffs) => diffs.every(
-      (d) =>
-          d.text.isEmpty ||
-          (!_isHigh(d.text.codeUnitAt(d.text.length - 1)) &&
-              !_isLow(d.text.codeUnitAt(0))),
-    );
+  (d) =>
+      d.text.isEmpty ||
+      (!_isHigh(d.text.codeUnitAt(d.text.length - 1)) &&
+          !_isLow(d.text.codeUnitAt(0))),
+);
 
 String rebuild(List<Diff> diffs, int op) => diffs
     .where((d) => d.operation == DIFF_EQUAL || d.operation == op)
@@ -116,33 +116,51 @@ void main() {
     expect(await applied(before, after), after);
   });
 
-  test('fuzz: random edits over emoji-dense text keep both properties',
-      () async {
-    const alphabet = ['🟦', '🟩', '🇦', '🇧', '📅', '✅', '✏️', 'a', 'б', ' ', '\n'];
-    final rnd = Random(4242);
-    var checked = 0;
-    for (var trial = 0; trial < 250; trial++) {
-      String make(int n) =>
-          List.generate(n, (_) => alphabet[rnd.nextInt(alphabet.length)]).join();
-      final a = make(20 + rnd.nextInt(40));
-      final b = make(20 + rnd.nextInt(40));
+  test(
+    'fuzz: random edits over emoji-dense text keep both properties',
+    () async {
+      const alphabet = [
+        '🟦',
+        '🟩',
+        '🇦',
+        '🇧',
+        '📅',
+        '✅',
+        '✏️',
+        'a',
+        'б',
+        ' ',
+        '\n',
+      ];
+      final rnd = Random(4242);
+      var checked = 0;
+      for (var trial = 0; trial < 250; trial++) {
+        String make(int n) => List.generate(
+          n,
+          (_) => alphabet[rnd.nextInt(alphabet.length)],
+        ).join();
+        final a = make(20 + rnd.nextInt(40));
+        final b = make(20 + rnd.nextInt(40));
 
-      final d = diffOf(a, b);
-      alignDiffsToRunes(d);
-      expect(runeAligned(d), isTrue, reason: 'trial $trial');
-      expect(rebuild(d, DIFF_DELETE), a, reason: 'trial $trial old');
-      expect(rebuild(d, DIFF_INSERT), b, reason: 'trial $trial new');
-      checked++;
-    }
-    expect(checked, 250);
-  });
+        final d = diffOf(a, b);
+        alignDiffsToRunes(d);
+        expect(runeAligned(d), isTrue, reason: 'trial $trial');
+        expect(rebuild(d, DIFF_DELETE), a, reason: 'trial $trial old');
+        expect(rebuild(d, DIFF_INSERT), b, reason: 'trial $trial new');
+        checked++;
+      }
+      expect(checked, 250);
+    },
+  );
 
   test('fuzz: the tree projects to the new text every time', () async {
     const alphabet = ['🟦', '🟩', '🇦', '🇧', '📅', 'a', ' ', '\n'];
     final rnd = Random(99);
     for (var trial = 0; trial < 60; trial++) {
-      String make(int n) =>
-          List.generate(n, (_) => alphabet[rnd.nextInt(alphabet.length)]).join();
+      String make(int n) => List.generate(
+        n,
+        (_) => alphabet[rnd.nextInt(alphabet.length)],
+      ).join();
       final a = make(15 + rnd.nextInt(20));
       final b = make(15 + rnd.nextInt(20));
       final got = await applied(a, b);

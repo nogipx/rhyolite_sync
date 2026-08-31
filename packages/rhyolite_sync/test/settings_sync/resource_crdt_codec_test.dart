@@ -13,7 +13,8 @@ Hlc Function() clock(String node, {int start = 1}) {
   return () => Hlc(ms++, 0, node);
 }
 
-Uint8List jb(Object? value) => Uint8List.fromList(utf8.encode(jsonEncode(value)));
+Uint8List jb(Object? value) =>
+    Uint8List.fromList(utf8.encode(jsonEncode(value)));
 
 String renderStr(ResourceCrdtCodec c, Object state) =>
     utf8.decode(c.renderState(state));
@@ -37,17 +38,31 @@ void main() {
     });
 
     test('removal detection: key absent from snapshot is dropped', () {
-      final base =
-          c.diffApply(c.emptyState(), jb({'a': 1, 'b': 2}), clock('A'));
+      final base = c.diffApply(
+        c.emptyState(),
+        jb({'a': 1, 'b': 2}),
+        clock('A'),
+      );
       final del = c.diffApply(base, jb({'a': 1}), clock('A', start: 100));
       expect(renderStr(c, del), canonicalJson({'a': 1}));
     });
 
     test('concurrent edits to DIFFERENT keys both survive', () {
-      final base =
-          c.diffApply(c.emptyState(), jb({'a': 1, 'b': 2}), clock('Z'));
-      final a = c.diffApply(base, jb({'a': 10, 'b': 2}), clock('A', start: 100));
-      final b = c.diffApply(base, jb({'a': 1, 'b': 20}), clock('B', start: 100));
+      final base = c.diffApply(
+        c.emptyState(),
+        jb({'a': 1, 'b': 2}),
+        clock('Z'),
+      );
+      final a = c.diffApply(
+        base,
+        jb({'a': 10, 'b': 2}),
+        clock('A', start: 100),
+      );
+      final b = c.diffApply(
+        base,
+        jb({'a': 1, 'b': 20}),
+        clock('B', start: 100),
+      );
       final merged = c.joinStates(a, b);
       expect(renderStr(c, merged), canonicalJson({'a': 10, 'b': 20}));
     });
@@ -63,17 +78,40 @@ void main() {
 
     test('nested objects merge per-leaf', () {
       final base = c.diffApply(
-          c.emptyState(), jb({'g': {'x': 1, 'y': 2}}), clock('Z'));
+        c.emptyState(),
+        jb({
+          'g': {'x': 1, 'y': 2},
+        }),
+        clock('Z'),
+      );
       final a = c.diffApply(
-          base, jb({'g': {'x': 9, 'y': 2}}), clock('A', start: 100));
+        base,
+        jb({
+          'g': {'x': 9, 'y': 2},
+        }),
+        clock('A', start: 100),
+      );
       final b = c.diffApply(
-          base, jb({'g': {'x': 1, 'y': 8}}), clock('B', start: 100));
-      expect(renderStr(c, c.joinStates(a, b)),
-          canonicalJson({'g': {'x': 9, 'y': 8}}));
+        base,
+        jb({
+          'g': {'x': 1, 'y': 8},
+        }),
+        clock('B', start: 100),
+      );
+      expect(
+        renderStr(c, c.joinStates(a, b)),
+        canonicalJson({
+          'g': {'x': 9, 'y': 8},
+        }),
+      );
     });
 
     test('genuine null value is distinct from deletion', () {
-      final s = c.diffApply(c.emptyState(), jb({'a': null, 'b': 1}), clock('A'));
+      final s = c.diffApply(
+        c.emptyState(),
+        jb({'a': null, 'b': 1}),
+        clock('A'),
+      );
       expect(renderStr(c, s), canonicalJson({'a': null, 'b': 1}));
     });
 
@@ -125,8 +163,7 @@ void main() {
       final base = c.diffApply(c.emptyState(), jb('base'), clock('Z'));
       final a = c.diffApply(base, jb('AAA'), clock('A', start: 100));
       final b = c.diffApply(base, jb('BBB'), clock('B', start: 200));
-      expect(utf8.decode(c.renderState(c.joinStates(a, b))),
-          jsonEncode('BBB'));
+      expect(utf8.decode(c.renderState(c.joinStates(a, b))), jsonEncode('BBB'));
     });
 
     test('unchanged bytes produce no new write', () {

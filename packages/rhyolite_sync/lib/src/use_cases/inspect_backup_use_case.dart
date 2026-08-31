@@ -82,26 +82,30 @@ class InspectBackupUseCase {
       // multi-value register, NOT a user conflict, so we resolve, never "skip".
       final winner = e.value.reduce((a, b) => b.hlc > a.hlc ? b : a);
       if (winner.tombstone) {
-        entries.add(BackupEntry(
-          path: path,
-          sizeBytes: 0,
-          status: BackupEntryStatus.deletedInBackup,
-          blobRef: '',
-        ));
+        entries.add(
+          BackupEntry(
+            path: path,
+            sizeBytes: 0,
+            status: BackupEntryStatus.deletedInBackup,
+            blobRef: '',
+          ),
+        );
         continue;
       }
       final current = currentLiveBlobByPath[path];
       final status = current == null
           ? BackupEntryStatus.restoresDeleted
           : (current == winner.blobRef
-              ? BackupEntryStatus.identical
-              : BackupEntryStatus.changed);
-      entries.add(BackupEntry(
-        path: path,
-        sizeBytes: winner.sizeBytes,
-        status: status,
-        blobRef: winner.blobRef,
-      ));
+                ? BackupEntryStatus.identical
+                : BackupEntryStatus.changed);
+      entries.add(
+        BackupEntry(
+          path: path,
+          sizeBytes: winner.sizeBytes,
+          status: status,
+          blobRef: winner.blobRef,
+        ),
+      );
     }
 
     entries.sort((a, b) => a.path.compareTo(b.path));
@@ -114,8 +118,7 @@ class BackupInspection {
 
   final List<BackupEntry> entries;
 
-  int _count(BackupEntryStatus s) =>
-      entries.where((e) => e.status == s).length;
+  int _count(BackupEntryStatus s) => entries.where((e) => e.status == s).length;
 
   int get identical => _count(BackupEntryStatus.identical);
   int get changed => _count(BackupEntryStatus.changed);

@@ -13,15 +13,14 @@ FileState _state(
   int size = 10,
   int hlcMs = 1000,
   bool tombstone = false,
-}) =>
-    FileState(
-      fileId: fileId,
-      path: path,
-      blobRef: blob,
-      sizeBytes: size,
-      hlc: Hlc(hlcMs, 0, 'device-A'),
-      tombstone: tombstone,
-    );
+}) => FileState(
+  fileId: fileId,
+  path: path,
+  blobRef: blob,
+  sizeBytes: size,
+  hlc: Hlc(hlcMs, 0, 'device-A'),
+  tombstone: tombstone,
+);
 
 Future<FileStateStore> _newStore(IDataClient client) async {
   final store = FileStateStore(client: client, vaultId: _v);
@@ -82,25 +81,27 @@ void main() {
       expect(fresh.get('f1')?.hlc.millis, 1234);
     });
 
-    test('persistMeta + load roundtrips cursor/epoch/lastSyncedBlobRef',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      final store = await _newStore(env.client);
+    test(
+      'persistMeta + load roundtrips cursor/epoch/lastSyncedBlobRef',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = await _newStore(env.client);
 
-      store.setServerCursor(42);
-      store.setServerEpoch(7);
-      store.recordSyncedBlobRef('f1', 'blobA');
-      store.recordSyncedBlobRef('f2', 'blobB');
-      await store.persistMeta();
+        store.setServerCursor(42);
+        store.setServerEpoch(7);
+        store.recordSyncedBlobRef('f1', 'blobA');
+        store.recordSyncedBlobRef('f2', 'blobB');
+        await store.persistMeta();
 
-      final fresh = FileStateStore(client: env.client, vaultId: _v);
-      await fresh.load();
-      expect(fresh.serverCursor, 42);
-      expect(fresh.serverEpoch, 7);
-      expect(fresh.lastSyncedBlobRefFor('f1'), 'blobA');
-      expect(fresh.lastSyncedBlobRefFor('f2'), 'blobB');
-    });
+        final fresh = FileStateStore(client: env.client, vaultId: _v);
+        await fresh.load();
+        expect(fresh.serverCursor, 42);
+        expect(fresh.serverEpoch, 7);
+        expect(fresh.lastSyncedBlobRefFor('f1'), 'blobA');
+        expect(fresh.lastSyncedBlobRefFor('f2'), 'blobB');
+      },
+    );
 
     test('persistOne with no state in memory deletes from disk', () async {
       final env = await DataServiceFactory.inMemory();
@@ -143,28 +144,30 @@ void main() {
   });
 
   group('FileStateStore concurrency', () {
-    test('parallel persistMeta calls do not race on version conflict',
-        () async {
-      // Reproduces the production race where pull + push + file events
-      // all call persistMeta in flight at once: read existing.version,
-      // then write fails because someone else already bumped it.
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      final store = await _newStore(env.client);
+    test(
+      'parallel persistMeta calls do not race on version conflict',
+      () async {
+        // Reproduces the production race where pull + push + file events
+        // all call persistMeta in flight at once: read existing.version,
+        // then write fails because someone else already bumped it.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = await _newStore(env.client);
 
-      Future<void> mutateAndPersist(int i) async {
-        store.setServerCursor(i);
-        await store.persistMeta();
-      }
+        Future<void> mutateAndPersist(int i) async {
+          store.setServerCursor(i);
+          await store.persistMeta();
+        }
 
-      // 16 concurrent persisters racing on the same meta row.
-      await Future.wait(List.generate(16, mutateAndPersist));
+        // 16 concurrent persisters racing on the same meta row.
+        await Future.wait(List.generate(16, mutateAndPersist));
 
-      final fresh = FileStateStore(client: env.client, vaultId: _v);
-      await fresh.load();
-      // Last winner wins; the important guarantee is no exception.
-      expect(fresh.serverCursor, anyOf(equals(15), greaterThanOrEqualTo(0)));
-    });
+        final fresh = FileStateStore(client: env.client, vaultId: _v);
+        await fresh.load();
+        // Last winner wins; the important guarantee is no exception.
+        expect(fresh.serverCursor, anyOf(equals(15), greaterThanOrEqualTo(0)));
+      },
+    );
 
     test('parallel persistOne for same fileId is serialised', () async {
       final env = await DataServiceFactory.inMemory();
@@ -227,22 +230,24 @@ void main() {
       );
     });
 
-    test('fromJson rejects legacy v1 rows (no v defaults to v1, rejected by v2)',
-        () {
-      // A row with no `v` defaults to v1. v1 blob ids are raw sha256, which v2
-      // (keyed HMAC) cannot reproduce, so v2 rejects such rows — forcing a
-      // clean re-chunk rather than silently mixing the two id schemes.
-      expect(
-        () => FileState.fromJson({
-          'fileId': 'f1',
-          'path': 'note.md',
-          'blobRef': 'sha',
-          'sizeBytes': 1,
-          'hlc': '1-0-A',
-        }),
-        throwsA(isA<FormatException>()),
-      );
-    });
+    test(
+      'fromJson rejects legacy v1 rows (no v defaults to v1, rejected by v2)',
+      () {
+        // A row with no `v` defaults to v1. v1 blob ids are raw sha256, which v2
+        // (keyed HMAC) cannot reproduce, so v2 rejects such rows — forcing a
+        // clean re-chunk rather than silently mixing the two id schemes.
+        expect(
+          () => FileState.fromJson({
+            'fileId': 'f1',
+            'path': 'note.md',
+            'blobRef': 'sha',
+            'sizeBytes': 1,
+            'hlc': '1-0-A',
+          }),
+          throwsA(isA<FormatException>()),
+        );
+      },
+    );
 
     test('wirePayloadFromBytes rejects unknown schema version', () {
       final badPayload = '{"v":99,"path":"x","blobRef":"y","sizeBytes":1}';
@@ -269,57 +274,65 @@ void main() {
   });
 
   group('Register schema version', () {
-    test('load skips rows with unknown register version (corruption-tolerant)',
-        () async {
-      // Seed the raw data layer with a row that has v=999, then load.
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      await env.client.create(
-        collection: '${_v}_state_store',
-        id: 'rogue',
-        payload: {'v': 999, 'values': []},
-      );
-      final store = await _newStore(env.client);
-      // Bad row simply does not surface — load() catches FormatException.
-      expect(store.contains('rogue'), isFalse);
-    });
+    test(
+      'load skips rows with unknown register version (corruption-tolerant)',
+      () async {
+        // Seed the raw data layer with a row that has v=999, then load.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        await env.client.create(
+          collection: '${_v}_state_store',
+          id: 'rogue',
+          payload: {'v': 999, 'values': []},
+        );
+        final store = await _newStore(env.client);
+        // Bad row simply does not surface — load() catches FormatException.
+        expect(store.contains('rogue'), isFalse);
+      },
+    );
   });
 
   group('FileStateStore — self-stabilization (HLC paper §4)', () {
-    test('applyRemote skips TaggedValue with hlc.millis far in the future',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      final store = await _newStore(env.client);
+    test(
+      'applyRemote skips TaggedValue with hlc.millis far in the future',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = await _newStore(env.client);
 
-      // Build a poisoned TaggedValue 100 years ahead of wall.
-      final farFuture =
-          DateTime.now().millisecondsSinceEpoch + 100 * 365 * 86400 * 1000;
-      final poisoned = TaggedValue<FileState>(
-        FileState(
-          fileId: 'f1',
-          path: 'note.md',
-          blobRef: 'evil',
-          sizeBytes: 1,
-          hlc: Hlc(farFuture, 0, 'attacker'),
-        ),
-        Hlc(farFuture, 0, 'attacker'),
-      );
+        // Build a poisoned TaggedValue 100 years ahead of wall.
+        final farFuture =
+            DateTime.now().millisecondsSinceEpoch + 100 * 365 * 86400 * 1000;
+        final poisoned = TaggedValue<FileState>(
+          FileState(
+            fileId: 'f1',
+            path: 'note.md',
+            blobRef: 'evil',
+            sizeBytes: 1,
+            hlc: Hlc(farFuture, 0, 'attacker'),
+          ),
+          Hlc(farFuture, 0, 'attacker'),
+        );
 
-      final rejected = <TaggedValue<FileState>>[];
-      final result = store.applyRemote(
-        'f1',
-        [poisoned],
-        onSkip: (tv, _) => rejected.add(tv),
-      );
+        final rejected = <TaggedValue<FileState>>[];
+        final result = store.applyRemote('f1', [
+          poisoned,
+        ], onSkip: (tv, _) => rejected.add(tv));
 
-      expect(rejected, [poisoned]);
-      expect(result.values, isEmpty,
-          reason: 'poisoned value must not enter the register');
-      // ownContext must not have advanced to the attacker hlc.
-      expect(store.ownContext['attacker'], isNull,
-          reason: 'ownContext must not be polluted by rejected value');
-    });
+        expect(rejected, [poisoned]);
+        expect(
+          result.values,
+          isEmpty,
+          reason: 'poisoned value must not enter the register',
+        );
+        // ownContext must not have advanced to the attacker hlc.
+        expect(
+          store.ownContext['attacker'],
+          isNull,
+          reason: 'ownContext must not be polluted by rejected value',
+        );
+      },
+    );
 
     test('applyRemote accepts TaggedValue within skew bound', () async {
       final env = await DataServiceFactory.inMemory();
@@ -340,19 +353,16 @@ void main() {
       );
 
       final rejected = <TaggedValue<FileState>>[];
-      final result = store.applyRemote(
-        'f1',
-        [ok],
-        onSkip: (tv, _) => rejected.add(tv),
-      );
+      final result = store.applyRemote('f1', [
+        ok,
+      ], onSkip: (tv, _) => rejected.add(tv));
 
       expect(rejected, isEmpty);
       expect(result.values.length, 1);
       expect(store.ownContext['peer']?.millis, justAhead);
     });
 
-    test('maxClockSkewMs=null disables the defence (paper baseline)',
-        () async {
+    test('maxClockSkewMs=null disables the defence (paper baseline)', () async {
       final env = await DataServiceFactory.inMemory();
       addTearDown(env.dispose);
       final store = await _newStore(env.client);
@@ -370,13 +380,12 @@ void main() {
         Hlc(farFuture, 0, 'attacker'),
       );
 
-      final result = store.applyRemote(
-        'f1',
-        [poisoned],
-        maxClockSkewMs: null,
+      final result = store.applyRemote('f1', [poisoned], maxClockSkewMs: null);
+      expect(
+        result.values.length,
+        1,
+        reason: 'with defence disabled, paper Fig.5 semantics apply',
       );
-      expect(result.values.length, 1,
-          reason: 'with defence disabled, paper Fig.5 semantics apply');
     });
   });
 
@@ -400,8 +409,7 @@ void main() {
       expect(next > observed, isTrue);
     });
 
-    test('every dot minted after witness dominates the observed hlc',
-        () async {
+    test('every dot minted after witness dominates the observed hlc', () async {
       final env = await DataServiceFactory.inMemory();
       addTearDown(env.dispose);
       final store = await _newStore(env.client);
@@ -416,25 +424,26 @@ void main() {
       }
     });
 
-    test('witness clamps a far-future observed hlc (no clock poisoning)',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
-      final store = await _newStore(env.client);
+    test(
+      'witness clamps a far-future observed hlc (no clock poisoning)',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = await _newStore(env.client);
 
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final farFuture = now + 100 * 365 * 86400 * 1000; // ~100 years
-      store.witness(Hlc(farFuture, 0, 'attacker'));
-      final next = store.nextHlc();
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final farFuture = now + 100 * 365 * 86400 * 1000; // ~100 years
+        store.witness(Hlc(farFuture, 0, 'attacker'));
+        final next = store.nextHlc();
 
-      // The clock must stay near wall time, not adopt the 100-year jump.
-      expect(
-        next.millis < now + FileStateStore.defaultMaxClockSkewMs,
-        isTrue,
-        reason: 'far-future witness must be clamped, not adopted',
-      );
-    });
-
+        // The clock must stay near wall time, not adopt the 100-year jump.
+        expect(
+          next.millis < now + FileStateStore.defaultMaxClockSkewMs,
+          isTrue,
+          reason: 'far-future witness must be clamped, not adopted',
+        );
+      },
+    );
   });
 
   // The host compares this against a deviceId it persists OUTSIDE the sync
@@ -623,33 +632,42 @@ void _lazyMigrationTests() {
       expect(reloaded.serverSeqFor('f1'), 7);
     });
 
-    test('touching a legacy file moves it, and meta stops carrying it',
-        () async {
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
+    test(
+      'touching a legacy file moves it, and meta stops carrying it',
+      () async {
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
 
-      final store = await _newStore(env.client);
-      store.upsert(_state('f1'));
-      await store.persistOne('f1');
-      await store.persistMeta();
-      await _makeLegacy(env.client, 'f1', lca: 'oldBlob', serverSeq: 7);
+        final store = await _newStore(env.client);
+        store.upsert(_state('f1'));
+        await store.persistOne('f1');
+        await store.persistMeta();
+        await _makeLegacy(env.client, 'f1', lca: 'oldBlob', serverSeq: 7);
 
-      final second = await _newStore(env.client);
-      expect((await _metaPayload(env.client))['lastSyncedBlobRef'],
-          containsPair('f1', 'oldBlob'));
+        final second = await _newStore(env.client);
+        expect(
+          (await _metaPayload(env.client))['lastSyncedBlobRef'],
+          containsPair('f1', 'oldBlob'),
+        );
 
-      await second.persistOne('f1'); // the migration, triggered by ordinary use
-      await second.persistMeta();
+        await second.persistOne(
+          'f1',
+        ); // the migration, triggered by ordinary use
+        await second.persistMeta();
 
-      final meta = await _metaPayload(env.client);
-      expect((meta['lastSyncedBlobRef'] as Map), isEmpty,
-          reason: 'meta shrinks as files are touched');
-      expect((meta['serverSeq'] as Map), isEmpty);
+        final meta = await _metaPayload(env.client);
+        expect(
+          (meta['lastSyncedBlobRef'] as Map),
+          isEmpty,
+          reason: 'meta shrinks as files are touched',
+        );
+        expect((meta['serverSeq'] as Map), isEmpty);
 
-      final third = await _newStore(env.client);
-      expect(third.lastSyncedBlobRefFor('f1'), 'oldBlob');
-      expect(third.serverSeqFor('f1'), 7);
-    });
+        final third = await _newStore(env.client);
+        expect(third.lastSyncedBlobRefFor('f1'), 'oldBlob');
+        expect(third.serverSeqFor('f1'), 7);
+      },
+    );
 
     test('the row wins over a stale meta entry', () async {
       final env = await DataServiceFactory.inMemory();
@@ -699,6 +717,75 @@ void _lazyMigrationTests() {
 
       final third = await _newStore(env.client);
       expect(third.lastSyncedBlobRefFor('f1'), isNull);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The owed set: which files the push path still has to examine.
+  //
+  // It replaces a walk over every file on every push. The property that
+  // matters is that it never MISSES one — over-inclusion costs a comparison,
+  // under-inclusion loses a file silently.
+  // -------------------------------------------------------------------------
+  group('owedFileIds', () {
+    test('a load seeds it with everything', () async {
+      // The recovery the full walk used to provide. The startup diff writes
+      // states and tells nobody, and the host's pending set is memory-only, so
+      // after a restart this is the only record that anything is unsent.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final first = await _newStore(env.client);
+      for (var i = 0; i < 3; i++) {
+        first.upsert(_state('f$i', blob: 'b$i'));
+        await first.persistOne('f$i');
+      }
+      await first.persistMeta();
+
+      final reopened = FileStateStore(client: env.client, vaultId: _v);
+      await reopened.load();
+
+      expect(reopened.owedFileIds.toSet(), {'f0', 'f1', 'f2'});
+    });
+
+    test('a local write adds, an acknowledged push removes', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+      store.upsert(_state('a'));
+      expect(store.owedFileIds, contains('a'));
+
+      store.recordPushedSignature('a', 'sig-1');
+      expect(store.owedFileIds, isNot(contains('a')));
+    });
+
+    test('a write after a push owes again', () async {
+      // The signature guard settles a file only while its value is unchanged.
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+      store.upsert(_state('a'));
+      store.recordPushedSignature('a', 'sig-1');
+      expect(store.owedFileIds, isNot(contains('a')));
+
+      store.upsert(_state('a', blob: 'blobB', hlcMs: 2000));
+      expect(
+        store.owedFileIds,
+        contains('a'),
+        reason: 'an edit after a push is unsent again',
+      );
+    });
+
+    test('clearOwed drops what the pusher settled', () async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = await _newStore(env.client);
+      store.upsert(_state('a'));
+      store.upsert(_state('b'));
+
+      store.clearOwed(['a']);
+
+      expect(store.owedFileIds, isNot(contains('a')));
+      expect(store.owedFileIds, contains('b'));
     });
   });
 }

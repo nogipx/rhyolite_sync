@@ -59,13 +59,13 @@ class HistoryGetRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        if (fileId != null) 'fileId': fileId,
-        if (fromHlcPacked != null) 'fromHlcPacked': fromHlcPacked,
-        if (beforeHlcPacked != null) 'beforeHlcPacked': beforeHlcPacked,
-        'limit': limit,
-        if (ascending) 'ascending': ascending,
-      };
+    'vaultId': vaultId,
+    if (fileId != null) 'fileId': fileId,
+    if (fromHlcPacked != null) 'fromHlcPacked': fromHlcPacked,
+    if (beforeHlcPacked != null) 'beforeHlcPacked': beforeHlcPacked,
+    'limit': limit,
+    if (ascending) 'ascending': ascending,
+  };
 }
 
 class HistoryEvent implements IRpcSerializable {
@@ -109,31 +109,31 @@ class HistoryEvent implements IRpcSerializable {
   final List<String> chunks;
 
   factory HistoryEvent.fromJson(Map<String, dynamic> json) => HistoryEvent(
-        eventId: json['eventId'] as String,
-        fileId: json['fileId'] as String,
-        blobRef: json['blobRef'] as String,
-        hlcPacked: json['hlcPacked'] as String,
-        operation: HistoryOperationCodec.parse(json['operation'] as String),
-        encryptedMeta: json['encryptedMeta'] as String,
-        createdAtMs: json['createdAtMs'] as int,
-        contextPacked: (json['contextPacked'] as String?) ?? '',
-        serverSeq: (json['serverSeq'] as int?) ?? 0,
-        chunks: (json['chunks'] as List?)?.cast<String>() ?? const [],
-      );
+    eventId: json['eventId'] as String,
+    fileId: json['fileId'] as String,
+    blobRef: json['blobRef'] as String,
+    hlcPacked: json['hlcPacked'] as String,
+    operation: HistoryOperationCodec.parse(json['operation'] as String),
+    encryptedMeta: json['encryptedMeta'] as String,
+    createdAtMs: json['createdAtMs'] as int,
+    contextPacked: (json['contextPacked'] as String?) ?? '',
+    serverSeq: (json['serverSeq'] as int?) ?? 0,
+    chunks: (json['chunks'] as List?)?.cast<String>() ?? const [],
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'eventId': eventId,
-        'fileId': fileId,
-        'blobRef': blobRef,
-        'hlcPacked': hlcPacked,
-        'operation': operation.wire,
-        'encryptedMeta': encryptedMeta,
-        'createdAtMs': createdAtMs,
-        if (contextPacked.isNotEmpty) 'contextPacked': contextPacked,
-        if (serverSeq > 0) 'serverSeq': serverSeq,
-        if (chunks.isNotEmpty) 'chunks': chunks,
-      };
+    'eventId': eventId,
+    'fileId': fileId,
+    'blobRef': blobRef,
+    'hlcPacked': hlcPacked,
+    'operation': operation.wire,
+    'encryptedMeta': encryptedMeta,
+    'createdAtMs': createdAtMs,
+    if (contextPacked.isNotEmpty) 'contextPacked': contextPacked,
+    if (serverSeq > 0) 'serverSeq': serverSeq,
+    if (chunks.isNotEmpty) 'chunks': chunks,
+  };
 }
 
 class HistoryGetResponse implements IRpcSerializable {
@@ -152,9 +152,9 @@ class HistoryGetResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'events': events.map((e) => e.toJson()).toList(),
-        'epoch': epoch,
-      };
+    'events': events.map((e) => e.toJson()).toList(),
+    'epoch': epoch,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -177,10 +177,7 @@ class HistoryDeleteEventsRequest implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'eventIds': eventIds,
-      };
+  Map<String, dynamic> toJson() => {'vaultId': vaultId, 'eventIds': eventIds};
 }
 
 class HistoryDeleteEventsResponse implements IRpcSerializable {
@@ -245,25 +242,25 @@ class DeviceHead implements IRpcSerializable {
   final String clientKind;
 
   factory DeviceHead.fromJson(Map<String, dynamic> json) => DeviceHead(
-        deviceId: json['deviceId'] as String,
-        headSeq: json['headSeq'] as int,
-        updatedAtMs: json['updatedAtMs'] as int,
-        frontierPacked: (json['frontierPacked'] as String?) ?? '',
-        deviceName: (json['deviceName'] as String?) ?? '',
-        clientVersion: (json['clientVersion'] as String?) ?? '',
-        clientKind: (json['clientKind'] as String?) ?? '',
-      );
+    deviceId: json['deviceId'] as String,
+    headSeq: json['headSeq'] as int,
+    updatedAtMs: json['updatedAtMs'] as int,
+    frontierPacked: (json['frontierPacked'] as String?) ?? '',
+    deviceName: (json['deviceName'] as String?) ?? '',
+    clientVersion: (json['clientVersion'] as String?) ?? '',
+    clientKind: (json['clientKind'] as String?) ?? '',
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'deviceId': deviceId,
-        'headSeq': headSeq,
-        'updatedAtMs': updatedAtMs,
-        if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
-        if (deviceName.isNotEmpty) 'deviceName': deviceName,
-        if (clientVersion.isNotEmpty) 'clientVersion': clientVersion,
-        if (clientKind.isNotEmpty) 'clientKind': clientKind,
-      };
+    'deviceId': deviceId,
+    'headSeq': headSeq,
+    'updatedAtMs': updatedAtMs,
+    if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
+    if (deviceName.isNotEmpty) 'deviceName': deviceName,
+    if (clientVersion.isNotEmpty) 'clientVersion': clientVersion,
+    if (clientKind.isNotEmpty) 'clientKind': clientKind,
+  };
 }
 
 class ReportHistoryHeadRequest implements IRpcSerializable {
@@ -310,14 +307,14 @@ class ReportHistoryHeadRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'deviceId': deviceId,
-        'headSeq': headSeq,
-        if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
-        if (deviceName.isNotEmpty) 'deviceName': deviceName,
-        if (clientVersion.isNotEmpty) 'clientVersion': clientVersion,
-        if (clientKind.isNotEmpty) 'clientKind': clientKind,
-      };
+    'vaultId': vaultId,
+    'deviceId': deviceId,
+    'headSeq': headSeq,
+    if (frontierPacked.isNotEmpty) 'frontierPacked': frontierPacked,
+    if (deviceName.isNotEmpty) 'deviceName': deviceName,
+    if (clientVersion.isNotEmpty) 'clientVersion': clientVersion,
+    if (clientKind.isNotEmpty) 'clientKind': clientKind,
+  };
 }
 
 class ReportHistoryHeadResponse implements IRpcSerializable {
@@ -355,8 +352,9 @@ class GetHistoryHeadsResponse implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'heads': heads.map((e) => e.toJson()).toList()};
+  Map<String, dynamic> toJson() => {
+    'heads': heads.map((e) => e.toJson()).toList(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -379,10 +377,7 @@ class ForgetDeviceRequest implements IRpcSerializable {
       );
 
   @override
-  Map<String, dynamic> toJson() => {
-        'vaultId': vaultId,
-        'deviceId': deviceId,
-      };
+  Map<String, dynamic> toJson() => {'vaultId': vaultId, 'deviceId': deviceId};
 }
 
 class ForgetDeviceResponse implements IRpcSerializable {

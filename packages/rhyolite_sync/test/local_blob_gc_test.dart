@@ -13,12 +13,12 @@ import 'package:test/test.dart';
 const _v = 'vault-1';
 
 FileState _state(String fileId, {required String blobRef}) => FileState(
-      fileId: fileId,
-      path: '$fileId.md',
-      blobRef: blobRef,
-      sizeBytes: 1,
-      hlc: Hlc(1, 0, 'A'),
-    );
+  fileId: fileId,
+  path: '$fileId.md',
+  blobRef: blobRef,
+  sizeBytes: 1,
+  hlc: Hlc(1, 0, 'A'),
+);
 
 Future<void> _seedBlob(LocalBlobStore blobs, String id, List<int> bytes) =>
     blobs.write(Uint8List.fromList(bytes), id, vaultId: _v);
@@ -49,33 +49,37 @@ void main() {
     expect(await blobs.read('blob-current', vaultId: _v), isNotNull);
   });
 
-  test('drops a lastSyncedBlobRef blob that is no longer current content',
-      () async {
-    await _seedBlob(blobs, 'blob-base', [2]);
-    await _seedBlob(blobs, 'blob-current', [3]);
-    store.upsert(_state('f1', blobRef: 'blob-current'));
-    store.recordSyncedBlobRef('f1', 'blob-base');
+  test(
+    'drops a lastSyncedBlobRef blob that is no longer current content',
+    () async {
+      await _seedBlob(blobs, 'blob-base', [2]);
+      await _seedBlob(blobs, 'blob-current', [3]);
+      store.upsert(_state('f1', blobRef: 'blob-current'));
+      store.recordSyncedBlobRef('f1', 'blob-base');
 
-    final r = await gc();
-    expect(r.scanned, 2);
-    // The LCA is compared as a hash and its bytes are never read (the 3-way
-    // merge that once needed them is gone), so keeping a second copy of every
-    // file that has ever changed is pure waste.
-    expect(r.deleted, 1);
-    expect(await blobs.read('blob-current', vaultId: _v), isNotNull);
-    expect(await blobs.read('blob-base', vaultId: _v), isNull);
-  });
+      final r = await gc();
+      expect(r.scanned, 2);
+      // The LCA is compared as a hash and its bytes are never read (the 3-way
+      // merge that once needed them is gone), so keeping a second copy of every
+      // file that has ever changed is pure waste.
+      expect(r.deleted, 1);
+      expect(await blobs.read('blob-current', vaultId: _v), isNotNull);
+      expect(await blobs.read('blob-base', vaultId: _v), isNull);
+    },
+  );
 
-  test('keeps a lastSyncedBlobRef blob that is still some file\'s content',
-      () async {
-    await _seedBlob(blobs, 'blob-shared', [7]);
-    store.upsert(_state('f1', blobRef: 'blob-shared'));
-    store.recordSyncedBlobRef('f1', 'blob-shared');
+  test(
+    'keeps a lastSyncedBlobRef blob that is still some file\'s content',
+    () async {
+      await _seedBlob(blobs, 'blob-shared', [7]);
+      store.upsert(_state('f1', blobRef: 'blob-shared'));
+      store.recordSyncedBlobRef('f1', 'blob-shared');
 
-    final r = await gc();
-    expect(r.deleted, 0);
-    expect(await blobs.read('blob-shared', vaultId: _v), isNotNull);
-  });
+      final r = await gc();
+      expect(r.deleted, 0);
+      expect(await blobs.read('blob-shared', vaultId: _v), isNotNull);
+    },
+  );
 
   test('deletes orphans not referenced by any file_state or base', () async {
     await _seedBlob(blobs, 'blob-current', [1]);
@@ -119,11 +123,11 @@ void main() {
 
   group('sibling live set (settings sync shares this cache)', () {
     LocalBlobGc gcWith(Set<String>? Function() external) => LocalBlobGc(
-          store: store,
-          blobStore: blobs,
-          vaultId: _v,
-          externalLiveIds: external,
-        );
+      store: store,
+      blobStore: blobs,
+      vaultId: _v,
+      externalLiveIds: external,
+    );
 
     test('keeps blobs claimed by the sibling', () async {
       // Plugin-code blobs live in this same cache under the same vaultId, but
@@ -220,30 +224,35 @@ void main() {
       expect(r.deleted, 0);
     });
 
-    test('a chunk shared with a file that cannot rebuild it survives',
-        () async {
-      // Content addressing means one chunk can belong to several files. The
-      // deciding vote is the owner that still needs it kept.
-      await _seedBlob(blobs, 'manifest-a', [1]);
-      await _seedBlob(blobs, 'manifest-b', [1]);
-      await _seedBlob(blobs, 'shared', [2]);
-      store.upsert(binary('a', chunks: ['shared']));
-      store.upsert(binary('b', chunks: ['shared']));
+    test(
+      'a chunk shared with a file that cannot rebuild it survives',
+      () async {
+        // Content addressing means one chunk can belong to several files. The
+        // deciding vote is the owner that still needs it kept.
+        await _seedBlob(blobs, 'manifest-a', [1]);
+        await _seedBlob(blobs, 'manifest-b', [1]);
+        await _seedBlob(blobs, 'shared', [2]);
+        store.upsert(binary('a', chunks: ['shared']));
+        store.upsert(binary('b', chunks: ['shared']));
 
-      await LocalBlobGc(
-        store: store,
-        blobStore: blobs,
-        vaultId: _v,
-        // Only 'a' is on disk.
-        isRegenerable: (state) async => state.fileId == 'a',
-      )();
+        await LocalBlobGc(
+          store: store,
+          blobStore: blobs,
+          vaultId: _v,
+          // Only 'a' is on disk.
+          isRegenerable: (state) async => state.fileId == 'a',
+        )();
 
-      final left = await blobs.listBlobIds(vaultId: _v);
-      expect(left, contains('shared'),
-          reason: "b still needs it, and b's copy is the only one left");
-      expect(left, contains('manifest-b'));
-      expect(left, isNot(contains('manifest-a')));
-    });
+        final left = await blobs.listBlobIds(vaultId: _v);
+        expect(
+          left,
+          contains('shared'),
+          reason: "b still needs it, and b's copy is the only one left",
+        );
+        expect(left, contains('manifest-b'));
+        expect(left, isNot(contains('manifest-a')));
+      },
+    );
 
     test('a sibling sync claim outranks regenerability', () async {
       await _seedBlob(blobs, 'manifest-a', [1]);
@@ -259,9 +268,13 @@ void main() {
       )();
 
       final left = await blobs.listBlobIds(vaultId: _v);
-      expect(left, ['chunk-a'],
-          reason: 'the settings sync stores its blobs here too, and no file '
-              'on disk can rebuild those');
+      expect(
+        left,
+        ['chunk-a'],
+        reason:
+            'the settings sync stores its blobs here too, and no file '
+            'on disk can rebuild those',
+      );
     });
 
     test('a contested file keeps every version\'s blobs', () async {
@@ -289,8 +302,11 @@ void main() {
       );
       store.applyLocal(winner);
       store.applyRemote('contested', [TaggedValue(loser, loser.hlc)]);
-      expect(store.hasConflict('contested'), isTrue,
-          reason: 'the fixture must really be in conflict');
+      expect(
+        store.hasConflict('contested'),
+        isTrue,
+        reason: 'the fixture must really be in conflict',
+      );
 
       // The engine refuses on conflict; here we model a predicate that cannot
       // tell the two values apart, which is exactly what a path+signature
@@ -312,7 +328,10 @@ void main() {
       store.upsert(binary('a', chunks: ['chunk-a']));
 
       final r = await LocalBlobGc(
-        store: store, blobStore: blobs, vaultId: _v)();
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+      )();
 
       expect(r.deleted, 0, reason: 'the behaviour that shipped before this');
     });
@@ -332,39 +351,46 @@ void main() {
   });
 
   group('scoped to what a pull staged', () {
-    test('an orphan outside the candidates is left for the full sweep',
-        () async {
-      // The point of scoping is cost, not reach: a pull pays for its own
-      // leftovers, and the startup sweep still collects everything else.
-      await _seedBlob(blobs, 'just-pulled', [1]);
-      await _seedBlob(blobs, 'old-orphan', [2]);
+    test(
+      'an orphan outside the candidates is left for the full sweep',
+      () async {
+        // The point of scoping is cost, not reach: a pull pays for its own
+        // leftovers, and the startup sweep still collects everything else.
+        await _seedBlob(blobs, 'just-pulled', [1]);
+        await _seedBlob(blobs, 'old-orphan', [2]);
 
-      final scoped = await gc(candidates: {'just-pulled'});
-      expect(scoped.deleted, 1);
-      expect(await blobs.read('old-orphan', vaultId: _v), isNotNull,
-          reason: 'an id nobody asked about must not be touched');
+        final scoped = await gc(candidates: {'just-pulled'});
+        expect(scoped.deleted, 1);
+        expect(
+          await blobs.read('old-orphan', vaultId: _v),
+          isNotNull,
+          reason: 'an id nobody asked about must not be touched',
+        );
 
-      expect((await gc()).deleted, 1, reason: 'the full sweep still gets it');
-    });
+        expect((await gc()).deleted, 1, reason: 'the full sweep still gets it');
+      },
+    );
 
-    test('a candidate pinned by a file that cannot rebuild it survives',
-        () async {
-      // Chunks are content-addressed and shared. A pull staging one that some
-      // other file depends on must not delete it just because the pulled file
-      // no longer needs it.
-      await _seedBlob(blobs, 'shared', [3]);
-      store.upsert(_state('keeper', blobRef: 'shared'));
+    test(
+      'a candidate pinned by a file that cannot rebuild it survives',
+      () async {
+        // Chunks are content-addressed and shared. A pull staging one that some
+        // other file depends on must not delete it just because the pulled file
+        // no longer needs it.
+        await _seedBlob(blobs, 'shared', [3]);
+        store.upsert(_state('keeper', blobRef: 'shared'));
 
-      final r = await LocalBlobGc(
-        store: store,
-        blobStore: blobs,
-        vaultId: _v,
-        isRegenerable: (_) async => false,
-      )(candidates: {'shared'});
+        final r = await LocalBlobGc(
+          store: store,
+          blobStore: blobs,
+          vaultId: _v,
+          isRegenerable: (_) async => false,
+        )(candidates: {'shared'});
 
-      expect(r.deleted, 0);
-      expect(await blobs.read('shared', vaultId: _v), isNotNull);
-    });
+        expect(r.deleted, 0);
+        expect(await blobs.read('shared', vaultId: _v), isNotNull);
+      },
+    );
 
     test('an empty candidate set does no work at all', () async {
       await _seedBlob(blobs, 'orphan', [4]);
@@ -392,8 +418,11 @@ void main() {
 
       expect(r.skipped, isTrue);
       expect(r.deleted, 0);
-      expect(await blobs.read('orphan', vaultId: _v), isNotNull,
-          reason: 'a half-built pinned set must never authorise a delete');
+      expect(
+        await blobs.read('orphan', vaultId: _v),
+        isNotNull,
+        reason: 'a half-built pinned set must never authorise a delete',
+      );
     });
   });
 }

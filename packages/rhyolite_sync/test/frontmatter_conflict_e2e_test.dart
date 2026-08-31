@@ -33,8 +33,11 @@ class _NoopChanges implements IChangeProvider {
   @override
   Stream<String> get typing => const Stream.empty();
   @override
-  void suppress(String path,
-      {int count = 1, Duration holdFor = const Duration(seconds: 2)}) {}
+  void suppress(
+    String path, {
+    int count = 1,
+    Duration holdFor = const Duration(seconds: 2),
+  }) {}
   @override
   void unsuppress(String path) {}
 }
@@ -64,6 +67,7 @@ class _MemIo implements IPlatformIO {
     files[p] = b;
     mtimes[p] = ++_clock;
   }
+
   @override
   Future<void> deleteFile(String p) async => files.remove(p);
   @override
@@ -95,16 +99,18 @@ class _Server {
   late final IBlobStorage storage = _ServerBlobs(blobs);
 
   void put(StatePutItem item) {
-    records.add(StateRecord(
-      fileId: item.fileId,
-      encryptedState: item.encryptedState,
-      blobRef: item.blobRef,
-      hlcPacked: item.hlcPacked,
-      contextPacked: item.contextPacked,
-      serverSeq: ++seq,
-      tombstone: item.tombstone,
-      chunks: item.chunks,
-    ));
+    records.add(
+      StateRecord(
+        fileId: item.fileId,
+        encryptedState: item.encryptedState,
+        blobRef: item.blobRef,
+        hlcPacked: item.hlcPacked,
+        contextPacked: item.contextPacked,
+        serverSeq: ++seq,
+        tombstone: item.tombstone,
+        chunks: item.chunks,
+      ),
+    );
   }
 
   List<StateRecord> since(int cursor) =>
@@ -116,20 +122,28 @@ class _ServerBlobs implements IBlobStorage {
   final Map<String, Uint8List> store;
 
   @override
-  Future<Set<String>> exists(List<String> ids, {RpcContext? context}) async =>
-      {for (final i in ids) if (store.containsKey(i)) i};
+  Future<Set<String>> exists(List<String> ids, {RpcContext? context}) async => {
+    for (final i in ids)
+      if (store.containsKey(i)) i,
+  };
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs,
-      {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     for (final (b, i) in blobs) {
       store[i] = b;
     }
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> ids,
-      {RpcContext? context}) async =>
-      {for (final i in ids) if (store.containsKey(i)) i: store[i]!};
+  Future<Map<String, Uint8List>> download(
+    List<String> ids, {
+    RpcContext? context,
+  }) async => {
+    for (final i in ids)
+      if (store.containsKey(i)) i: store[i]!,
+  };
   @override
   Future<void> deleteMany(List<String> ids, {RpcContext? context}) async {
     for (final i in ids) {
@@ -139,9 +153,19 @@ class _ServerBlobs implements IBlobStorage {
 }
 
 class _Device {
-  _Device._(this.name, this.io, this.store, this.fugueStore, this.fmStore,
-      this.reconciler, this.applier, this.codec, this.resolver, this.server,
-      this.events);
+  _Device._(
+    this.name,
+    this.io,
+    this.store,
+    this.fugueStore,
+    this.fmStore,
+    this.reconciler,
+    this.applier,
+    this.codec,
+    this.resolver,
+    this.server,
+    this.events,
+  );
 
   final String name;
   final _MemIo io;
@@ -173,10 +197,10 @@ class _Device {
     final events = <SyncEngineEvent>[];
 
     ChunkedBlobIO? builder() => ChunkedBlobIO(
-          blobStore: localBlobs,
-          remoteBlobStorage: server.storage,
-          vaultId: _vaultId,
-        );
+      blobStore: localBlobs,
+      remoteBlobStorage: server.storage,
+      vaultId: _vaultId,
+    );
 
     final reconciler = DiskReconciler(
       vaultPath: _vaultPath,
@@ -222,8 +246,19 @@ class _Device {
       chunkedBlobIO: builder(),
     );
 
-    return _Device._(name, io, store, fugueStore, fmStore, reconciler,
-        applier, codec, resolver, server, events);
+    return _Device._(
+      name,
+      io,
+      store,
+      fugueStore,
+      fmStore,
+      reconciler,
+      applier,
+      codec,
+      resolver,
+      server,
+      events,
+    );
   }
 
   String get diskNote => utf8.decode(io.files['$_vaultPath/$_note']!);
@@ -240,13 +275,14 @@ class _Device {
       final register = store.registerFor(fileId);
       if (register == null) continue;
       final tv = register.hasConflict
-          ? register.values.firstWhere((t) => t.hlc.nodeId == store.deviceId,
-              orElse: () => register.values.first)
+          ? register.values.firstWhere(
+              (t) => t.hlc.nodeId == store.deviceId,
+              orElse: () => register.values.first,
+            )
           : register.values.first;
       final synced = store.lastSyncedBlobRefFor(fileId);
-      final dirty = register.hasConflict ||
-          synced == null ||
-          synced != tv.value.blobRef;
+      final dirty =
+          register.hasConflict || synced == null || synced != tv.value.blobRef;
       if (!dirty) continue;
       server.put(await codec.encode(tv.value, tv.context));
     }
@@ -261,18 +297,22 @@ class _Device {
     final seq = (await fugueStore.get(fileId))!;
     final up = await reconciler.uploadSequenceBlob(seq);
     final hlc = store.nextHlc();
-    store.applyLocal(FileState(
-      fileId: fileId,
-      path: _note,
-      blobRef: up!.manifestHash,
-      sizeBytes: up.blobSize,
-      hlc: hlc,
-      tombstone: false,
-      chunks: up.chunkHashes,
-    ));
+    store.applyLocal(
+      FileState(
+        fileId: fileId,
+        path: _note,
+        blobRef: up!.manifestHash,
+        sizeBytes: up.blobSize,
+        hlc: hlc,
+        tombstone: false,
+        chunks: up.chunkHashes,
+      ),
+    );
     await store.persistOne(fileId);
     final register = store.registerFor(fileId)!;
-    final tv = register.values.firstWhere((t) => t.hlc.nodeId == store.deviceId);
+    final tv = register.values.firstWhere(
+      (t) => t.hlc.nodeId == store.deviceId,
+    );
     server.put(await codec.encode(tv.value, tv.context));
   }
 
@@ -319,8 +359,11 @@ void main() {
 
     // 2. Device B syncs cleanly — pull, then materialise.
     await b.pull();
-    expect(b.io.files.containsKey('$_vaultPath/$_note'), isTrue,
-        reason: 'B must receive the note');
+    expect(
+      b.io.files.containsKey('$_vaultPath/$_note'),
+      isTrue,
+      reason: 'B must receive the note',
+    );
     expect(b.diskNote, base, reason: 'B starts converged');
     await b.pushAll(); // B adopts the state, nothing new owed
 
@@ -331,13 +374,17 @@ void main() {
     a.diskNote = base
         .replaceFirst('start: 2026-08-04', 'start: 2026-08-01')
         .replaceFirst('end: 2026-09-28', 'end: 2026-09-30')
-        .replaceFirst('updated: 2026-08-21T11:36:01+03:00',
-            'updated: 2026-08-12T11:23:01+03:00');
+        .replaceFirst(
+          'updated: 2026-08-21T11:36:01+03:00',
+          'updated: 2026-08-12T11:23:01+03:00',
+        );
     b.diskNote = base
         .replaceFirst('start: 2026-08-04', 'start: 2026-08-06')
         .replaceFirst('end: 2026-09-28', 'end: 2026-09-15')
-        .replaceFirst('updated: 2026-08-21T11:36:01+03:00',
-            'updated: 2026-08-19T09:02:44+03:00');
+        .replaceFirst(
+          'updated: 2026-08-21T11:36:01+03:00',
+          'updated: 2026-08-19T09:02:44+03:00',
+        );
 
     await a.pushAll();
     await b.pushAll();
@@ -350,8 +397,10 @@ void main() {
       await a.pushAll();
       await b.pushAll();
       final fid = fileIdFor(_note);
-      print('round $round: A conflict=${a.store.hasConflict(fid)} '
-          'B conflict=${b.store.hasConflict(fid)} seq=${server.seq}');
+      print(
+        'round $round: A conflict=${a.store.hasConflict(fid)} '
+        'B conflict=${b.store.hasConflict(fid)} seq=${server.seq}',
+      );
     }
 
     print('=== A disk after merge ===');
@@ -359,17 +408,23 @@ void main() {
     print('=== B disk after merge ===');
     print(b.diskNote.substring(0, b.diskNote.indexOf('\n---\n') + 5));
 
-    final conflicts = [...a.events, ...b.events]
-        .whereType<SyncConflictResolved>()
-        .map((e) => e.strategy)
-        .toList();
+    final conflicts = [
+      ...a.events,
+      ...b.events,
+    ].whereType<SyncConflictResolved>().map((e) => e.strategy).toList();
     print('conflict strategies: $conflicts');
 
     for (final blended in ['016', '3015', '4422', '0644', '1519']) {
-      expect(a.diskNote.contains(blended), isFalse,
-          reason: 'A blended values: $blended');
-      expect(b.diskNote.contains(blended), isFalse,
-          reason: 'B blended values: $blended');
+      expect(
+        a.diskNote.contains(blended),
+        isFalse,
+        reason: 'A blended values: $blended',
+      );
+      expect(
+        b.diskNote.contains(blended),
+        isFalse,
+        reason: 'B blended values: $blended',
+      );
     }
     expect(a.diskNote, b.diskNote, reason: 'devices must converge');
   });
@@ -397,17 +452,25 @@ void _fieldScenario(String base) {
     final stale = base
         .replaceFirst('start: 2026-08-04', 'start: 2026-08-01')
         .replaceFirst('end: 2026-09-28', 'end: 2026-09-30')
-        .replaceFirst('updated: 2026-08-21T11:36:01+03:00',
-            'updated: 2026-08-12T11:23:01+03:00')
+        .replaceFirst(
+          'updated: 2026-08-21T11:36:01+03:00',
+          'updated: 2026-08-12T11:23:01+03:00',
+        )
         .replaceFirst('уточнить сроки', 'запросить статус');
     b.diskNote = stale;
 
     // start(): pull, then startup diff, then push.
     await b.pull();
-    expect(b.diskNote, stale,
-        reason: 'the first pull must not overwrite content B never synced');
-    expect(b.events.whereType<SyncFileKeptUnsynced>(), isNotEmpty,
-        reason: 'and it must say so rather than silently skipping');
+    expect(
+      b.diskNote,
+      stale,
+      reason: 'the first pull must not overwrite content B never synced',
+    );
+    expect(
+      b.events.whereType<SyncFileKeptUnsynced>(),
+      isNotEmpty,
+      reason: 'and it must say so rather than silently skipping',
+    );
 
     for (var i = 0; i < 4; i++) {
       await b.pushAll();
@@ -417,18 +480,27 @@ void _fieldScenario(String base) {
     }
 
     // Neither side may vanish. B's own edit and A's base both survive.
-    expect(b.diskNote.contains('запросить статус'), isTrue,
-        reason: "B's local-only edit must survive the merge");
-    expect(a.diskNote.contains('запросить статус'), isTrue,
-        reason: 'and must reach A');
+    expect(
+      b.diskNote.contains('запросить статус'),
+      isTrue,
+      reason: "B's local-only edit must survive the merge",
+    );
+    expect(
+      a.diskNote.contains('запросить статус'),
+      isTrue,
+      reason: 'and must reach A',
+    );
     expect(a.diskNote, b.diskNote, reason: 'devices must converge');
 
     // Whatever the merge chose, the region must still be a valid single
     // mapping — no duplicated keys, no blended values.
     for (final disk in [a.diskNote, b.diskNote]) {
       for (final key in ['start', 'end', 'updated', 'tasks', 'tags']) {
-        expect(RegExp('^$key:', multiLine: true).allMatches(disk).length, 1,
-            reason: '$key must appear exactly once');
+        expect(
+          RegExp('^$key:', multiLine: true).allMatches(disk).length,
+          1,
+          reason: '$key must appear exactly once',
+        );
       }
       expect(disk.contains('2026-08-0401'), isFalse);
       expect(disk.contains('2026-09-2830'), isFalse);
@@ -455,13 +527,17 @@ void _tailLessSide(String base) {
     a.diskNote = base
         .replaceFirst('start: 2026-08-04', 'start: 2026-08-01')
         .replaceFirst('end: 2026-09-28', 'end: 2026-09-30')
-        .replaceFirst('updated: 2026-08-21T11:36:01+03:00',
-            'updated: 2026-08-12T11:23:01+03:00');
+        .replaceFirst(
+          'updated: 2026-08-21T11:36:01+03:00',
+          'updated: 2026-08-12T11:23:01+03:00',
+        );
     b.diskNote = base
         .replaceFirst('start: 2026-08-04', 'start: 2026-08-06')
         .replaceFirst('end: 2026-09-28', 'end: 2026-09-15')
-        .replaceFirst('updated: 2026-08-21T11:36:01+03:00',
-            'updated: 2026-08-19T09:02:44+03:00');
+        .replaceFirst(
+          'updated: 2026-08-21T11:36:01+03:00',
+          'updated: 2026-08-19T09:02:44+03:00',
+        );
 
     // A pushes the way repair / a pre-3.12 client does: no tail.
     await a.pushStrippingFmTail();
@@ -478,21 +554,32 @@ void _tailLessSide(String base) {
 
     print('=== A region ===');
     print(a.diskNote.substring(0, a.diskNote.indexOf('\n---\n') + 5));
-    print('strategies: ${[...a.events, ...b.events].whereType<SyncConflictResolved>().map((e) => e.strategy).toSet()}');
+    print(
+      'strategies: ${[...a.events, ...b.events].whereType<SyncConflictResolved>().map((e) => e.strategy).toSet()}',
+    );
 
     // Each property must hold ONE of the two written values, never a blend.
     for (final line in [a.diskNote, b.diskNote]) {
       for (final blended in ['016', '3015', '4422', '0644', '1519', '1223']) {
         expect(line.contains(blended), isFalse, reason: 'blended: $blended');
       }
-      expect(RegExp(r'^start: 2026-08-0[16]$', multiLine: true).hasMatch(line),
-          isTrue, reason: 'start must be one of the two written values');
-      expect(RegExp(r'^end: 2026-09-(30|15)$', multiLine: true).hasMatch(line),
-          isTrue, reason: 'end must be one of the two written values');
+      expect(
+        RegExp(r'^start: 2026-08-0[16]$', multiLine: true).hasMatch(line),
+        isTrue,
+        reason: 'start must be one of the two written values',
+      );
+      expect(
+        RegExp(r'^end: 2026-09-(30|15)$', multiLine: true).hasMatch(line),
+        isTrue,
+        reason: 'end must be one of the two written values',
+      );
       // Every key exactly once — the duplicate-key bug this feature exists for.
       for (final key in ['start', 'end', 'updated', 'category', 'tasks']) {
-        expect(RegExp('^$key:', multiLine: true).allMatches(line).length, 1,
-            reason: '$key must appear exactly once');
+        expect(
+          RegExp('^$key:', multiLine: true).allMatches(line).length,
+          1,
+          reason: '$key must appear exactly once',
+        );
       }
     }
     expect(a.diskNote, b.diskNote, reason: 'devices must converge');
@@ -537,8 +624,11 @@ void _rawSideScenario(String base) {
     print('=== A disk ===');
     print(a.diskNote.substring(0, a.diskNote.indexOf('\n---\n') + 5));
 
-    expect(a.diskNote.contains('b-only-marker'), isTrue,
-        reason: "B's unmodelled region must survive the merge");
+    expect(
+      a.diskNote.contains('b-only-marker'),
+      isTrue,
+      reason: "B's unmodelled region must survive the merge",
+    );
     expect(a.diskNote, b.diskNote, reason: 'devices must converge');
   });
 }

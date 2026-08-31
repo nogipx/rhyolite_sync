@@ -29,11 +29,7 @@ void main() {
     store = LocalBlobStore(repo);
     adapter = LocalBlobStorageAdapter(store, _v);
     for (final id in ['a', 'b', 'c']) {
-      await store.write(
-        Uint8List.fromList(utf8.encode(id)),
-        id,
-        vaultId: _v,
-      );
+      await store.write(Uint8List.fromList(utf8.encode(id)), id, vaultId: _v);
     }
     repo.listCalls = 0;
   });
@@ -45,7 +41,8 @@ void main() {
     expect(
       repo.listCalls,
       0,
-      reason: 'a probe asks about its own ids; enumerating the vault for each '
+      reason:
+          'a probe asks about its own ids; enumerating the vault for each '
           'batch made verification walk the whole cache per slice',
     );
   });

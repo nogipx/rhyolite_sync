@@ -20,10 +20,7 @@ import 'dart:async';
 /// of paths edited within the debounce window — clears entirely on
 /// [cancelAll].
 class TextDebounceCoordinator {
-  TextDebounceCoordinator({
-    required this.debounce,
-    required this.onReconcile,
-  });
+  TextDebounceCoordinator({required this.debounce, required this.onReconcile});
 
   /// Quiet period waited after the most recent disk or typing event.
   final Duration debounce;

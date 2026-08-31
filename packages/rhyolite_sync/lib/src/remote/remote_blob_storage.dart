@@ -79,8 +79,10 @@ class RemoteBlobStorage implements IBlobStorage {
     final sentIds = blobs.map((b) => b.$2).toSet();
     for (var attempt = 0; ; attempt++) {
       try {
-        final resp =
-            await _caller.upload(_toBulkChunks(blobs, context), context: context);
+        final resp = await _caller.upload(
+          _toBulkChunks(blobs, context),
+          context: context,
+        );
         // Durability check: the server acks the ids it actually stored. If
         // any sent blob is missing from the ack, the upload silently dropped
         // it (rate-limit mid-stream, dedup edge, lost frame) — treat as a
@@ -110,7 +112,8 @@ class RemoteBlobStorage implements IBlobStorage {
         // stored, and `_toBulkChunks` rebuilds the stream from the in-memory
         // list, so re-sending is safe and idempotent — retry it like the
         // backpressure codes instead of failing the upload.
-        final retryable = e.statusCode == RpcStatus.resourceExhausted ||
+        final retryable =
+            e.statusCode == RpcStatus.resourceExhausted ||
             e.statusCode == RpcStatus.unavailable ||
             (e.statusCode == RpcStatus.internal &&
                 e.message.contains('First chunk must carry'));
@@ -141,10 +144,7 @@ class RemoteBlobStorage implements IBlobStorage {
   );
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     if (blobIds.isEmpty) return;
     await _caller.bulkDelete(
       BulkDeleteBlobsRequest(vaultId: vaultId, blobIds: blobIds),

@@ -52,10 +52,7 @@ class LocalBlobStorageAdapter implements IBlobStorage {
   }
 
   @override
-  Future<void> deleteMany(
-    List<String> blobIds, {
-    RpcContext? context,
-  }) async {
+  Future<void> deleteMany(List<String> blobIds, {RpcContext? context}) async {
     if (blobIds.isEmpty) return;
     await _store.deleteBlobs(blobIds, vaultId: _vaultId);
   }

@@ -24,11 +24,7 @@ const _vault = 'vault-stability';
 
 /// Mirrors DiskReconciler._reconcileText: observe the file's own dots, then
 /// apply the new snapshot under this device's clock.
-Future<Fugue<String>> _apply(
-  Fugue<String> old,
-  String text,
-  String device,
-) {
+Future<Fugue<String>> _apply(Fugue<String> old, String text, String device) {
   final clock = LamportClock(device)..observeAll(old.dots);
   return FugueTextSync.applyTextSnapshot(
     oldFugue: old,
@@ -66,66 +62,73 @@ void main() {
       expect(
         FugueStore.encodeBlob(tree),
         FugueStore.encodeBlob(tree),
-        reason: 'two encodes of ONE tree must agree, or a blob id depends on '
+        reason:
+            'two encodes of ONE tree must agree, or a blob id depends on '
             'something other than content and dedup is broken',
       );
     });
 
-    test('a tree survives the FugueStore round trip byte-identically',
-        () async {
-      // The exact chain regeneration depends on: the uploader encodes the
-      // in-memory tree, but recovery encodes the tree AFTER it has been
-      // persisted and read back. Those two encodings must be the same bytes.
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
+    test(
+      'a tree survives the FugueStore round trip byte-identically',
+      () async {
+        // The exact chain regeneration depends on: the uploader encodes the
+        // in-memory tree, but recovery encodes the tree AFTER it has been
+        // persisted and read back. Those two encodings must be the same bytes.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
 
-      final tree = await _mergedTree();
-      final uploaded = FugueStore.encodeBlob(tree);
+        final tree = await _mergedTree();
+        final uploaded = FugueStore.encodeBlob(tree);
 
-      final writer = FugueStore(client: env.client, vaultId: _vault);
-      await writer.load();
-      writer.set('f1', tree);
-      await writer.persistOne('f1');
+        final writer = FugueStore(client: env.client, vaultId: _vault);
+        await writer.load();
+        writer.set('f1', tree);
+        await writer.persistOne('f1');
 
-      final reader = FugueStore(client: env.client, vaultId: _vault);
-      await reader.load();
-      final reloaded = (await reader.get('f1'))!;
+        final reader = FugueStore(client: env.client, vaultId: _vault);
+        await reader.load();
+        final reloaded = (await reader.get('f1'))!;
 
-      expect(
-        FugueStore.encodeBlob(reloaded),
-        uploaded,
-        reason: 'persist+reload changed the bytes the tree encodes to. A '
-            "note's blob is no longer cached locally, so this is exactly the "
-            'chain that heals a chunk the server lost — if it drifts, every '
-            'already-uploaded note silently becomes unrecoverable.',
-      );
-    });
+        expect(
+          FugueStore.encodeBlob(reloaded),
+          uploaded,
+          reason:
+              'persist+reload changed the bytes the tree encodes to. A '
+              "note's blob is no longer cached locally, so this is exactly the "
+              'chain that heals a chunk the server lost — if it drifts, every '
+              'already-uploaded note silently becomes unrecoverable.',
+        );
+      },
+    );
 
-    test('the legacy JSON row decodes to the same bytes as the compact one',
-        () async {
-      // Rows written before the compact encoding are still out there and are
-      // read in place. A note whose row is still JSON must regenerate the same
-      // blob as one that has been rewritten.
-      final env = await DataServiceFactory.inMemory();
-      addTearDown(env.dispose);
+    test(
+      'the legacy JSON row decodes to the same bytes as the compact one',
+      () async {
+        // Rows written before the compact encoding are still out there and are
+        // read in place. A note whose row is still JSON must regenerate the same
+        // blob as one that has been rewritten.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
 
-      final tree = await _mergedTree();
-      await env.client.create(
-        collection: '${_vault}_fugue_store',
-        id: 'legacy',
-        payload: FugueStore.encodeForBlob(tree) as Map<String, dynamic>,
-      );
+        final tree = await _mergedTree();
+        await env.client.create(
+          collection: '${_vault}_fugue_store',
+          id: 'legacy',
+          payload: FugueStore.encodeForBlob(tree) as Map<String, dynamic>,
+        );
 
-      final store = FugueStore(client: env.client, vaultId: _vault);
-      await store.load();
+        final store = FugueStore(client: env.client, vaultId: _vault);
+        await store.load();
 
-      expect(
-        FugueStore.encodeBlob((await store.get('legacy'))!),
-        FugueStore.encodeBlob(tree),
-        reason: 'an un-migrated row must heal its blob just as well as a '
-            'migrated one',
-      );
-    });
+        expect(
+          FugueStore.encodeBlob((await store.get('legacy'))!),
+          FugueStore.encodeBlob(tree),
+          reason:
+              'an un-migrated row must heal its blob just as well as a '
+              'migrated one',
+        );
+      },
+    );
 
     test('the wire format has not changed under us', () async {
       // A golden, on purpose. The tests above prove the encoder is stable
@@ -143,7 +146,8 @@ void main() {
       expect(
         digest,
         '8c292ab8a754cef83f2e4362022fe1884a7553677a6a517efc9a877ab69acf4c',
-        reason: 'the Fugue wire encoding changed — read the comment above '
+        reason:
+            'the Fugue wire encoding changed — read the comment above '
             'before touching this constant',
       );
     });

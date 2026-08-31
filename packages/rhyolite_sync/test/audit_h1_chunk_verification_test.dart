@@ -33,41 +33,39 @@ Uint8List _flip(Uint8List b) {
 
 void main() {
   group('H1 — chunk verified against content-address', () {
-    test(
-      'remote returns wrong bytes of correct length -> download fails safe '
-      '(null), never assembles garbage',
-      () async {
-        final backing = FakeBlobStorage();
-        final producer = ChunkedBlobIO(
-          blobStore: LocalBlobStore(InMemoryBlobRepository()),
-          remoteBlobStorage: backing,
-          vaultId: _vaultId,
-        );
+    test('remote returns wrong bytes of correct length -> download fails safe '
+        '(null), never assembles garbage', () async {
+      final backing = FakeBlobStorage();
+      final producer = ChunkedBlobIO(
+        blobStore: LocalBlobStore(InMemoryBlobRepository()),
+        remoteBlobStorage: backing,
+        vaultId: _vaultId,
+      );
 
-        final original = _bytes('the real secret content of this note');
-        final up = await producer.upload(original, <String>{});
-        expect(up.chunkHashes, isNotEmpty);
+      final original = _bytes('the real secret content of this note');
+      final up = await producer.upload(original, <String>{});
+      expect(up.chunkHashes, isNotEmpty);
 
-        // Corrupt one chunk on the remote: SAME length, different content.
-        corruptSameLength(backing.store, up.chunkHashes.first);
+      // Corrupt one chunk on the remote: SAME length, different content.
+      corruptSameLength(backing.store, up.chunkHashes.first);
 
-        // Consumer with an EMPTY local cache is forced to fetch it.
-        final consumer = ChunkedBlobIO(
-          blobStore: LocalBlobStore(InMemoryBlobRepository()),
-          remoteBlobStorage: backing,
-          vaultId: _vaultId,
-        );
+      // Consumer with an EMPTY local cache is forced to fetch it.
+      final consumer = ChunkedBlobIO(
+        blobStore: LocalBlobStore(InMemoryBlobRepository()),
+        remoteBlobStorage: backing,
+        vaultId: _vaultId,
+      );
 
-        final result = await consumer.download(up.manifestHash);
+      final result = await consumer.download(up.manifestHash);
 
-        expect(
-          result,
-          isNull,
-          reason: 'the mismatched chunk is rejected; assembly returns null '
-              'rather than a silently-corrupt file',
-        );
-      },
-    );
+      expect(
+        result,
+        isNull,
+        reason:
+            'the mismatched chunk is rejected; assembly returns null '
+            'rather than a silently-corrupt file',
+      );
+    });
 
     test(
       'bit-rotted LOCAL cache entry is evicted and re-downloaded -> self-heals',
@@ -85,16 +83,26 @@ void main() {
 
         // Rot the cached chunk in place (same length). The remote still holds
         // the correct copy (the upload populated it too).
-        final good = (await local.read(up.chunkHashes.first, vaultId: _vaultId))!;
+        final good = (await local.read(
+          up.chunkHashes.first,
+          vaultId: _vaultId,
+        ))!;
         await local.write(_flip(good), up.chunkHashes.first, vaultId: _vaultId);
 
         final result = await io.download(up.manifestHash);
 
-        expect(result, equals(original),
-            reason: 'the corrupt cache entry was evicted and re-fetched from '
-                'the remote — the file heals');
-        expect(backing.downloadCalls, greaterThan(0),
-            reason: 'healing required a re-download, not a cache hit');
+        expect(
+          result,
+          equals(original),
+          reason:
+              'the corrupt cache entry was evicted and re-fetched from '
+              'the remote — the file heals',
+        );
+        expect(
+          backing.downloadCalls,
+          greaterThan(0),
+          reason: 'healing required a re-download, not a cache hit',
+        );
         // The cache is repaired for next time.
         expect(
           await local.read(up.chunkHashes.first, vaultId: _vaultId),
@@ -121,13 +129,19 @@ void main() {
         final up = await io.upload(original, <String>{});
 
         // Rot the cache AND remove the remote copy.
-        final good = (await local.read(up.chunkHashes.first, vaultId: _vaultId))!;
+        final good = (await local.read(
+          up.chunkHashes.first,
+          vaultId: _vaultId,
+        ))!;
         await local.write(_flip(good), up.chunkHashes.first, vaultId: _vaultId);
         backing.store.remove(up.chunkHashes.first);
 
         final result = await io.download(up.manifestHash);
-        expect(result, isNull,
-            reason: 'no clean source -> null, never the rotted bytes');
+        expect(
+          result,
+          isNull,
+          reason: 'no clean source -> null, never the rotted bytes',
+        );
       },
     );
   });

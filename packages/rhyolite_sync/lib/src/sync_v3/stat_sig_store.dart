@@ -2,7 +2,8 @@ import 'dart:async';
 
 import 'package:rpc_data/rpc_data.dart';
 
-/// Persistent per-file on-disk signature (`mtime` + `size`).
+/// Persistent per-file on-disk signature (`mtime` + `size` + the blob it was
+/// taken for).
 ///
 /// This is a DEVICE-LOCAL change-detection hint — never synced (mtime is
 /// per-device). It lets startup and the reconciler skip reading and
@@ -10,7 +11,15 @@ import 'package:rpc_data/rpc_data.dart';
 /// sync, across plugin restarts. Without it the reconciler's in-memory stat
 /// cache is empty on every cold start, so every text file is re-reconciled.
 ///
-/// Storage: one row per fileId in `<vaultId>_stat_sig`, payload `{m, s}`.
+/// [blobRef] is what the signature is EVIDENCE FOR. Without it a match proves
+/// only "this file has not changed since we last looked", which is a different
+/// claim from "this file holds that content" — and a caller that conflated the
+/// two would skip writing a peer's newer version over a stale local copy,
+/// silently. Null on rows written before this field existed, and on a file
+/// whose disk content is not any single value (a multi-value union view); both
+/// mean "cannot prove anything", so a reader must fall through.
+///
+/// Storage: one row per fileId in `<vaultId>_stat_sig`, payload `{m, s, b?}`.
 /// Keyed by the same deterministic fileId as [FileState] (see
 /// `deterministicFileId` — the keyed HMAC, or the legacy `uuid.v5` fallback
 /// for a keyless vault), so a caller holding either a relPath (via its
@@ -23,14 +32,15 @@ import 'package:rpc_data/rpc_data.dart';
 /// mtime+size match, the same signal the reconciler already trusts.
 class StatSigStore {
   StatSigStore({required IDataClient client, required this.vaultId})
-      : _client = client;
+    : _client = client;
 
   final IDataClient _client;
   final String vaultId;
 
   String get _col => '${vaultId}_stat_sig';
 
-  final Map<String, ({int mtimeMs, int sizeBytes})> _cache = {};
+  final Map<String, ({int mtimeMs, int sizeBytes, String? blobRef})> _cache =
+      {};
   final Map<String, Future<void>> _writeQueue = {};
 
   /// Loads all persisted signatures into memory. Call once at startup.
@@ -40,13 +50,19 @@ class StatSigStore {
     for (final r in records) {
       final m = r.payload['m'];
       final s = r.payload['s'];
+      final b = r.payload['b'];
       if (m is int && s is int) {
-        _cache[r.id] = (mtimeMs: m, sizeBytes: s);
+        _cache[r.id] = (
+          mtimeMs: m,
+          sizeBytes: s,
+          blobRef: b is String && b.isNotEmpty ? b : null,
+        );
       }
     }
   }
 
-  ({int mtimeMs, int sizeBytes})? get(String fileId) => _cache[fileId];
+  ({int mtimeMs, int sizeBytes, String? blobRef})? get(String fileId) =>
+      _cache[fileId];
 
   /// All fileIds with a persisted signature. Used by the orphan sweep to
   /// reclaim rows for files that no longer have a live FileState.
@@ -54,15 +70,19 @@ class StatSigStore {
 
   /// Records the signature for [fileId] and persists it (fire-and-forget,
   /// serialized per fileId). No-ops when the signature is unchanged.
-  void set(String fileId, int mtimeMs, int sizeBytes) {
+  void set(String fileId, int mtimeMs, int sizeBytes, {String? blobRef}) {
+    final ref = blobRef != null && blobRef.isNotEmpty ? blobRef : null;
     final existing = _cache[fileId];
     if (existing != null &&
         existing.mtimeMs == mtimeMs &&
-        existing.sizeBytes == sizeBytes) {
+        existing.sizeBytes == sizeBytes &&
+        existing.blobRef == ref) {
       return;
     }
-    _cache[fileId] = (mtimeMs: mtimeMs, sizeBytes: sizeBytes);
-    unawaited(_serialise(fileId, () => _write(fileId, mtimeMs, sizeBytes)));
+    _cache[fileId] = (mtimeMs: mtimeMs, sizeBytes: sizeBytes, blobRef: ref);
+    unawaited(
+      _serialise(fileId, () => _write(fileId, mtimeMs, sizeBytes, ref)),
+    );
   }
 
   void remove(String fileId) {
@@ -106,8 +126,17 @@ class StatSigStore {
     }
   }
 
-  Future<void> _write(String fileId, int mtimeMs, int sizeBytes) async {
-    final payload = <String, dynamic>{'m': mtimeMs, 's': sizeBytes};
+  Future<void> _write(
+    String fileId,
+    int mtimeMs,
+    int sizeBytes,
+    String? blobRef,
+  ) async {
+    final payload = <String, dynamic>{
+      'm': mtimeMs,
+      's': sizeBytes,
+      if (blobRef != null) 'b': blobRef,
+    };
     final existing = await _client.get(collection: _col, id: fileId);
     if (existing == null) {
       await _client.create(collection: _col, id: fileId, payload: payload);

@@ -5,8 +5,7 @@ const _vaultId = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 
 void main() {
   group('VaultConfig — BYO secret is never persisted locally', () {
-    test('toJson drops the secret externalBlobConfig, keeps the kind marker',
-        () {
+    test('toJson drops the secret externalBlobConfig, keeps the kind marker', () {
       final cfg = VaultConfig(
         vaultId: _vaultId,
         vaultName: 'v',
@@ -20,10 +19,16 @@ void main() {
       );
 
       final json = cfg.toJson();
-      expect(json.containsKey('externalBlobConfig'), isFalse,
-          reason: 'the secret config must never reach data.json');
-      expect(json['externalStorageKind'], 's3',
-          reason: 'only the non-secret kind marker is persisted');
+      expect(
+        json.containsKey('externalBlobConfig'),
+        isFalse,
+        reason: 'the secret config must never reach data.json',
+      );
+      expect(
+        json['externalStorageKind'],
+        's3',
+        reason: 'only the non-secret kind marker is persisted',
+      );
       // Belt-and-suspenders: no secret material anywhere in the serialised form.
       expect(json.toString(), isNot(contains('TOP_SECRET_KEY')));
       expect(json.toString(), isNot(contains('AKIA_SECRET')));

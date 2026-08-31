@@ -1,7 +1,8 @@
 import 'dart:typed_data';
 
 import 'gzip_codec_archive.dart'
-    if (dart.library.js_interop) 'gzip_codec_web.dart' as impl;
+    if (dart.library.js_interop) 'gzip_codec_web.dart'
+    as impl;
 
 /// Gzip, on whatever the platform does fastest: `dart:io`'s zlib on the VM
 /// (via `package:archive`), the Compression Streams API on the web, and Dart's

@@ -29,11 +29,19 @@ class _MemRemote implements IBlobStorage {
   void Function()? onUpload;
 
   @override
-  Future<Set<String>> exists(List<String> blobIds, {RpcContext? context}) async =>
-      {for (final id in blobIds) if (store.containsKey(id)) id};
+  Future<Set<String>> exists(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async => {
+    for (final id in blobIds)
+      if (store.containsKey(id)) id,
+  };
 
   @override
-  Future<void> upload(List<(Uint8List, String)> blobs, {RpcContext? context}) async {
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    RpcContext? context,
+  }) async {
     final hook = onUpload;
     if (hook != null) {
       onUpload = null;
@@ -45,7 +53,10 @@ class _MemRemote implements IBlobStorage {
   }
 
   @override
-  Future<Map<String, Uint8List>> download(List<String> blobIds, {RpcContext? context}) async {
+  Future<Map<String, Uint8List>> download(
+    List<String> blobIds, {
+    RpcContext? context,
+  }) async {
     return {
       for (final id in blobIds)
         if (store.containsKey(id)) id: store[id]!,
@@ -150,8 +161,7 @@ class _SealedRemote extends _MemRemote {
   Future<Map<String, Uint8List>> download(
     List<String> blobIds, {
     RpcContext? context,
-  }) async =>
-      throw const UnsupportedCipherVersion(0x7f);
+  }) async => throw const UnsupportedCipherVersion(0x7f);
 }
 
 Future<_Fixture> _newFixture({
@@ -195,9 +205,7 @@ Future<_Fixture> _newFixture({
     store: store,
     fugueStore: fugueStore,
     chunkedIOBuilder: builder,
-    knownChunks: () => {
-      for (final s in store.allValuesFlat) ...s.chunks,
-    },
+    knownChunks: () => {for (final s in store.allValuesFlat) ...s.chunks},
     fileIdFor: fileIdFor,
     emit: events.add,
     maxFileSizeBytes: maxFileSizeBytes,
@@ -224,23 +232,28 @@ Uint8List _bytes(String s) => Uint8List.fromList(utf8.encode(s));
 
 void main() {
   group('DiskReconciler — size admission', () {
-    test('a file over the per-file limit is skipped and surfaced, not uploaded',
-        () async {
-      final f = await _newFixture(maxFileSizeBytes: () => 100);
-      f.io.files['$_vaultPath/big.bin'] = Uint8List(500); // 500 > 100
+    test(
+      'a file over the per-file limit is skipped and surfaced, not uploaded',
+      () async {
+        final f = await _newFixture(maxFileSizeBytes: () => 100);
+        f.io.files['$_vaultPath/big.bin'] = Uint8List(500); // 500 > 100
 
-      final changed = await f.reconciler.reconcileWithDisk('big.bin');
+        final changed = await f.reconciler.reconcileWithDisk('big.bin');
 
-      expect(changed, isFalse, reason: 'over-limit file produces no state');
-      expect(f.store.get(f.fileIdFor('big.bin')), isNull,
-          reason: 'no FileState is created for a blocked file');
-      expect(f.remote.store, isEmpty, reason: 'nothing was uploaded');
-      final blocked = f.events.whereType<SyncFileSizeBlocked>().toList();
-      expect(blocked, hasLength(1));
-      expect(blocked.single.path, 'big.bin');
-      expect(blocked.single.sizeBytes, 500);
-      expect(blocked.single.limitBytes, 100);
-    });
+        expect(changed, isFalse, reason: 'over-limit file produces no state');
+        expect(
+          f.store.get(f.fileIdFor('big.bin')),
+          isNull,
+          reason: 'no FileState is created for a blocked file',
+        );
+        expect(f.remote.store, isEmpty, reason: 'nothing was uploaded');
+        final blocked = f.events.whereType<SyncFileSizeBlocked>().toList();
+        expect(blocked, hasLength(1));
+        expect(blocked.single.path, 'big.bin');
+        expect(blocked.single.sizeBytes, 500);
+        expect(blocked.single.limitBytes, 100);
+      },
+    );
 
     test('a file under the limit syncs normally', () async {
       final f = await _newFixture(maxFileSizeBytes: () => 1000);
@@ -265,19 +278,21 @@ void main() {
       expect(unblocked.single.path, 'big.bin');
     });
 
-    test('a blocked file shrinking under the limit unblocks and syncs',
-        () async {
-      final f = await _newFixture(maxFileSizeBytes: () => 100);
-      f.io.files['$_vaultPath/big.bin'] = Uint8List(500);
-      await f.reconciler.reconcileWithDisk('big.bin'); // blocked
+    test(
+      'a blocked file shrinking under the limit unblocks and syncs',
+      () async {
+        final f = await _newFixture(maxFileSizeBytes: () => 100);
+        f.io.files['$_vaultPath/big.bin'] = Uint8List(500);
+        await f.reconciler.reconcileWithDisk('big.bin'); // blocked
 
-      f.io.files['$_vaultPath/big.bin'] = _bytes('now small');
-      final changed = await f.reconciler.reconcileWithDisk('big.bin');
+        f.io.files['$_vaultPath/big.bin'] = _bytes('now small');
+        final changed = await f.reconciler.reconcileWithDisk('big.bin');
 
-      expect(f.events.whereType<SyncFileSizeUnblocked>(), hasLength(1));
-      expect(changed, isTrue);
-      expect(f.store.get(f.fileIdFor('big.bin')), isNotNull);
-    });
+        expect(f.events.whereType<SyncFileSizeUnblocked>(), hasLength(1));
+        expect(changed, isTrue);
+        expect(f.store.get(f.fileIdFor('big.bin')), isNotNull);
+      },
+    );
 
     test('a never-blocked file never emits SyncFileSizeUnblocked', () async {
       final f = await _newFixture(maxFileSizeBytes: () => 1000);
@@ -290,20 +305,23 @@ void main() {
   });
 
   group('DiskReconciler — binary reconcile', () {
-    test('new binary file on disk -> creates FileState with manifest', () async {
-      final f = await _newFixture();
-      f.io.files['$_vaultPath/image.bin'] = _bytes('binary content');
+    test(
+      'new binary file on disk -> creates FileState with manifest',
+      () async {
+        final f = await _newFixture();
+        f.io.files['$_vaultPath/image.bin'] = _bytes('binary content');
 
-      final changed = await f.reconciler.reconcileWithDisk('image.bin');
+        final changed = await f.reconciler.reconcileWithDisk('image.bin');
 
-      expect(changed, isTrue);
-      final fileId = f.fileIdFor('image.bin');
-      final state = f.store.get(fileId)!;
-      expect(state.tombstone, isFalse);
-      expect(state.path, 'image.bin');
-      expect(state.blobRef, isNotEmpty);
-      expect(state.sizeBytes, 14);
-    });
+        expect(changed, isTrue);
+        final fileId = f.fileIdFor('image.bin');
+        final state = f.store.get(fileId)!;
+        expect(state.tombstone, isFalse);
+        expect(state.path, 'image.bin');
+        expect(state.blobRef, isNotEmpty);
+        expect(state.sizeBytes, 14);
+      },
+    );
 
     test('binary file no-op -> no state change', () async {
       final f = await _newFixture();
@@ -379,38 +397,44 @@ void main() {
       expect(seq.values.join(), 'hello world');
     });
 
-    test('edit against peer-ahead content lands at the requested index',
-        () async {
-      // Regression for the clock-skew misplacement: a peer whose clock ran
-      // ahead authored the existing content, so its dots carry LARGER
-      // counters than a fresh local edit would. Combined with a tombstoned
-      // gap this misroutes the insert unless the reconciler first lifts the
-      // local Fugue clock above the content (store.observeDots).
-      final f = await _newFixture();
-      final fileId = f.fileIdFor('note.md');
+    test(
+      'edit against peer-ahead content lands at the requested index',
+      () async {
+        // Regression for the clock-skew misplacement: a peer whose clock ran
+        // ahead authored the existing content, so its dots carry LARGER
+        // counters than a fresh local edit would. Combined with a tombstoned
+        // gap this misroutes the insert unless the reconciler first lifts the
+        // local Fugue clock above the content (store.observeDots).
+        final f = await _newFixture();
+        final fileId = f.fileIdFor('note.md');
 
-      // Adversarial base authored with far-ahead counters: visible "ba",
-      // where 't' is a tombstoned right-side element between 'b' and 'a'.
-      final peer = LamportClock('peer', 1000000);
-      final base = Fugue<String>();
-      base.insert(0, 'a', peer.tick()); // "a"
-      base.insert(0, 'b', peer.tick()); // "ba"
-      base.insert(1, 't', peer.tick()); // "bta"
-      base.delete(1); // tombstone 't' -> 'b' has a tombstoned right
-      expect(base.values.join(), 'ba');
+        // Adversarial base authored with far-ahead counters: visible "ba",
+        // where 't' is a tombstoned right-side element between 'b' and 'a'.
+        final peer = LamportClock('peer', 1000000);
+        final base = Fugue<String>();
+        base.insert(0, 'a', peer.tick()); // "a"
+        base.insert(0, 'b', peer.tick()); // "ba"
+        base.insert(1, 't', peer.tick()); // "bta"
+        base.delete(1); // tombstone 't' -> 'b' has a tombstoned right
+        expect(base.values.join(), 'ba');
 
-      f.fugueStore.set(fileId, base);
-      await f.fugueStore.persistOne(fileId);
+        f.fugueStore.set(fileId, base);
+        await f.fugueStore.persistOne(fileId);
 
-      // Local user inserts "XYZ" between b and a.
-      f.io.files['$_vaultPath/note.md'] = _bytes('bXYZa');
-      await f.reconciler.reconcileWithDisk('note.md');
+        // Local user inserts "XYZ" between b and a.
+        f.io.files['$_vaultPath/note.md'] = _bytes('bXYZa');
+        await f.reconciler.reconcileWithDisk('note.md');
 
-      final seq = (await f.fugueStore.get(fileId))!;
-      expect(seq.values.join(), 'bXYZa',
-          reason: 'edit must land at the requested index despite '
-              'peer-ahead content ids');
-    });
+        final seq = (await f.fugueStore.get(fileId))!;
+        expect(
+          seq.values.join(),
+          'bXYZa',
+          reason:
+              'edit must land at the requested index despite '
+              'peer-ahead content ids',
+        );
+      },
+    );
 
     test('text file deleted -> tombstone + fugueStore.remove', () async {
       final f = await _newFixture();
@@ -481,10 +505,7 @@ void main() {
       await f.reconciler.writeFileToDisk(state);
 
       expect(f.changes.suppressed, isEmpty);
-      expect(
-        f.events.whereType<SyncFilePulled>(),
-        isEmpty,
-      );
+      expect(f.events.whereType<SyncFilePulled>(), isEmpty);
     });
 
     test(
@@ -553,29 +574,26 @@ void main() {
       expect(seq.elementCount, 0);
     });
 
-    test(
-      'seeds from plain-text blob deterministically '
-      'when fugueStore is empty',
-      () async {
-        // src device writes a plain-text blob (no Fugue) and pushes.
-        // We simulate this by reconciling a text file then *deleting*
-        // the cached fugue entry — leaving the blob in remote storage
-        // and a FileState pointing at it, but no local Sequence.
-        final f = await _newFixture();
-        f.io.files['$_vaultPath/note.md'] = _bytes('hello');
-        await f.reconciler.reconcileWithDisk('note.md');
-        final fileId = f.fileIdFor('note.md');
-        await f.fugueStore.remove(fileId);
+    test('seeds from plain-text blob deterministically '
+        'when fugueStore is empty', () async {
+      // src device writes a plain-text blob (no Fugue) and pushes.
+      // We simulate this by reconciling a text file then *deleting*
+      // the cached fugue entry — leaving the blob in remote storage
+      // and a FileState pointing at it, but no local Sequence.
+      final f = await _newFixture();
+      f.io.files['$_vaultPath/note.md'] = _bytes('hello');
+      await f.reconciler.reconcileWithDisk('note.md');
+      final fileId = f.fileIdFor('note.md');
+      await f.fugueStore.remove(fileId);
 
-        final seq = await f.reconciler.loadOrSeedSequence(fileId, 'note.md');
+      final seq = await f.reconciler.loadOrSeedSequence(fileId, 'note.md');
 
-        // The reconciler tried to seed by downloading the FileState's
-        // blob, which is a Fugue manifest in our test. tryDecodeFugueBlob
-        // should succeed -> we get the Sequence back equivalent to
-        // "hello".
-        expect(seq.values.join(), 'hello');
-      },
-    );
+      // The reconciler tried to seed by downloading the FileState's
+      // blob, which is a Fugue manifest in our test. tryDecodeFugueBlob
+      // should succeed -> we get the Sequence back equivalent to
+      // "hello".
+      expect(seq.values.join(), 'hello');
+    });
   });
 
   group('DiskReconciler — a format this build cannot read', () {
@@ -583,9 +601,17 @@ void main() {
     ///
     /// Not `\0doc1` — that tag exists now. This is whatever comes after it.
     Future<String> publishFutureFormat(_Fixture f, String relPath) async {
-      final blob = Uint8List.fromList(
-        [0x00, 0x78, 0x79, 0x7A, 0x39, 0xA1, 0x61, 0x78, 0x01],
-      );
+      final blob = Uint8List.fromList([
+        0x00,
+        0x78,
+        0x79,
+        0x7A,
+        0x39,
+        0xA1,
+        0x61,
+        0x78,
+        0x01,
+      ]);
       final chunked = ChunkedBlobIO(
         blobStore: f.localBlobs,
         remoteBlobStorage: f.remote,
@@ -616,10 +642,12 @@ void main() {
       final wrote = await f.reconciler.writeFileToDisk(f.store.get(fileId)!);
 
       expect(wrote, isFalse);
-      expect(f.io.files.containsKey('$_vaultPath/notes/future.md'), isFalse,
-          reason: 'nothing may reach disk');
-      final events =
-          f.events.whereType<SyncFileFormatUnsupported>().toList();
+      expect(
+        f.io.files.containsKey('$_vaultPath/notes/future.md'),
+        isFalse,
+        reason: 'nothing may reach disk',
+      );
+      final events = f.events.whereType<SyncFileFormatUnsupported>().toList();
       expect(events.single.path, 'notes/future.md');
     });
 
@@ -629,8 +657,11 @@ void main() {
 
       await f.reconciler.writeFileToDisk(f.store.get(fileId)!);
 
-      expect(f.store.lastSyncedBlobRefFor(fileId), anyOf(isNull, isEmpty),
-          reason: 'advancing it would mark the file done forever');
+      expect(
+        f.store.lastSyncedBlobRefFor(fileId),
+        anyOf(isNull, isEmpty),
+        reason: 'advancing it would mark the file done forever',
+      );
     });
 
     test('a local edit does not push over it', () async {
@@ -645,32 +676,37 @@ void main() {
       final changed = await f.reconciler.reconcileWithDisk('notes/future.md');
 
       expect(changed, isFalse, reason: 'no push may be produced');
-      expect(f.store.get(fileId)!.blobRef, serverBlob,
-          reason: "the newer client's blob must still be the one referenced");
+      expect(
+        f.store.get(fileId)!.blobRef,
+        serverBlob,
+        reason: "the newer client's blob must still be the one referenced",
+      );
       expect(f.events.whereType<SyncFileFormatUnsupported>(), isNotEmpty);
     });
   });
 
   group('DiskReconciler — frontmatter as a CRDT', () {
-    test('a note with no properties is byte-identical to what ships today',
-        () async {
-      // Not a flag any more — a property. An empty state would cost ~80 bytes
-      // of "nothing here" on every note in the vault, so nothing is appended
-      // until there is something to say.
-      final f = await _newFixture();
-      f.io.files['$_vaultPath/note.md'] = _bytes('# Note\n\njust body\n');
+    test(
+      'a note with no properties is byte-identical to what ships today',
+      () async {
+        // Not a flag any more — a property. An empty state would cost ~80 bytes
+        // of "nothing here" on every note in the vault, so nothing is appended
+        // until there is something to say.
+        final f = await _newFixture();
+        f.io.files['$_vaultPath/note.md'] = _bytes('# Note\n\njust body\n');
 
-      await f.reconciler.reconcileWithDisk('note.md');
+        await f.reconciler.reconcileWithDisk('note.md');
 
-      final state = f.store.get(f.fileIdFor('note.md'))!;
-      final blob = await ChunkedBlobIO(
-        blobStore: f.localBlobs,
-        remoteBlobStorage: f.remote,
-        vaultId: _vaultId,
-      ).download(state.blobRef);
-      expect(blob!.sublist(0, 4), [0x00, 0x66, 0x67, 0x31], reason: 'fugue1');
-      expect(hasFmTail(blob), isFalse, reason: 'no tail either');
-    });
+        final state = f.store.get(f.fileIdFor('note.md'))!;
+        final blob = await ChunkedBlobIO(
+          blobStore: f.localBlobs,
+          remoteBlobStorage: f.remote,
+          vaultId: _vaultId,
+        ).download(state.blobRef);
+        expect(blob!.sublist(0, 4), [0x00, 0x66, 0x67, 0x31], reason: 'fugue1');
+        expect(hasFmTail(blob), isFalse, reason: 'no tail either');
+      },
+    );
 
     test('emptying the properties still carries the tombstones', () async {
       // The subtlety behind the rule above: no LIVE entries is not the same as
@@ -694,8 +730,9 @@ void main() {
 
     test('the state rides in the tail, invisibly', () async {
       final f = await _newFixture();
-      f.io.files['$_vaultPath/note.md'] =
-          _bytes('---\ntitle: Note\ntags:\n  - work\n---\n\nbody\n');
+      f.io.files['$_vaultPath/note.md'] = _bytes(
+        '---\ntitle: Note\ntags:\n  - work\n---\n\nbody\n',
+      );
 
       await f.reconciler.reconcileWithDisk('note.md');
 
@@ -739,8 +776,7 @@ void main() {
       expect(utf8.decode(f.io.files['$_vaultPath/note.md']!), note);
     });
 
-    test('THE BUG, through the engine: two devices append to one key',
-        () async {
+    test('THE BUG, through the engine: two devices append to one key', () async {
       // Each fixture is a device. They start from the same note, edit offline,
       // and the join runs over what each one uploaded.
       final a = await _newFixture();
@@ -752,11 +788,13 @@ void main() {
       b.io.files['$_vaultPath/n.md'] = _bytes(base);
       await b.reconciler.reconcileWithDisk('n.md');
 
-      a.io.files['$_vaultPath/n.md'] =
-          _bytes('---\nrelated:\n  - "[[seed]]"\n  - "[[from-a]]"\n---\n\nbody\n');
+      a.io.files['$_vaultPath/n.md'] = _bytes(
+        '---\nrelated:\n  - "[[seed]]"\n  - "[[from-a]]"\n---\n\nbody\n',
+      );
       await a.reconciler.reconcileWithDisk('n.md');
-      b.io.files['$_vaultPath/n.md'] =
-          _bytes('---\nrelated:\n  - "[[seed]]"\n  - "[[from-b]]"\n---\n\nbody\n');
+      b.io.files['$_vaultPath/n.md'] = _bytes(
+        '---\nrelated:\n  - "[[seed]]"\n  - "[[from-b]]"\n---\n\nbody\n',
+      );
       await b.reconciler.reconcileWithDisk('n.md');
 
       final fileId = a.fileIdFor('n.md');
@@ -792,10 +830,12 @@ void main() {
       await b.reconciler.reconcileWithDisk('n.md');
 
       a.io.files['$_vaultPath/n.md'] = _bytes(
-          '---\ncreated: 2026-08-03\nrelated:\n  - "[[from-a]]"\n---\n\nbody\n');
+        '---\ncreated: 2026-08-03\nrelated:\n  - "[[from-a]]"\n---\n\nbody\n',
+      );
       await a.reconciler.reconcileWithDisk('n.md');
       b.io.files['$_vaultPath/n.md'] = _bytes(
-          '---\ncreated: 2026-08-03\nrelated:\n  - "[[from-b]]"\n---\n\nbody\n');
+        '---\ncreated: 2026-08-03\nrelated:\n  - "[[from-b]]"\n---\n\nbody\n',
+      );
       await b.reconciler.reconcileWithDisk('n.md');
 
       final fileId = a.fileIdFor('n.md');
@@ -811,12 +851,14 @@ void main() {
       ).download(b.store.get(fileId)!.blobRef))!;
 
       // What the char-level join alone produces — the defect, reproduced.
-      final textOnly = FugueStore.tryDecodeBlob(blobA)!
-          .join(FugueStore.tryDecodeBlob(blobB)!)
-          .values
-          .join();
-      expect('related:'.allMatches(textOnly).length, 2,
-          reason: 'the text merge really does duplicate the key');
+      final textOnly = FugueStore.tryDecodeBlob(
+        blobA,
+      )!.join(FugueStore.tryDecodeBlob(blobB)!).values.join();
+      expect(
+        'related:'.allMatches(textOnly).length,
+        2,
+        reason: 'the text merge really does duplicate the key',
+      );
 
       // What the frontmatter join produces instead.
       final joined = joinFm(readFmTail(blobA)!, readFmTail(blobB)!);
@@ -829,24 +871,26 @@ void main() {
       expect(corrected, endsWith('body\n'));
     });
 
-    test('a deletion everyone has seen is reclaimed on the next write',
-        () async {
-      // Reclaimed only on a write that was happening anyway, and only past the
-      // causal-stability barrier. A sweep of its own would rewrite every file
-      // in the vault, which is exactly the mass re-upload to avoid.
-      final f = await _newFixture(fmGcBarrier: 1 << 30);
-      f.io.files['$_vaultPath/n.md'] = _bytes('---\nx: 1\ny: 2\n---\nbody\n');
-      await f.reconciler.reconcileWithDisk('n.md');
-      final fileId = f.fileIdFor('n.md');
-      f.store.recordServerSeq(fileId, 1);
+    test(
+      'a deletion everyone has seen is reclaimed on the next write',
+      () async {
+        // Reclaimed only on a write that was happening anyway, and only past the
+        // causal-stability barrier. A sweep of its own would rewrite every file
+        // in the vault, which is exactly the mass re-upload to avoid.
+        final f = await _newFixture(fmGcBarrier: 1 << 30);
+        f.io.files['$_vaultPath/n.md'] = _bytes('---\nx: 1\ny: 2\n---\nbody\n');
+        await f.reconciler.reconcileWithDisk('n.md');
+        final fileId = f.fileIdFor('n.md');
+        f.store.recordServerSeq(fileId, 1);
 
-      f.io.files['$_vaultPath/n.md'] = _bytes('---\ny: 2\n---\nbody\n');
-      await f.reconciler.reconcileWithDisk('n.md');
+        f.io.files['$_vaultPath/n.md'] = _bytes('---\ny: 2\n---\nbody\n');
+        await f.reconciler.reconcileWithDisk('n.md');
 
-      final fm = (await f.fmStore.get(fileId))! as FmMapState;
-      expect(fm.entries.containsKey('x'), isFalse, reason: 'reclaimed');
-      expect(fm.entries.containsKey('y'), isTrue);
-    });
+        final fm = (await f.fmStore.get(fileId))! as FmMapState;
+        expect(fm.entries.containsKey('x'), isFalse, reason: 'reclaimed');
+        expect(fm.entries.containsKey('y'), isTrue);
+      },
+    );
 
     test('a deletion the barrier does not cover is kept', () async {
       // No barrier means no proof every device saw the delete, so the
@@ -863,38 +907,40 @@ void main() {
       expect(fm.entries['x']?.isLive, isFalse, reason: 'present, tombstoned');
     });
 
-    test('a peer that ignores the tail simply drops it, and nothing breaks',
-        () async {
-      // The graceful-degradation claim, exercised: a device without the
-      // feature re-encodes the tree on its next edit and the tail goes with
-      // it. The note is intact, the typed state is rebuilt next time a device
-      // that has the feature touches the file.
-      final on = await _newFixture();
-      on.io.files['$_vaultPath/n.md'] = _bytes('---\nx: 1\n---\nbody\n');
-      await on.reconciler.reconcileWithDisk('n.md');
+    test(
+      'a peer that ignores the tail simply drops it, and nothing breaks',
+      () async {
+        // The graceful-degradation claim, exercised: a device without the
+        // feature re-encodes the tree on its next edit and the tail goes with
+        // it. The note is intact, the typed state is rebuilt next time a device
+        // that has the feature touches the file.
+        final on = await _newFixture();
+        on.io.files['$_vaultPath/n.md'] = _bytes('---\nx: 1\n---\nbody\n');
+        await on.reconciler.reconcileWithDisk('n.md');
 
-      // A device without the feature: no frontmatter store wired, exactly as
-      // a build predating it behaves.
-      final off = await _newFixture(frontmatter: false);
-      off.remote.store.addAll(on.remote.store);
-      off.store.applyLocal(on.store.get(on.fileIdFor('n.md'))!);
-      off.io.files['$_vaultPath/n.md'] = _bytes('---\nx: 2\n---\nbody\n');
+        // A device without the feature: no frontmatter store wired, exactly as
+        // a build predating it behaves.
+        final off = await _newFixture(frontmatter: false);
+        off.remote.store.addAll(on.remote.store);
+        off.store.applyLocal(on.store.get(on.fileIdFor('n.md'))!);
+        off.io.files['$_vaultPath/n.md'] = _bytes('---\nx: 2\n---\nbody\n');
 
-      await off.reconciler.reconcileWithDisk('n.md');
+        await off.reconciler.reconcileWithDisk('n.md');
 
-      final after = off.store.get(off.fileIdFor('n.md'))!;
-      final blob = await ChunkedBlobIO(
-        blobStore: off.localBlobs,
-        remoteBlobStorage: off.remote,
-        vaultId: _vaultId,
-      ).download(after.blobRef);
-      expect(hasFmTail(blob!), isFalse, reason: 'the tail is gone');
-      expect(
-        utf8.decode(materializeFileContent(blob, 'n.md')!),
-        '---\nx: 2\n---\nbody\n',
-        reason: 'the note itself is untouched',
-      );
-    });
+        final after = off.store.get(off.fileIdFor('n.md'))!;
+        final blob = await ChunkedBlobIO(
+          blobStore: off.localBlobs,
+          remoteBlobStorage: off.remote,
+          vaultId: _vaultId,
+        ).download(after.blobRef);
+        expect(hasFmTail(blob!), isFalse, reason: 'the tail is gone');
+        expect(
+          utf8.decode(materializeFileContent(blob, 'n.md')!),
+          '---\nx: 2\n---\nbody\n',
+          reason: 'the note itself is untouched',
+        );
+      },
+    );
   });
 
   group('DiskReconciler - path admission', () {
@@ -916,39 +962,49 @@ void main() {
       final changed = await f.reconciler.reconcileWithDisk('Personal/diary.md');
 
       expect(changed, isFalse);
-      expect(f.store.get(f.fileIdFor('Personal/diary.md')), isNull,
-          reason: 'no FileState is minted for a path out of scope');
-      expect(f.remote.store, isEmpty, reason: 'nothing was uploaded');
       expect(
-        f.events.whereType<SyncFileOutOfScope>().map((e) => e.path),
-        ['Personal/diary.md'],
+        f.store.get(f.fileIdFor('Personal/diary.md')),
+        isNull,
+        reason: 'no FileState is minted for a path out of scope',
       );
+      expect(f.remote.store, isEmpty, reason: 'nothing was uploaded');
+      expect(f.events.whereType<SyncFileOutOfScope>().map((e) => e.path), [
+        'Personal/diary.md',
+      ]);
     });
 
-    test('narrowing the scope does not tombstone what falls out of it',
-        () async {
-      // The file was synced while everything was in scope...
-      final wide = await _newFixture();
-      wide.io.files['$_vaultPath/Personal/diary.md'] = _bytes('secret');
-      await wide.reconciler.reconcileWithDisk('Personal/diary.md');
-      final fileId = wide.fileIdFor('Personal/diary.md');
-      expect(wide.store.get(fileId)?.tombstone, isFalse);
+    test(
+      'narrowing the scope does not tombstone what falls out of it',
+      () async {
+        // The file was synced while everything was in scope...
+        final wide = await _newFixture();
+        wide.io.files['$_vaultPath/Personal/diary.md'] = _bytes('secret');
+        await wide.reconciler.reconcileWithDisk('Personal/diary.md');
+        final fileId = wide.fileIdFor('Personal/diary.md');
+        expect(wide.store.get(fileId)?.tombstone, isFalse);
 
-      // ...then the user restricts sync to Work/ and deletes the file (or it
-      // simply stops being visible). A delete reaches the reconciler as a
-      // reconcile of a path with no file behind it; out of scope, that must
-      // NOT become a tombstone the peers would act on.
-      final narrow = await _newFixture(pathScope: PathScope(include: ['Work']));
-      narrow.store.applyLocal(wide.store.get(fileId)!);
-      // no file on disk in the narrow fixture
+        // ...then the user restricts sync to Work/ and deletes the file (or it
+        // simply stops being visible). A delete reaches the reconciler as a
+        // reconcile of a path with no file behind it; out of scope, that must
+        // NOT become a tombstone the peers would act on.
+        final narrow = await _newFixture(
+          pathScope: PathScope(include: ['Work']),
+        );
+        narrow.store.applyLocal(wide.store.get(fileId)!);
+        // no file on disk in the narrow fixture
 
-      final changed =
-          await narrow.reconciler.reconcileWithDisk('Personal/diary.md');
+        final changed = await narrow.reconciler.reconcileWithDisk(
+          'Personal/diary.md',
+        );
 
-      expect(changed, isFalse);
-      expect(narrow.store.get(fileId)?.tombstone, isFalse,
-          reason: 'a scope change is not a delete');
-    });
+        expect(changed, isFalse);
+        expect(
+          narrow.store.get(fileId)?.tombstone,
+          isFalse,
+          reason: 'a scope change is not a delete',
+        );
+      },
+    );
 
     test('exclude carves a hole inside an included folder', () async {
       final f = await _newFixture(
@@ -967,8 +1023,7 @@ void main() {
   });
 
   group('DiskReconciler - a blob this build cannot decrypt', () {
-    test('is surfaced as an unreadable file, not retried in silence',
-        () async {
+    test('is surfaced as an unreadable file, not retried in silence', () async {
       // A blob sealed by a NEWER client: the fetch succeeds, the cipher
       // refuses the envelope. Before this the exception fell into the generic
       // "chunked download failed" catch, became "blob not available", and the
@@ -990,56 +1045,71 @@ void main() {
       expect(
         f.events.whereType<SyncFileFormatUnsupported>().map((e) => e.path),
         contains('att/photo.bin'),
-        reason: 'the user must be told to update, not left with a file that '
+        reason:
+            'the user must be told to update, not left with a file that '
             'silently never arrives',
       );
-      expect(f.io.files.containsKey('$_vaultPath/att/photo.bin'), isFalse,
-          reason: 'nothing may be written from bytes we could not open');
-      expect(f.store.lastSyncedBlobRefFor(state.fileId), isNull,
-          reason: 'the LCA must not advance, so an updated client heals it');
+      expect(
+        f.io.files.containsKey('$_vaultPath/att/photo.bin'),
+        isFalse,
+        reason: 'nothing may be written from bytes we could not open',
+      );
+      expect(
+        f.store.lastSyncedBlobRefFor(state.fileId),
+        isNull,
+        reason: 'the LCA must not advance, so an updated client heals it',
+      );
     });
   });
 
   group('DiskReconciler - the file vanishes mid-reconcile', () {
-    test('a note renamed during its upload leaves no state for the old path',
-        () async {
-      // The bug this fixes, seen in the wild: create a note, name it, and a
-      // stray "Untitled.md" appears on every other device. Existence is
-      // checked at the top of the reconcile; reading, diffing and uploading
-      // then take seconds on a slow backend, and the rename lands inside that
-      // window. Committing afterwards publishes a state for a path that is
-      // gone, and nothing tombstones it — the delete half of the rename
-      // already ran and found no state to tombstone, because this one had not
-      // been committed yet.
-      final f = await _newFixture();
-      f.io.files['$_vaultPath/Untitled.md'] = _bytes('fresh note');
+    test(
+      'a note renamed during its upload leaves no state for the old path',
+      () async {
+        // The bug this fixes, seen in the wild: create a note, name it, and a
+        // stray "Untitled.md" appears on every other device. Existence is
+        // checked at the top of the reconcile; reading, diffing and uploading
+        // then take seconds on a slow backend, and the rename lands inside that
+        // window. Committing afterwards publishes a state for a path that is
+        // gone, and nothing tombstones it — the delete half of the rename
+        // already ran and found no state to tombstone, because this one had not
+        // been committed yet.
+        final f = await _newFixture();
+        f.io.files['$_vaultPath/Untitled.md'] = _bytes('fresh note');
 
-      // Remove the file while the upload is in flight.
-      f.remote.onUpload = () {
-        f.io.files.remove('$_vaultPath/Untitled.md');
-      };
+        // Remove the file while the upload is in flight.
+        f.remote.onUpload = () {
+          f.io.files.remove('$_vaultPath/Untitled.md');
+        };
 
-      final changed = await f.reconciler.reconcileWithDisk('Untitled.md');
+        final changed = await f.reconciler.reconcileWithDisk('Untitled.md');
 
-      expect(changed, isFalse);
-      expect(f.store.get(f.fileIdFor('Untitled.md')), isNull,
-          reason: 'no state may be published for a path that no longer exists');
-    });
+        expect(changed, isFalse);
+        expect(
+          f.store.get(f.fileIdFor('Untitled.md')),
+          isNull,
+          reason: 'no state may be published for a path that no longer exists',
+        );
+      },
+    );
 
-    test('a binary that disappears during its upload is not published',
-        () async {
-      final f = await _newFixture();
-      f.io.files['$_vaultPath/att/photo.bin'] =
-          Uint8List.fromList(List.generate(64, (i) => i));
-      f.remote.onUpload = () {
-        f.io.files.remove('$_vaultPath/att/photo.bin');
-      };
+    test(
+      'a binary that disappears during its upload is not published',
+      () async {
+        final f = await _newFixture();
+        f.io.files['$_vaultPath/att/photo.bin'] = Uint8List.fromList(
+          List.generate(64, (i) => i),
+        );
+        f.remote.onUpload = () {
+          f.io.files.remove('$_vaultPath/att/photo.bin');
+        };
 
-      final changed = await f.reconciler.reconcileWithDisk('att/photo.bin');
+        final changed = await f.reconciler.reconcileWithDisk('att/photo.bin');
 
-      expect(changed, isFalse);
-      expect(f.store.get(f.fileIdFor('att/photo.bin')), isNull);
-    });
+        expect(changed, isFalse);
+        expect(f.store.get(f.fileIdFor('att/photo.bin')), isNull);
+      },
+    );
 
     test('a file that stays put still syncs', () async {
       final f = await _newFixture();

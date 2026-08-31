@@ -196,4 +196,25 @@ void main() {
       );
     });
   });
+
+  group('rejectionWarrantsRefresh', () {
+    test('an expired or missing token is worth a refresh', () {
+      expect(rejectionWarrantsRefresh('auth.session_expired'), isTrue);
+      expect(rejectionWarrantsRefresh('auth.token_missing'), isTrue);
+    });
+
+    test('not owning the vault is not', () {
+      // Authorization, not authentication: a fresh token carries the same
+      // permissions as the one that was refused. Refreshing restarts the
+      // engine, fails identically and restarts again — a user's first sync
+      // spent minutes in exactly that loop.
+      expect(rejectionWarrantsRefresh('auth.permission_denied'), isFalse);
+    });
+
+    test('a policy refusal is not, whatever it says', () {
+      expect(rejectionWarrantsRefresh('app_policy.quota.storage'), isFalse);
+      expect(rejectionWarrantsRefresh('app_policy.subscription_required'),
+          isFalse);
+    });
+  });
 }

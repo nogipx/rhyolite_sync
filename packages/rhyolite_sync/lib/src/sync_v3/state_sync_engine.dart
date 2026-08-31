@@ -397,6 +397,18 @@ class StateSyncEngine implements ISyncEngine {
       // reported seeing.
       _emit(SyncConnecting(attempt: 1));
       await conn.connect();
+      // A supersede check belongs on BOTH sides of a long await, and this is
+      // the longest one in start(). The generation was checked before the
+      // connect and not again after it, yet everything below dereferences
+      // `_store`, `_fugueStore` and `_recordCodec` — which a superseding
+      // start's `stop()` has already nulled.
+      //
+      // That window is not theoretical: a report showed 46 seconds between the
+      // connect starting and finishing, with a health-check restart landing
+      // inside it, and the start died on "Null check operator used on a null
+      // value" in the same millisecond the socket came up. Everything from here
+      // to the next await is synchronous, so this one check covers all of it.
+      if (!_running || cancelled()) return;
       _emit(SyncConnected());
 
       _reconciler = DiskReconciler(

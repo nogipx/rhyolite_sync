@@ -1,3 +1,24 @@
+## [3.16.1] - 2026-08-31
+
+**An interrupted first sync keeps what it already uploaded.**
+Files are recorded as each batch completes, so a sync that stops part-way
+resumes from there instead of beginning the vault again. A large vault now
+finishes across as many sessions as it needs.
+
+**A vault owned by another account is reported instead of retried.** Sync stops
+and says so, rather than repeating a sign-in that cannot change the answer.
+
+### Bug Fixes
+
+- not owning a vault stops sync instead of looping on refresh (obsidian)
+- a start superseded during the connect stops there (core)
+- a disposed transfer hub stops spraying unhandled errors (core)
+- a failed first sync keeps the files it already uploaded (core)
+
+### Other
+
+- bump plugin to 3.16.1 (obsidian)
+
 ## [3.16.0] - 2026-08-31
 
 **A bug report reaches support in one press.**

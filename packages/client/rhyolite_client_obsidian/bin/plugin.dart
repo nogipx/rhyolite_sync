@@ -2623,6 +2623,23 @@ $kSyncPanelCss
                 // Self-host has no account session — never prompt for sign-in.
                 if (selfHostActive) return;
                 break; // fall through to refresh handler below
+              // Ownership, not authentication — and the prefix is the only
+              // thing they share. A fresh token carries exactly the same
+              // permissions, so refreshing cannot change this answer: it
+              // restarts the engine, fails identically, and restarts again.
+              //
+              // A user's first sync spent minutes in that loop, alternating
+              // "Auth rejected — attempting token refresh" with the identical
+              // refusal, several restarts deep. Must be matched BEFORE the
+              // `auth.` prefix below, which is what was swallowing it.
+              case SyncServerRejected(:final code, :final message)
+                  when code.startsWith('auth.') &&
+                      !rejectionWarrantsRefresh(code):
+                _log.warning(
+                  'Sync paused — server refused and a refresh cannot help '
+                  '($code): $message',
+                );
+                return;
               // A stale token surfaces as auth.* on an active RPC (not only as
               // SessionExpired). Funnel it into the same debounced refresh path
               // so an expired session heals without an Obsidian restart. Self-

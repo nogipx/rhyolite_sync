@@ -583,8 +583,41 @@ class StateStartupDiff {
               );
               modifiedFiles++;
             }
+            // Durable NOW, not after the whole scan.
+            //
+            // This used to live only in memory, and the push that followed the
+            // diff was what wrote it down — so any failure before that point
+            // discarded every byte of progress. A vault of 9119 files tripped
+            // the server's blob rate limit part-way through, died, was
+            // restarted by the health check five minutes later, and re-scanned
+            // all 9119 from `0 tracked`. Forever: it never once finished, so it
+            // never once persisted, so it never once started from anywhere but
+            // the beginning.
+            //
+            // A row is safe to write before it is pushed. The blob is already
+            // uploaded when we get here, so the state is true; the push simply
+            // has not happened, which is exactly what `_collectDirty` looks for
+            // on the next run. And it is what makes the next scan's fast path
+            // skip this file — that path compares disk against the stored
+            // chunk list, so without the row there is nothing to compare to.
+            await store.persistOne(item.fileId);
             creditFile();
           }
+          // The causal context, once per group.
+          //
+          // NOT the clock: `load` rebuilds `_ownLatestHlc` by scanning the
+          // rows it just read, so the hlc recovers on its own. `_ownContext`
+          // does not — it is read from the meta row and from nowhere else,
+          // while `upsert` advances it per file. Persisting the rows and not
+          // this would leave a restart claiming to have seen less than it has
+          // already written, so the next write would carry a context missing
+          // its own predecessors and the server's join could read it as
+          // concurrent with them rather than dominating.
+          //
+          // Affordable only because the per-file maps left this row earlier
+          // today; while it still carried an entry per file this would have
+          // been a 1.8 MB rewrite per group.
+          await store.persistMeta();
         });
       }
     }

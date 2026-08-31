@@ -79,6 +79,11 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
 
     final callerToken = context?.cancellationToken;
     final result = <String, Uint8List>{};
+    // Give every task a listener BEFORE the first await. See the note on the
+    // same line in [upload].
+    for (final task in joined.values) {
+      task.completer.future.ignore();
+    }
     try {
       for (final entry in joined.entries) {
         final bytes = await _awaitWithCaller<Uint8List?>(
@@ -129,6 +134,20 @@ class BlobTransferHub implements IBlobStorage, IListableBlobStorage {
 
     final callerToken = context?.cancellationToken;
     final allTasks = [...freshTasks, ...joinedTasks];
+    // Give every task a listener BEFORE the first await.
+    //
+    // The loop below awaits them one at a time, while [cancelAll] fails them
+    // ALL at once. The first await then throws, the loop exits, and every
+    // remaining task is left holding an error nobody is listening for — which
+    // Dart reports as an unhandled error, one per task in flight. A single
+    // dispose during a large first sync produced about thirty of them, and
+    // they crowded out the failure that actually caused the dispose.
+    //
+    // `ignore` only marks them handled; awaiting the same future below still
+    // delivers its error to the awaiter, so nothing is swallowed.
+    for (final task in allTasks) {
+      task.completer.future.ignore();
+    }
     try {
       for (final task in allTasks) {
         await _awaitWithCaller<void>(task.completer.future, callerToken);

@@ -31,6 +31,19 @@ Future<void> main() async {
   // Single principal — rate-limit per connection so multiple devices of
   // the one owner don't share a single bucket.
   final rateLimiter = RpcRateLimiter(
+    perService: {
+      // Same reasoning as the managed edition: bulk blob transfer is bursty by
+      // nature and must not be measured against a control-plane budget. The
+      // 200/conn below is already four times more generous and keyed per
+      // device rather than per account, so this edition was never as exposed —
+      // but a first sync of a large vault has the same shape here, and finding
+      // that out from a self-hoster is worse than the three lines it costs.
+      'RhyoliteBlob': RateLimit.tokenBucket(
+        max: 300,
+        window: Duration(seconds: 1),
+        burst: 600,
+      ),
+    },
     perKeyFallback: RateLimit.slidingWindow(
       max: 200,
       window: Duration(seconds: 1),

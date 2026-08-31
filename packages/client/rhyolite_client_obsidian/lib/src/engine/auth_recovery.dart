@@ -87,3 +87,17 @@ bool shouldClearStoredSession({
   if (refresh == RefreshOutcome.inconclusive) return false;
   return refresh == RefreshOutcome.refused || !tokenMissing;
 }
+
+/// Whether a server rejection code is one a token refresh could fix.
+///
+/// The `auth.` prefix covers two unrelated conditions. Authentication — an
+/// expired or missing token — is exactly what a refresh repairs.
+/// Authorization is not: `auth.permission_denied` means this account does not
+/// own the vault, and a freshly minted token carries precisely the same
+/// permissions as the one that was refused.
+///
+/// Refreshing anyway restarts the engine, fails identically, and restarts
+/// again. A user's first sync spent minutes in that loop before this
+/// distinction existed, alternating a refresh with the same refusal.
+bool rejectionWarrantsRefresh(String code) =>
+    code.startsWith('auth.') && code != 'auth.permission_denied';

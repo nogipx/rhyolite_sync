@@ -903,6 +903,50 @@ void main() {
           reason: 'the losing start must not have stopped the winning one');
     });
 
+    test('a start superseded DURING the connect dies quietly too', () async {
+      // The sibling above parks the loser in the initial pull, which is past
+      // the point where the fields are first dereferenced. The connect is
+      // earlier and far longer — a report showed 46 seconds — and the
+      // generation was checked before it and not again after, so a start
+      // superseded in that window came back to `_store!` and threw "Null check
+      // operator used on a null value" in the same millisecond the socket
+      // came up.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+
+      final gate = Completer<void>();
+      h.connection.connectGate = gate;
+      final first = h.engine.start();
+      await pumpEventQueue();
+
+      // Supersede while the first is still inside connect(). Its own gate must
+      // be cleared, or the second start parks on the same completer.
+      h.connection.connectGate = null;
+      final second = h.engine.start();
+      gate.complete();
+      await first;
+      await second;
+      await pumpEventQueue();
+
+      expect(h.events.whereType<SyncError>(), isEmpty,
+          reason: 'a superseded start is not a failure, and above all must '
+              'not surface as a null-check crash');
+      // The observable consequence of the guard, and the one the fake can
+      // show: the loser returns at the checkpoint instead of carrying on into
+      // the pipeline. Asserting on a null-check crash directly is not possible
+      // here — the winner reassigns `_store` before the loser resumes, so in a
+      // fake the loser finds the WINNER's store rather than a null one and
+      // corrupts it quietly instead of throwing. Announcing a connection it is
+      // no longer running is the same wrong behaviour, visibly.
+      expect(
+        h.events.whereType<SyncConnected>().length,
+        1,
+        reason: 'only the surviving start may announce a connection',
+      );
+      expect(await h.engine.healthCheck(), isTrue,
+          reason: 'the survivor must still be running');
+    });
+
     test('a pull asked for during startup does not race the startup pull, and '
         'is not lost either', () async {
       // The startup pull runs outside the scheduler, so the 'pull' key cannot
@@ -1887,9 +1931,15 @@ class _FakeConnection implements SyncConnection {
   /// is the complete record of what a socket can authenticate as.
   final List<ITokenProvider?> boundProviders = [];
 
+  /// Parks `connect()` until completed, so a test can land a second start
+  /// while the first is still waiting on its socket.
+  Completer<void>? connectGate;
+
   @override
   Future<void> connect() async {
     connectCalled = true;
+    final gate = connectGate;
+    if (gate != null) await gate.future;
     // A real (but unconnected) endpoint: notify subscribes over it and
     // simply never receives anything, which is fine for these tests.
     _endpoint = RpcCallerEndpoint(transport: RpcInMemoryTransport.pair().$1);

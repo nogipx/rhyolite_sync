@@ -160,6 +160,24 @@ Uint8List _randomBytes(int length, int seed) {
   return out;
 }
 
+/// Uploads normally until [failAfter] blobs have gone through, then refuses
+/// every later call — standing in for the server's sustained rate limit, which
+/// does not relent while the client keeps pushing.
+class _FailsPartWayRemote extends _MemRemote {
+  _FailsPartWayRemote({required this.failAfter});
+
+  final int failAfter;
+
+  @override
+  Future<void> upload(
+    List<(Uint8List, String)> blobs, {
+    covariant Object? context,
+  }) async {
+    if (uploads >= failAfter) throw StateError('rate limit exceeded');
+    return super.upload(blobs, context: context);
+  }
+}
+
 void main() {
   group('StateStartupDiff fast-path skips', () {
     test('empty file with empty state → skipped, no upload', () async {
@@ -517,6 +535,131 @@ void main() {
 
       expect(result.missingFileIds, isEmpty);
       expect(result.outOfScope, ['Personal/diary.md']);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Progress must survive a failure part-way through.
+  //
+  // What a real vault ran into: 9119 files, the server's blob rate limit
+  // tripped mid-upload, the whole startup died — and because the diff only
+  // ever wrote to memory, the next run began again from `0 tracked`. It never
+  // finished, so it never persisted, so it never started anywhere but the top.
+  // -------------------------------------------------------------------------
+  group('a failed run keeps what it already uploaded', () {
+    Future<({StateStartupDiff diff, FileStateStore store, IDataClient client})>
+        fixtureWith(_MemRemote remote, int fileCount) async {
+      final env = await DataServiceFactory.inMemory();
+      addTearDown(env.dispose);
+      final store = FileStateStore(client: env.client, vaultId: _vaultId);
+      await store.load();
+      final io = _MemIo();
+      for (var i = 0; i < fileCount; i++) {
+        io.files['$_vaultPath/f$i.bin'] = _randomBytes(512, i + 1);
+      }
+      return (
+        diff: StateStartupDiff(
+          store: store,
+          blobStore: LocalBlobStore(InMemoryBlobRepository()),
+          remoteBlobStorage: remote,
+          io: io,
+          vaultPath: _vaultPath,
+          vaultId: _vaultId,
+          nodeId: 'test-device',
+          readClock: store.nextHlc,
+          writeClock: (_) {},
+          // One worker, so "uploaded before the failure" is a prefix rather
+          // than whichever groups four workers happened to be holding.
+          uploadConcurrency: 1,
+        ),
+        store: store,
+        client: env.client,
+      );
+    }
+
+    test('the rows reach the database, not just memory', () async {
+      // 24 files = three groups of eight. A group uploads 16 blobs — one
+      // chunk and one manifest per file — so 32 lets two groups through and
+      // kills the third.
+      final f = await fixtureWith(_FailsPartWayRemote(failAfter: 32), 24);
+      await expectLater(f.diff.call(), throwsA(isA<StateError>()));
+
+      // A FRESH store on the same database — this is the restart. Reading
+      // f.store would prove nothing: that one holds the in-memory copy, which
+      // was never the thing in doubt.
+      final reopened = FileStateStore(client: f.client, vaultId: _vaultId);
+      await reopened.load();
+
+      expect(
+        reopened.fileIds.length,
+        16,
+        reason: 'the two groups that finished must survive the third failing',
+      );
+      for (final id in reopened.fileIds) {
+        final state = reopened.get(id);
+        expect(state, isNotNull);
+        expect(state!.blobRef, isNotEmpty);
+        expect(state.chunks, isNotEmpty,
+            reason: 'without chunks the next scan cannot skip the file');
+      }
+    });
+
+    test('the causal context survives with them', () async {
+      // `load` rebuilds the hlc by scanning the rows, so the clock recovers on
+      // its own — but `_ownContext` comes from the meta row and nowhere else,
+      // and `upsert` advances it per file. Persisting rows without it leaves a
+      // restart claiming to have seen less than it has already written.
+      final f = await fixtureWith(_FailsPartWayRemote(failAfter: 32), 24);
+      await expectLater(f.diff.call(), throwsA(isA<StateError>()));
+
+      final reopened = FileStateStore(client: f.client, vaultId: _vaultId);
+      await reopened.load();
+
+      expect(
+        reopened.ownContext.pack(),
+        isNot(const CausalContext.empty().pack()),
+        reason: 'the context of the sixteen banked writes must come back',
+      );
+    });
+
+    test('the next run skips what the failed one banked', () async {
+      // The point of persisting: the fast path compares disk against the
+      // stored chunk list, so a surviving row is what stops the file being
+      // read, chunked and uploaded all over again.
+      final remote = _FailsPartWayRemote(failAfter: 32);
+      final f = await fixtureWith(remote, 24);
+      await expectLater(f.diff.call(), throwsA(isA<StateError>()));
+
+      final healthy = _MemRemote()..store.addAll(remote.store);
+      final reopened = FileStateStore(client: f.client, vaultId: _vaultId);
+      await reopened.load();
+      final io = _MemIo();
+      for (var i = 0; i < 24; i++) {
+        io.files['$_vaultPath/f$i.bin'] = _randomBytes(512, i + 1);
+      }
+      final result = await StateStartupDiff(
+        store: reopened,
+        blobStore: LocalBlobStore(InMemoryBlobRepository()),
+        remoteBlobStorage: healthy,
+        io: io,
+        vaultPath: _vaultPath,
+        vaultId: _vaultId,
+        nodeId: 'test-device',
+        readClock: reopened.nextHlc,
+        writeClock: (_) {},
+        uploadConcurrency: 1,
+      ).call();
+
+      expect(
+        result.newFiles,
+        8,
+        reason: 'only the eight the first run never reached',
+      );
+      expect(
+        reopened.fileIds.length,
+        24,
+        reason: 'the second run completes the set rather than redoing it',
+      );
     });
   });
 }

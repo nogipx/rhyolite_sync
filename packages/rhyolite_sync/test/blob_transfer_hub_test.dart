@@ -89,6 +89,64 @@ class _ControllableStorage implements IBlobStorage {
 
 void main() {
   group('BlobTransferHub', () {
+    // -----------------------------------------------------------------------
+    // A dispose mid-transfer must not spray unhandled errors.
+    //
+    // upload/download await their tasks one at a time, while `cancelAll` fails
+    // them all at once: the first await throws, the loop exits, and every
+    // remaining task holds an error with no listener. A real first sync
+    // produced about thirty of these per dispose, and they buried the failure
+    // that had caused the dispose in the first place.
+    // -----------------------------------------------------------------------
+    test('dispose during an upload orphans no errors', () async {
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
+        final storage = _ControllableStorage();
+        final hub = BlobTransferHub(inner: storage);
+        final bytes = Uint8List.fromList([1]);
+        // Five tasks in one call: one is awaited when dispose lands, four are
+        // still queued behind it and are exactly what used to leak.
+        final ids = ['a', 'b', 'c', 'd', 'e'];
+        for (final id in ids) {
+          storage.uploadGate(id);
+        }
+
+        final f = hub.upload([for (final id in ids) (bytes, id)]);
+        await Future<void>.delayed(Duration.zero);
+        hub.dispose();
+
+        await expectLater(f, throwsA(isA<RpcCancelledException>()));
+        // Let anything orphaned reach the zone before we look.
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+      }, (e, _) => errors.add(e));
+
+      expect(errors, isEmpty, reason: 'errors reaching the zone are orphans');
+    });
+
+    test('dispose during a download orphans no errors', () async {
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
+        final storage = _ControllableStorage();
+        final hub = BlobTransferHub(inner: storage);
+        final ids = ['a', 'b', 'c', 'd', 'e'];
+        for (final id in ids) {
+          storage.bytes[id] = Uint8List.fromList([1]);
+          storage.downloadGate(id);
+        }
+
+        final f = hub.download(ids);
+        await Future<void>.delayed(Duration.zero);
+        hub.dispose();
+
+        await expectLater(f, throwsA(isA<RpcCancelledException>()));
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+      }, (e, _) => errors.add(e));
+
+      expect(errors, isEmpty, reason: 'errors reaching the zone are orphans');
+    });
+
     test('dedups concurrent downloads of the same blob into one inner call',
         () async {
       final storage = _ControllableStorage();

@@ -32,9 +32,7 @@ Future<(VaultConfig, VaultCipher)?> showVaultPickerModal(
   // the vault locally, but the picker only offers live vaults.
   List<VaultInfo> vaults;
   try {
-    vaults = (await directory.listVaults())
-        .where((v) => !v.isDeleted)
-        .toList();
+    vaults = (await directory.listVaults()).where((v) => !v.isDeleted).toList();
   } catch (e) {
     vaults = [];
   }
@@ -57,8 +55,7 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
   Future<void> Function(VaultInfo vault)? onDeleteVault,
   int? maxVaultCount,
 }) {
-  final atCapacity =
-      maxVaultCount != null && vaults.length >= maxVaultCount;
+  final atCapacity = maxVaultCount != null && vaults.length >= maxVaultCount;
   return showModalWith<(VaultConfig, VaultCipher)?>(
     plugin,
     build: (ctx) {
@@ -116,9 +113,7 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
               : S.planVaultLimit(maxVaultCount),
         );
         ctx.spaceVertical(px: 8);
-        ctx.buttonRow([
-          ButtonSpec(S.cancel, () => ctx.close(null)),
-        ]);
+        ctx.buttonRow([ButtonSpec(S.cancel, () => ctx.close(null))]);
         ctx.onEscape(() => ctx.close(null));
         return;
       }
@@ -153,18 +148,13 @@ Future<(VaultConfig, VaultCipher)?> _showPickerModal(
 
 /// Type-the-name confirmation for the irreversible vault delete.
 Future<bool> _confirmDeleteVault(PluginHandle plugin, VaultInfo vault) async {
-  final label =
-      vault.vaultName.isNotEmpty ? vault.vaultName : vault.vaultId;
+  final label = vault.vaultName.isNotEmpty ? vault.vaultName : vault.vaultId;
   final result = await showModalWith<bool>(
     plugin,
     build: (ctx) {
       ctx.h3(S.deleteVaultTitle(label));
       ctx.spaceVertical(px: 8);
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: S.deleteVaultBody,
-      );
+      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.deleteVaultBody);
       ctx.spaceVertical(px: 8);
       ctx.createEl('p', text: S.typeVaultNameToConfirm);
       final input = ctx.input(placeholder: label)..focus();

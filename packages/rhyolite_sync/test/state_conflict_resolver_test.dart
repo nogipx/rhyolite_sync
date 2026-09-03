@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/src/local/local_blob_store.dart';
-import 'package:rhyolite_sync/src/sync_v3/file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/src/sync_v3/file_state_store.dart';
 import 'package:rhyolite_sync/src/sync_v3/state_conflict_resolver.dart';
 import 'package:rpc_blob/rpc_blob.dart';

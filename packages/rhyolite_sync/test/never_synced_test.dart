@@ -1,5 +1,5 @@
-import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 void main() {
   test('a diagnostic report is never synced', () {

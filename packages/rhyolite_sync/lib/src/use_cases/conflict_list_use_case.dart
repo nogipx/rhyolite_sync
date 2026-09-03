@@ -1,4 +1,4 @@
-import '../sync_v3/file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import '../sync_v3/file_state_store.dart';
 
 /// List every fileId whose register currently has more than one

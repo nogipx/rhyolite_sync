@@ -1,7 +1,7 @@
 import 'package:rpc_dart/rpc_dart.dart';
 
 import '../local/local_blob_store.dart';
-import 'file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'file_state_store.dart';
 import 'time_budget_yielder.dart';
 
@@ -93,15 +93,31 @@ class LocalBlobGc {
     final token = context?.cancellationToken;
     final live = <String>{};
 
+    // A sibling that cannot answer yet does not stop the sweep any more — it
+    // narrows it.
+    //
+    // Refusing outright was right about ORPHANS: an id that belongs to no
+    // state of ours may be the sibling's, and deleting it on a partial live
+    // set would take another feature's data. It was wrong about everything
+    // else. A blob one of OUR states references is ours whatever the sibling
+    // holds, and if the vault can rebuild it there is no argument for keeping
+    // it — which is the entire cached copy of every binary in the vault, and
+    // the reason one database reached 1.5 GB.
+    //
+    // That distinction is what lets this run BEFORE the initial pull. Settings
+    // sync comes up seconds after the engine, so a sweep that needs it can
+    // only ever run later — and later is after the pull, which is exactly the
+    // ordering that let a full database block its own cleanup.
     final external = externalLiveIds?.call();
-    if (externalLiveIds != null && external == null) {
-      return const LocalBlobGcResult(scanned: 0, deleted: 0, skipped: true);
-    }
+    final siblingUnknown = externalLiveIds != null && external == null;
     if (external != null) live.addAll(external);
     // Blobs referenced by at least one state that CANNOT rebuild them. A
     // shared chunk is kept if any of its owners needs it kept, which is why
     // this is collected separately rather than decided per state.
     final pinned = <String>{};
+    /// Every id one of OUR states names, pinned or not — the set that can be
+    /// judged without knowing anything about the sibling.
+    final ourRefs = <String>{};
     final regenerable = isRegenerable;
     // Walk every TaggedValue across all registers — multi-value registers
     // pin each concurrent version's blobs until the resolver collapses
@@ -121,6 +137,7 @@ class LocalBlobGc {
       // sweep too heavy to run often.
       if (candidates != null && !refs.any(candidates.contains)) continue;
       live.addAll(refs);
+      ourRefs.addAll(refs);
       if (regenerable == null || !await regenerable(state)) pinned.addAll(refs);
       // Thousands of iterations on a large vault, sharing the host's only
       // thread — and wildly uneven: a text state costs a set lookup, a binary
@@ -146,9 +163,20 @@ class LocalBlobGc {
       }
     }
 
-    final orphans = allBlobIds.where((id) => !live.contains(id)).toList();
+    // With the sibling silent, delete only what is provably ours and provably
+    // rebuildable; leave every unknown id alone. With it answering, the full
+    // sweep runs as before and collects orphans too.
+    final orphans = siblingUnknown
+        ? allBlobIds
+              .where((id) => ourRefs.contains(id) && !pinned.contains(id))
+              .toList()
+        : allBlobIds.where((id) => !live.contains(id)).toList();
     if (orphans.isEmpty) {
-      return LocalBlobGcResult(scanned: allBlobIds.length, deleted: 0);
+      return LocalBlobGcResult(
+        scanned: allBlobIds.length,
+        deleted: 0,
+        skipped: siblingUnknown,
+      );
     }
 
     try {
@@ -160,6 +188,7 @@ class LocalBlobGc {
     return LocalBlobGcResult(
       scanned: allBlobIds.length,
       deleted: orphans.length,
+      skipped: siblingUnknown,
     );
   }
 }

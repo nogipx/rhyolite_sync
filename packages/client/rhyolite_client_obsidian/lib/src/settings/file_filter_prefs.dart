@@ -14,10 +14,8 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 /// destructive: a file the filter turns away stays on disk, stays on the
 /// server, and keeps syncing on every other device.
 class FileFilterPrefs {
-  FileFilterPrefs({
-    required this.excludedExtensions,
-    PathScope? pathScope,
-  }) : pathScope = pathScope ?? PathScope.everything;
+  FileFilterPrefs({required this.excludedExtensions, PathScope? pathScope})
+    : pathScope = pathScope ?? PathScope.everything;
 
   /// Lowercase extensions WITHOUT the leading dot (e.g. `pdf`, `zip`).
   final Set<String> excludedExtensions;
@@ -49,18 +47,17 @@ class FileFilterPrefs {
   }
 
   Map<String, Object?> toJson() => {
-        'excludedExtensions': (excludedExtensions.toList()..sort()),
-        ...pathScope.toJson(),
-      };
+    'excludedExtensions': (excludedExtensions.toList()..sort()),
+    ...pathScope.toJson(),
+  };
 
   FileFilterPrefs copyWith({
     Set<String>? excludedExtensions,
     PathScope? pathScope,
-  }) =>
-      FileFilterPrefs(
-        excludedExtensions: excludedExtensions ?? this.excludedExtensions,
-        pathScope: pathScope ?? this.pathScope,
-      );
+  }) => FileFilterPrefs(
+    excludedExtensions: excludedExtensions ?? this.excludedExtensions,
+    pathScope: pathScope ?? this.pathScope,
+  );
 
   /// Comma/space-separated display of the denylist, for the settings field.
   String get display => render(excludedExtensions);
@@ -71,9 +68,9 @@ class FileFilterPrefs {
 
   /// Parses a user string ("pdf, .zip mp4") into a normalized extension set.
   static Set<String> parse(String input) => {
-        for (final part in input.split(RegExp(r'[,\s]+')))
-          if (part.trim().isNotEmpty) _normalize(part),
-      };
+    for (final part in input.split(RegExp(r'[,\s]+')))
+      if (part.trim().isNotEmpty) _normalize(part),
+  };
 
   static String _normalize(String ext) =>
       ext.trim().toLowerCase().replaceAll(RegExp(r'^\.+'), '');

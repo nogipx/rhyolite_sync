@@ -1,5 +1,5 @@
 import '../contract/state_sync_contract.dart' show StateRecord;
-import '../sync_v3/file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// How a file in a restore point compares to the vault as it is NOW — the basis
 /// for the "what changed / what will I restore" preview. Because content is

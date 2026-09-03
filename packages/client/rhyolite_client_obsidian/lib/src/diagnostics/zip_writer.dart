@@ -118,7 +118,8 @@ Future<_Deflated> _rawDeflate(List<int> raw) async {
       final body = Uint8List.sublistView(gz, start, gz.length - 8);
       // The trailer's CRC32 is over the uncompressed data — the same value
       // ZIP stores, so it never has to be computed here.
-      final crc = gz[gz.length - 8] |
+      final crc =
+          gz[gz.length - 8] |
           (gz[gz.length - 7] << 8) |
           (gz[gz.length - 6] << 16) |
           (gz[gz.length - 5] << 24);
@@ -172,8 +173,8 @@ int _crc32(List<int> data) {
 Uint8List _u16(int v) => Uint8List.fromList([v & 0xFF, (v >> 8) & 0xFF]);
 
 Uint8List _u32(int v) => Uint8List.fromList([
-      v & 0xFF,
-      (v >> 8) & 0xFF,
-      (v >> 16) & 0xFF,
-      (v >> 24) & 0xFF,
-    ]);
+  v & 0xFF,
+  (v >> 8) & 0xFF,
+  (v >> 16) & 0xFF,
+  (v >> 24) & 0xFF,
+]);

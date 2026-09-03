@@ -99,15 +99,12 @@ void main() {
   });
 
   group('plugins / themes / snippets', () {
-    test(
-      'community plugin data.json is jsonWholeFile (canonical, not '
-      'field-merged)',
-      () {
-        final r = c('plugins/dataview/data.json')!;
-        expect(r.kind, SettingsCrdtKind.jsonWholeFile);
-        expect(r.category, SettingsCategory.communityPluginSettings);
-      },
-    );
+    test('community plugin data.json is jsonWholeFile (canonical, not '
+        'field-merged)', () {
+      final r = c('plugins/dataview/data.json')!;
+      expect(r.kind, SettingsCrdtKind.jsonWholeFile);
+      expect(r.category, SettingsCategory.communityPluginSettings);
+    });
 
     test('the plugin DIRECTORY is the code resource, not its files', () {
       final r = c('plugins/dataview')!;

@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:rhyolite_sync/src/sync_v3/state_pusher.dart';
 import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
@@ -800,8 +803,59 @@ void main() {
       );
     });
 
-    test("an attachment's chunks leave the cache once the file itself holds "
-        'them, and it still syncs', () async {
+    test('the blob cache is reclaimed BEFORE the initial pull, not after',
+        () async {
+      // The ordering IS the bug, which is why it gets a test of its own.
+      //
+      // This sweep used to run in the housekeeping tier, after the startup
+      // pipeline. That put the cleanup which keeps the database from filling
+      // up behind a startup that a full database makes fail. A vault reached
+      // 1.5 GB of cached chunks, could no longer allocate a page, and died in
+      // its initial pull on every restart — so the sweep never ran, on any of
+      // them, and the state it was holding could never come back. Nothing
+      // about either piece was wrong alone; only the order was.
+      //
+      // Moving it back after the pull must fail here.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+
+      // A blob no state refers to: droppable under any policy, so this test
+      // is about WHEN the sweep runs and not about what it chooses.
+      final orphan = Uint8List.fromList(List.generate(64, (i) => i));
+      final orphanId = sha256.convert(orphan).toString();
+      await h.engine.blobStore.write(orphan, orphanId, vaultId: _vaultId);
+      expect(
+        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
+        isNotEmpty,
+      );
+
+      // Park the engine inside its initial pull and look at the cache from
+      // there — the one moment that tells the two orderings apart.
+      final gate = Completer<void>();
+      h.state.getStatesGate = gate;
+      final started = h.engine.start();
+      for (var i = 0; i < 20 && h.state.getSince.isEmpty; i++) {
+        await pumpEventQueue();
+      }
+      expect(
+        h.state.getSince,
+        isNotEmpty,
+        reason: 'the pull must have begun for this observation to mean '
+            'anything',
+      );
+
+      expect(
+        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
+        isEmpty,
+        reason: 'the room has to be free BEFORE the pull needs it to write',
+      );
+
+      gate.complete();
+      await started;
+    });
+
+    test("an attachment's chunks never enter the cache — the vault file is "
+        'the copy, and it still syncs', () async {
       final h = await _Harness.create();
       addTearDown(h.dispose);
       await h.engine.start();
@@ -815,22 +869,27 @@ void main() {
       h.changes.emit(const FileCreatedEvent(relativePath: 'att/photo.bin'));
       await pushed;
 
-      // Right after the upload the cache holds a full second copy: that is
-      // what the eviction exists to remove.
-      final cachedBefore = await h.engine.blobStore.listBlobIds(
-        vaultId: _vaultId,
-      );
-      expect(cachedBefore, isNotEmpty);
-
-      await h.engine.runLocalBlobGc();
-
-      final cachedAfter = await h.engine.blobStore.listBlobIds(
-        vaultId: _vaultId,
-      );
+      // This used to assert the opposite first: that the upload left a full
+      // second copy here, which a later sweep would remove. It did, and the
+      // sweep ran in the housekeeping tier — after a startup that a database
+      // full of those copies makes fail. One vault reached 1.5 GB of them,
+      // could no longer allocate a page, and died in the initial pull on every
+      // restart, so the sweep that would have freed the room never ran once.
+      //
+      // Nothing is mirrored on upload now, so there is no second copy to
+      // collect and no window in which one exists.
       expect(
-        cachedAfter,
+        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
         isEmpty,
-        reason: 'the vault file is the copy; the cache need not be a second',
+        reason: 'the vault file is the copy; the cache is never a second',
+      );
+
+      // And the sweep, run against it, has nothing to do rather than
+      // something to undo.
+      await h.engine.runLocalBlobGc();
+      expect(
+        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
+        isEmpty,
       );
 
       // And the file is still perfectly syncable: the record the peer needs
@@ -1145,7 +1204,10 @@ void main() {
       // rows, so the retry sends what is left instead of starting over.
       final h = await _Harness.create();
       addTearDown(h.dispose);
-      for (var i = 0; i < 250; i++) {
+      // Two batches' worth, in terms of the batch: hard-coding the count made
+      // this test assert the old size after the size changed.
+      const fileCount = StatePusher.pushBatchSize * 2;
+      for (var i = 0; i < fileCount; i++) {
         h.io.files['$_vaultPath/note$i.md'] = Uint8List.fromList(
           utf8.encode('hello $i\n'),
         );
@@ -1171,7 +1233,7 @@ void main() {
       };
       expect(
         resent,
-        hasLength(50),
+        hasLength(StatePusher.pushBatchSize),
         reason: 'only the files the failed batch never carried',
       );
     });
@@ -2316,6 +2378,9 @@ class _Harness {
     PathScope Function()? pathScope,
     ITokenProvider? tokenProvider,
     List<String>? captureLog,
+    Future<int?> Function()? databaseBytes,
+    Future<void> Function()? flushDatabase,
+    int? Function()? maxFileSizeBytes,
   }) async {
     final env = await DataServiceFactory.inMemory();
     final state = _FakeStateContract();
@@ -2349,6 +2414,9 @@ class _Harness {
       scheduler: sched,
       excludedExtensions: excludedExtensions,
       pathScope: pathScope,
+      databaseBytes: databaseBytes,
+      flushDatabase: flushDatabase,
+      maxFileSizeBytes: maxFileSizeBytes,
       connectionFactory: ({required serverUrl, tokenProvider, logger}) {
         connection.boundProviders.add(tokenProvider);
         return connection;
@@ -2359,6 +2427,7 @@ class _Harness {
             required cipher,
             required httpClient,
             required endpoint,
+            logger,
           }) => remote,
     );
 
@@ -2697,6 +2766,15 @@ class _InMemoryIO implements IPlatformIO {
   /// When true, listFiles throws — used to make a restore fail mid-way.
   bool failListFiles = false;
 
+  /// Every statFile, counted. The startup scan calls it once per file, so the
+  /// count is how far the scan has walked — the only thing a test can watch
+  /// from outside to see whether it is still going.
+  int statCalls = 0;
+
+  /// Run on each statFile, before answering. Lets a test stop the engine from
+  /// inside the scan.
+  Future<void> Function(int call)? onStat;
+
   @override
   Future<Uint8List> readFile(String absolutePath) async {
     final b = files[absolutePath];
@@ -2743,6 +2821,7 @@ class _InMemoryIO implements IPlatformIO {
 
   @override
   Future<FileStatInfo?> statFile(String absolutePath) async {
+    await onStat?.call(++statCalls);
     final b = files[absolutePath];
     if (b == null) return null;
     // Derived from the CONTENT, because that is the property of a real
@@ -2856,6 +2935,550 @@ void _repairPullsFirst() {
   // for their own storage filled a gigabyte of ours because a config lookup
   // timed out and the engine guessed.
   // -------------------------------------------------------------------------
+  group('the startup pass belongs to the run that started it', () {
+    test(
+      'stop() ends the scan instead of leaving it walking the disk',
+      () async {
+        // The report this comes from: the engine stopped at 08:46:58 and the
+        // scan its previous start had begun kept going until 09:03:09 — sixteen
+        // minutes — then processed 2560 files on behalf of a session that no
+        // longer existed. StateStartupDiff had no cancellation of any kind, and
+        // the engine only checked _running BEFORE entering it.
+        final h = await _Harness.create();
+        addTearDown(h.dispose);
+
+        for (var i = 0; i < 400; i++) {
+          h.io.files['/vault/note$i.md'] = Uint8List.fromList([65, 66, i % 7]);
+        }
+
+        // Slow the scan so it is still walking when the stop arrives, and stop
+        // from OUTSIDE it — which is what the host does. Stopping from inside
+        // re-enters start() and the pass dies on its own torn-down fields
+        // rather than observing anything.
+        h.io.onStat = (_) => Future<void>.delayed(Duration.zero);
+
+        var started = false;
+        unawaited(h.engine.start().whenComplete(() => started = true));
+        while (h.io.statCalls < 20) {
+          await pumpEventQueue();
+        }
+
+        await h.engine.stop();
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        // The assertion is that the RUN ends, not how far the scan got. What
+        // happens today is incidental and differs by environment: in this
+        // harness the pass suspends and start() never returns; in the field it
+        // kept walking and finished sixteen minutes after the stop. Neither is
+        // the pass observing anything, because StateStartupDiff has no
+        // cancellation at all — the engine checks _running only BEFORE calling
+        // it.
+        expect(
+          started,
+          isTrue,
+          reason:
+              'start() must complete once the engine is stopped. Left hanging, '
+              'the pass holds its stores and its progress is neither banked nor '
+              'abandoned; walked ${h.io.statCalls} of 400 files',
+        );
+      },
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // The local database has a ceiling, and reaching it is handled rather than
+  // hit.
+  //
+  // A database that cannot allocate a page cannot allocate one for ANYTHING.
+  // The first write to fail is not the cache that filled it but the sync state
+  // beside it, which is how one vault became silently unsyncable for hours
+  // while its indicator claimed to be up to date. The line is drawn short of
+  // that.
+  //
+  // The pull is the only thing that grows this database now — uploads stopped
+  // mirroring into the cache — so the check sits in front of the staging a
+  // pull does, once per batch.
+  // -------------------------------------------------------------------------
+  group('the local database has a ceiling', () {
+    /// Device A publishes one file; returns what a second device would pull.
+    Future<({List<StateRecord> records, Uint8List content})> publish(
+      _MemRemote remote,
+    ) async {
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      final content = Uint8List.fromList(
+        List.generate(2000, (i) => (i * 7) % 256),
+      );
+      a.io.files['$_vaultPath/photo.bin'] = content;
+      a.changes.emit(const FileCreatedEvent(relativePath: 'photo.bin'));
+      await pushed;
+      final records = _recordsFromPuts(a.state);
+      expect(records, isNotEmpty, reason: 'A must have published something');
+      return (records: records, content: content);
+    }
+
+    /// A second device, empty disk, whose startup pull will stage [records].
+    Future<_Harness> receiver(
+      _MemRemote remote,
+      List<StateRecord> records, {
+      Future<int?> Function()? databaseBytes,
+      Future<void> Function()? flushDatabase,
+    }) async {
+      final b = await _Harness.create(
+        sharedRemote: remote,
+        databaseBytes: databaseBytes,
+        flushDatabase: flushDatabase,
+      );
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      return b;
+    }
+
+    test('with room to spare a pull is left alone', () async {
+      final remote = _MemRemote();
+      final published = await publish(remote);
+      var flushes = 0;
+      var measures = 0;
+      final b = await receiver(
+        remote,
+        published.records,
+        databaseBytes: () async {
+          measures++;
+          return 10 * 1024 * 1024;
+        },
+        flushDatabase: () async => flushes++,
+      );
+      await b.engine.start();
+
+      expect(measures, greaterThan(0), reason: 'the check must actually run');
+      expect(
+        measures,
+        1,
+        reason: 'a database with room to spare is asked once and left alone. '
+            'Counted in measurements rather than flushes: the flush is no '
+            'longer this path\'s alone — every batch now drains through the '
+            'same callback as a durability checkpoint, and a reclaim is what '
+            'measures a SECOND time to see whether it worked',
+      );
+      expect(flushes, greaterThan(0), reason: 'batches still checkpoint');
+      expect(b.events.whereType<SyncDatabaseFull>(), isEmpty);
+      expect(b.io.files['$_vaultPath/photo.bin'], equals(published.content));
+    });
+
+    test('over the limit it flushes and sweeps BEFORE reading the verdict', () async {
+      // Order is the whole point: the IndexedDB VFS acknowledges a write
+      // before performing it, so pages the sweep just freed are not yet pages
+      // the file can reuse. Measuring first measures a state that has not
+      // happened.
+      final remote = _MemRemote();
+      final published = await publish(remote);
+      final order = <String>[];
+      var bytes = 960 * 1024 * 1024;
+      final b = await receiver(
+        remote,
+        published.records,
+        databaseBytes: () async {
+          order.add('measure');
+          return bytes;
+        },
+        flushDatabase: () async {
+          order.add('flush');
+          bytes = 100 * 1024 * 1024; // the sweep worked
+        },
+      );
+      await b.engine.start();
+
+      expect(order.first, 'measure', reason: 'the check starts by asking');
+      expect(
+        order,
+        contains('flush'),
+        reason: 'being over the limit has to actually do something',
+      );
+      expect(
+        order.indexOf('flush') < order.lastIndexOf('measure'),
+        isTrue,
+        reason: 'the verdict must be read after the flush, not before it — '
+            'order was $order',
+      );
+      expect(
+        b.events.whereType<SyncDatabaseFull>(),
+        isEmpty,
+        reason: 'reclaiming worked, so there is nothing to report',
+      );
+    });
+
+    test('still full after reclaiming is reported, and the file still lands', () async {
+      // At this point the space is live data, not staging, and sweeping cannot
+      // help. Refusing to sync would trade a full database for a stale vault,
+      // which is the worse of the two — so it is said, loudly, and the work
+      // goes on.
+      final remote = _MemRemote();
+      final published = await publish(remote);
+      final b = await receiver(
+        remote,
+        published.records,
+        databaseBytes: () async => 999 * 1024 * 1024,
+        flushDatabase: () async {},
+      );
+      await b.engine.start();
+
+      final full = b.events.whereType<SyncDatabaseFull>().toList();
+      expect(full, isNotEmpty, reason: 'the user has to be able to learn this');
+      expect(full.first.bytes, 999 * 1024 * 1024);
+      expect(full.first.limitBytes, b.engine.databaseLimitBytes);
+      expect(
+        b.io.files['$_vaultPath/photo.bin'],
+        equals(published.content),
+        reason: 'a full database must not also cost the user their pull',
+      );
+    });
+
+    test('a host that does not measure is not read as one with no room', () async {
+      // Every other client of this engine passes nothing, and a missing
+      // measurement must mean "no opinion" rather than "no room".
+      final remote = _MemRemote();
+      final published = await publish(remote);
+      final b = await receiver(remote, published.records);
+      await b.engine.start();
+
+      expect(b.events.whereType<SyncDatabaseFull>(), isEmpty);
+      expect(b.io.files['$_vaultPath/photo.bin'], equals(published.content));
+    });
+
+    test('a measurement that throws does not cost the pull', () async {
+      final remote = _MemRemote();
+      final published = await publish(remote);
+      final b = await receiver(
+        remote,
+        published.records,
+        databaseBytes: () async => throw StateError('no answer'),
+      );
+      await b.engine.start();
+
+      expect(b.events.whereType<SyncDatabaseFull>(), isEmpty);
+      expect(b.io.files['$_vaultPath/photo.bin'], equals(published.content));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // An interrupted pull keeps what it applied.
+  //
+  // The engine banks a batch's work as it goes, but a host whose storage
+  // acknowledges writes before performing them only makes that real when it
+  // drains its queue — and the only signal it had for that was
+  // SyncCursorAdvanced, which a pull emits ONCE, at the very end. A vault's
+  // worth of applied files sat in a queue nothing drained; closing the host
+  // mid-pull discarded all of it, and the next run re-fetched every record and
+  // re-downloaded every blob to discover the content was already on disk.
+  // Observed in the field: three consecutive runs, all `sinceCursor=192`, all
+  // `prefetching 1242 blob(s)`, every apply `result=skipped-identical`.
+  // -------------------------------------------------------------------------
+  group('a pull checkpoints as it goes', () {
+    test('a batch that applies is announced even when the cursor stands still',
+        () async {
+      // The crux. The cursor is bounded by the LOWEST unapplied serverSeq while
+      // files are applied smallest-first, so it can stand still through a great
+      // deal of banked work. A checkpoint tied to it would fire for none of it.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      a.io.files['$_vaultPath/note.md'] = Uint8List.fromList('hello'.codeUnits);
+      a.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
+      await pushed;
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (_) => records;
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      // Everything is applied and the cursor is already where this response
+      // leaves it, so the SECOND pull moves it nowhere — and must still say it
+      // banked a batch.
+      b.events.clear();
+      await b.engine.triggerPull();
+
+      final checkpoints = b.events.whereType<SyncPullBatchApplied>().toList();
+      expect(
+        checkpoints,
+        isNotEmpty,
+        reason: 'a pull that applied a batch has work worth draining, whether '
+            'or not the cursor moved',
+      );
+      expect(
+        checkpoints.map((c) => c.cursor).toSet(),
+        {records.last.serverSeq},
+        reason: 'the cursor stood still across this pull — which is exactly '
+            'the case a cursor-triggered flush was blind to',
+      );
+    });
+
+    test('the pull WAITS for the checkpoint before applying more', () async {
+      // The property the whole mechanism rests on, and the one four builds
+      // failed to have. On a host whose storage drains on the same loop the
+      // pull runs on, an unawaited barrier can never complete — the drain
+      // needs an idle loop and the pull is what makes it busy. Observed as
+      // four flushes starting across a four-minute pull and none finishing.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      for (var i = 0; i < 40; i++) {
+        a.io.files['$_vaultPath/note$i.md'] = Uint8List.fromList(
+          'content $i'.codeUnits,
+        );
+      }
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+
+      // The flush blocks until released, and nothing may apply while it does.
+      final held = Completer<void>();
+      var appliesAtFlushStart = 0;
+      var flushed = false;
+      late final _Harness b;
+      b = await _Harness.create(
+        sharedRemote: remote,
+        flushDatabase: () async {
+          if (flushed) return;
+          flushed = true;
+          appliesAtFlushStart = b.io.files.length;
+          await held.future;
+        },
+        databaseBytes: () async => 1,
+      );
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+
+      final run = b.engine.start();
+      // Let the pull reach its first checkpoint and park there.
+      for (var i = 0; i < 40; i++) {
+        await pumpEventQueue();
+      }
+
+      expect(
+        flushed,
+        isTrue,
+        reason: 'a banked batch must reach the host before the next one runs',
+      );
+      expect(
+        b.io.files.length,
+        appliesAtFlushStart,
+        reason: 'nothing may be applied while the drain is outstanding — that '
+            'is what makes the drain possible at all',
+      );
+
+      held.complete();
+      await run;
+    });
+
+    test('progress is reported for every applied file, not every blob',
+        () async {
+      // The bar counted blobs still to fetch. That was right when fetching was
+      // the work; a pull now spends most of its time applying, reconciling and
+      // pushing, and it emits NOTHING for a batch whose files it already holds
+      // — so on a vault where half the files were present the bar sat still
+      // through half the run and read as stuck.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      for (var i = 0; i < 40; i++) {
+        a.io.files['$_vaultPath/note$i.md'] = Uint8List.fromList(
+          'content $i'.codeUnits,
+        );
+      }
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      final steps = b.events.whereType<SyncPullProgress>().toList();
+      expect(
+        steps.length,
+        records.length,
+        reason: 'one step per applied file — a bar that moves once per batch '
+            'is still for the seconds that matter',
+      );
+      expect(steps.first.applied, 1);
+      expect(steps.last.applied, steps.last.total);
+      expect(
+        steps.map((s) => s.applied).toList(),
+        orderedEquals(List.generate(records.length, (i) => i + 1)),
+        reason: 'monotone and gapless, or the bar jumps backwards',
+      );
+    });
+
+    test('a pull leaves no chunks behind in the database', () async {
+      // The gigabyte that stopped the write queue from ever draining. Every
+      // chunk of every pulled file went into SQLite purely in transit: the
+      // prefetch wrote it, the apply read it straight back, the file went to
+      // disk and a sweep deleted it later. On a host whose SQLite performs its
+      // writes from a queue on the pull's own event loop, that queue never
+      // emptied — so nothing the pull banked ever became durable, and every
+      // session restarted from where the one before it had.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      final content = Uint8List.fromList(
+        List.generate(3000, (i) => (i * 13) % 256),
+      );
+      a.io.files['$_vaultPath/photo.bin'] = content;
+      a.changes.emit(const FileCreatedEvent(relativePath: 'photo.bin'));
+      await pushed;
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      expect(
+        b.io.files['$_vaultPath/photo.bin'],
+        equals(content),
+        reason: 'the file still has to arrive — staging in memory is a change '
+            'of where the bytes rest, not whether they land',
+      );
+      expect(
+        await b.engine.blobStore.listBlobIds(vaultId: _vaultId),
+        isEmpty,
+        reason: 'a pulled file must leave nothing in the database. Anything '
+            'here is a write the queue has to drain for bytes already on disk',
+      );
+    });
+
+    test('every batch of a multi-batch pull is a checkpoint', () async {
+      // 40 files is two batches at the current step of 32. One checkpoint for
+      // the whole pull is what the bug looked like.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      for (var i = 0; i < 40; i++) {
+        a.io.files['$_vaultPath/note$i.md'] = Uint8List.fromList(
+          'content $i'.codeUnits,
+        );
+      }
+      await a.engine.start();
+      final records = _recordsFromPuts(a.state);
+      expect(
+        records.length,
+        greaterThan(32),
+        reason: 'the pull under test has to span more than one batch',
+      );
+
+      final b = await _Harness.create(sharedRemote: remote);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      expect(
+        b.events.whereType<SyncPullBatchApplied>().length,
+        greaterThan(1),
+        reason: 'a checkpoint per batch is the whole point — one for the pull '
+            'is what left a vault\'s worth of writes undrained',
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // A file this device will not fetch is not a file the server lost.
+  //
+  // Both arrive at the reconciler as a null from `download`, and both were
+  // reported as `Blob not available` — the message for missing data. Someone
+  // told that goes looking for a recovery, when nothing is missing: the file
+  // is intact on the server and on every device that could hold it.
+  // -------------------------------------------------------------------------
+  group('too large to fetch is not the same as lost', () {
+    test('a file over this device\'s ceiling is reported as too large', () async {
+      final remote = _MemRemote();
+
+      // A publishes a file with no ceiling of its own.
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      a.io.files['$_vaultPath/big.bin'] = Uint8List.fromList(
+        List.generate(4000, (i) => (i * 11) % 256),
+      );
+      a.changes.emit(const FileCreatedEvent(relativePath: 'big.bin'));
+      await pushed;
+      final records = _recordsFromPuts(a.state);
+      expect(records, isNotEmpty);
+
+      // B cannot carry a file that size.
+      final b = await _Harness.create(
+        sharedRemote: remote,
+        maxFileSizeBytes: () => 500,
+      );
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      final refused = b.events.whereType<SyncFileTooLargeToFetch>().toList();
+      expect(
+        refused,
+        isNotEmpty,
+        reason: 'the refusal has to be distinguishable from a lost blob, '
+            'which is what the user was told before',
+      );
+      expect(refused.first.limitBytes, 500);
+      expect(refused.first.sizeBytes, greaterThan(500));
+      expect(
+        b.io.files.containsKey('$_vaultPath/big.bin'),
+        isFalse,
+        reason: 'refused means not written, not written-partially',
+      );
+    });
+
+    test('a file within the ceiling is fetched and says nothing', () async {
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      final content = Uint8List.fromList(List.generate(200, (i) => i % 256));
+      a.io.files['$_vaultPath/small.bin'] = content;
+      a.changes.emit(const FileCreatedEvent(relativePath: 'small.bin'));
+      await pushed;
+      final records = _recordsFromPuts(a.state);
+
+      final b = await _Harness.create(
+        sharedRemote: remote,
+        maxFileSizeBytes: () => 1 << 20,
+      );
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? records : const [];
+      b.state.getCursor = records.last.serverSeq;
+      await b.engine.start();
+
+      expect(b.events.whereType<SyncFileTooLargeToFetch>(), isEmpty);
+      expect(b.io.files['$_vaultPath/small.bin'], equals(content));
+    });
+  });
+
   group('storage backend resolution', () {
     test('a vault that has never been answered refuses to guess', () async {
       final h = await _Harness.create();
@@ -2920,6 +3543,26 @@ void _repairPullsFirst() {
       },
     );
 
+    test('an unreadable force-binary policy refuses too', () async {
+      // Same call as the storage guard above, for the other vault-wide
+      // setting. Classification decides which resolver a file goes through —
+      // Fugue-join or LWW — and it has to be the same answer on every device.
+      // Proceeding on built-in rules alone reports "the vault forces nothing"
+      // when the truth is "we never found out", and two devices that disagree
+      // about one file do not converge.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      h.engine.metaStorage = _MetaStopsAnswering(answerFirst: 1);
+
+      await h.engine.start();
+      await pumpEventQueue();
+
+      expect(
+        h.events.whereType<SyncError>().map((e) => e.message).join(),
+        contains('refusing to classify'),
+      );
+    });
+
     test('a vault marked BYO still refuses, answered or not', () async {
       // The pre-existing guard, which only ever covered the case where the
       // marker had already been stored locally.
@@ -2946,6 +3589,28 @@ class _UnreachableMeta implements IVaultMetaStorage {
   @override
   Future<String?> getEncryptedMeta(String vaultId) async {
     calls++;
+    throw StateError('unreachable');
+  }
+
+  @override
+  Future<void> setEncryptedMeta(String vaultId, String encryptedMeta) async {}
+}
+
+/// Answers, then stops — the transient case, not the dead-service one.
+///
+/// Both vault-wide settings are read through the same [getEncryptedMeta], so
+/// they can only be told apart by call order. That is not an artefact of the
+/// fake: a user report showed exactly this shape in one session, the storage
+/// phase answering in 227ms and the policy read timing out minutes later.
+class _MetaStopsAnswering implements IVaultMetaStorage {
+  _MetaStopsAnswering({required this.answerFirst});
+
+  final int answerFirst;
+  int calls = 0;
+
+  @override
+  Future<String?> getEncryptedMeta(String vaultId) async {
+    if (calls++ < answerFirst) return null; // answered: no external storage
     throw StateError('unreachable');
   }
 

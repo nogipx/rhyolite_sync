@@ -19,8 +19,11 @@ Future<void> showDbCorruptionModal(
       ctx.spaceVertical(px: 12);
       ctx.createEl('p', text: S.dbCorruptedText);
       ctx.spaceVertical(px: 8);
-      ctx.createEl('p',
-          cls: 'rhyolite-setting-desc', text: S.dbRecoveryDescription);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.dbRecoveryDescription,
+      );
       ctx.spaceVertical(px: 16);
       ctx.buttonRow([
         ButtonSpec(

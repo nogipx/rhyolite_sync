@@ -71,7 +71,9 @@ void renderUnifiedDiff(
       i = j;
     }
   }
-  if (i < lines.length) _diffGapRow(doc, host, lines.length - i, truncated: true);
+  if (i < lines.length) {
+    _diffGapRow(doc, host, lines.length - i, truncated: true);
+  }
 }
 
 void _diffLineRow(
@@ -102,12 +104,25 @@ void _diffLineRow(
     'userSelect': 'none',
   });
 
-  final content = _el(doc, row, 'span', text: line.text.isEmpty ? ' ' : line.text);
-  _css(content,
-      {'flex': '1 1 auto', 'whiteSpace': 'pre-wrap', 'wordBreak': 'break-word'});
+  final content = _el(
+    doc,
+    row,
+    'span',
+    text: line.text.isEmpty ? ' ' : line.text,
+  );
+  _css(content, {
+    'flex': '1 1 auto',
+    'whiteSpace': 'pre-wrap',
+    'wordBreak': 'break-word',
+  });
 }
 
-void _diffGapRow(JSObject doc, JSObject host, int count, {bool truncated = false}) {
+void _diffGapRow(
+  JSObject doc,
+  JSObject host,
+  int count, {
+  bool truncated = false,
+}) {
   final row = _el(
     doc,
     host,

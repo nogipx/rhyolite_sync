@@ -6,11 +6,11 @@ void main() {
   final now = DateTime.utc(2026, 8, 28, 12);
 
   PlanSnapshot active({DateTime? end}) => PlanSnapshot(
-        status: SubscriptionStatus.active,
-        periodEnd: end,
-        plan: 'rhyolite-pro-monthly',
-        capabilities: PlanCapabilities.free,
-      );
+    status: SubscriptionStatus.active,
+    periodEnd: end,
+    plan: 'rhyolite-pro-monthly',
+    capabilities: PlanCapabilities.free,
+  );
 
   const free = PlanSnapshot(
     status: SubscriptionStatus.none,
@@ -47,12 +47,18 @@ void main() {
   group('ending soon', () {
     test('inside the window', () {
       final end = now.add(const Duration(days: 3));
-      expect(notice(current: active(end: end)), PlanNotice(PlanAlert.endingSoon, end));
+      expect(
+        notice(current: active(end: end)),
+        PlanNotice(PlanAlert.endingSoon, end),
+      );
     });
 
     test('the window edge is included', () {
       final end = now.add(kPlanEndingSoonWindow);
-      expect(notice(current: active(end: end)), PlanNotice(PlanAlert.endingSoon, end));
+      expect(
+        notice(current: active(end: end)),
+        PlanNotice(PlanAlert.endingSoon, end),
+      );
     });
 
     test('just outside it is quiet', () {
@@ -68,7 +74,10 @@ void main() {
       // them apart, and it needs no server change to work.
       final end = now.subtract(const Duration(days: 2));
       expect(
-        notice(remembered: active(end: end), current: free),
+        notice(
+          remembered: active(end: end),
+          current: free,
+        ),
         PlanNotice(PlanAlert.ended, end),
       );
     });
@@ -124,7 +133,10 @@ void main() {
     );
 
     test('an active plan going to none is recorded as expired', () {
-      final out = resolvePlan(prior: active(end: ended), fresh: freshNone);
+      final out = resolvePlan(
+        prior: active(end: ended),
+        fresh: freshNone,
+      );
 
       expect(out.status, SubscriptionStatus.expired);
       expect(out.periodEnd, ended);
@@ -133,7 +145,10 @@ void main() {
     test('the recorded lapse survives the next none answer', () {
       // Without this the knowledge that detected the lapse is overwritten by
       // it, and the alert shows for exactly one session.
-      final first = resolvePlan(prior: active(end: ended), fresh: freshNone);
+      final first = resolvePlan(
+        prior: active(end: ended),
+        fresh: freshNone,
+      );
       final second = resolvePlan(prior: first, fresh: freshNone);
 
       expect(second.status, SubscriptionStatus.expired);
@@ -158,16 +173,23 @@ void main() {
     });
 
     test('a user who never subscribed stays none', () {
-      expect(resolvePlan(prior: null, fresh: freshNone).status,
-          SubscriptionStatus.none);
-      expect(resolvePlan(prior: free, fresh: freshNone).status,
-          SubscriptionStatus.none);
+      expect(
+        resolvePlan(prior: null, fresh: freshNone).status,
+        SubscriptionStatus.none,
+      );
+      expect(
+        resolvePlan(prior: free, fresh: freshNone).status,
+        SubscriptionStatus.none,
+      );
     });
 
     test('renewing clears the lapse outright', () {
       final renewed = now.add(const Duration(days: 30));
       final out = resolvePlan(
-        prior: PlanSnapshot(status: SubscriptionStatus.expired, periodEnd: ended),
+        prior: PlanSnapshot(
+          status: SubscriptionStatus.expired,
+          periodEnd: ended,
+        ),
         fresh: SubscriptionDto(
           status: SubscriptionStatus.active,
           currentPeriodEnd: renewed.millisecondsSinceEpoch ~/ 1000,
@@ -175,7 +197,10 @@ void main() {
       );
 
       expect(out.status, SubscriptionStatus.active);
-      expect(planNotice(remembered: null, current: out, now: now), PlanNotice.quiet);
+      expect(
+        planNotice(remembered: null, current: out, now: now),
+        PlanNotice.quiet,
+      );
     });
   });
 

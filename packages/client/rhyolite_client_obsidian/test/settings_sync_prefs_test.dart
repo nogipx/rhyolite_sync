@@ -27,8 +27,10 @@ void main() {
       SettingsSyncPrefs.dataKey: prefs.toJson(),
     });
     expect(restored.enabled, isTrue);
-    expect(restored.categories,
-        {SettingsCategory.hotkeys, SettingsCategory.themesSnippets});
+    expect(restored.categories, {
+      SettingsCategory.hotkeys,
+      SettingsCategory.themesSnippets,
+    });
   });
 
   test('unknown category names are ignored', () {

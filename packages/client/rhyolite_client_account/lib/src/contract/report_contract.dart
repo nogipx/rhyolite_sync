@@ -74,11 +74,11 @@ class SubmitReportRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'archive_base64': archiveBase64,
-        'description': description,
-        'plugin_version': pluginVersion,
-        'platform': platform,
-      };
+    'archive_base64': archiveBase64,
+    'description': description,
+    'plugin_version': pluginVersion,
+    'platform': platform,
+  };
 }
 
 class SubmitReportResponse implements IRpcSerializable {

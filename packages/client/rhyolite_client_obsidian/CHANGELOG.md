@@ -1,3 +1,134 @@
+## [3.17.0] - 2026-09-03
+
+**Sync no longer stops because the local database filled up.**
+The plugin was keeping a second copy of every attachment in its own database,
+beside the file already on disk. It does not any more, and a database that
+already holds those copies gives the space back on the next launch. Storage
+now reports its own size, and offers to shrink the file when most of it has
+gone empty.
+
+**A large download no longer runs the database out of room.**
+Chunks on their way to a file are held in memory and written once, as the
+file, instead of passing through the local database first. A pull of several
+gigabytes now costs what the files cost, and a download interrupted halfway
+keeps every file it had already finished.
+
+**The status says what is actually happening.**
+One indicator for the whole plugin, notes and settings together. It no longer
+reads "up to date" while files are still going out, and it stops flickering
+between states on a slow backend — an open transfer is enough to say the work
+is not finished. Progress counts files, which is what you can see, rather than
+the pieces they arrive in.
+
+**A large upload stops waiting on its biggest file.**
+Files are grouped by size, so one video no longer holds a dozen photos that
+finished minutes ago, and each file leaves the transfer list when its own
+bytes are up rather than when its neighbours are.
+
+**Your own storage cannot stall the whole sync.**
+A transfer to external storage that stops answering is cut and retried instead
+of being waited on indefinitely, so one unreachable file no longer holds
+everything behind it.
+
+**A device that reconnects stops going deaf.**
+Change notifications re-attach to the live connection instead of retrying the
+one that dropped, so a device keeps learning about other devices' edits after
+a network blip.
+
+### Features
+
+- the local database has a ceiling, and reaching it is handled (core)
+- the tiles say what they know, and the database gets a home (obsidian)
+- stop writing a change feed nobody reads, and offer the space back (obsidian)
+- give back the megabytes a delete only freed inside the file (obsidian)
+- a command that says what fills the local database (obsidian)
+- the local database reports its own size every boot (obsidian)
+
+### Bug Fixes
+
+- a transfer that opened must close (core)
+- a stalled BYO transfer is cut, not waited on forever (core)
+- name the pull's quiet phase and report it as it goes (core)
+- the pull's progress counts files, not blobs (obsidian)
+- identical bytes record the signature they just proved (core)
+- size the pull's staging area from what was measured (obsidian)
+- the memory ceiling moves to where the sizes are known (core)
+- a pull stages its chunks in memory, not in the database (core)
+- the pull waits for the batch to become durable (core)
+- the startup upload drains on banking, not on the server agreeing (obsidian)
+- an interrupted pull keeps what it applied (core)
+- a file too large to fetch is not a file the server lost (core)
+- stopping waits for the reconcile it cancelled, not just the sweeps (core)
+- stopping waits for the background work it cancelled (core)
+- settings sync launches one at a time (obsidian)
+- notify says when it subscribes, not only when it fails (core)
+- command names stop repeating the plugin's own name (obsidian)
+- settings state is asked for, not remembered from a push (obsidian)
+- the dot and the panel stop disagreeing on the same screen (obsidian)
+- "cannot answer yet" and "nothing to report" stop being one value (obsidian)
+- all four tiles, all three states, none of them guessed (obsidian)
+- four stat tiles, always, and none of them about the database (obsidian)
+- the compaction offer gets its own row, and the leftover feed gets dropped (obsidian)
+- the panel stops reporting the gaps between reports (obsidian)
+- one dot for "the plugin is working", and it stops lying (obsidian)
+- an upload group stops being as slow as its largest member (core)
+- notify asks which connection to use, instead of remembering one (core)
+- the sweep stops reporting a narrowed pass as a skipped one (core)
+- the cache stops keeping a second copy of the vault (core)
+- the startup pass publishes every five seconds, not ten (core)
+- push in batches of 50, and publish the pass's tail (core)
+- the self-host registry socket had no owner (obsidian)
+- boot timing names which part of the open is slow (obsidian)
+- two loops ask whether their own run is still going (core)
+- a stopped engine stops being mistaken for a slow one (core)
+- the startup pass belongs to the run that started it (core)
+- the connection hands out capabilities, and the handle stops escaping (core)
+- one gate per connection, held by the connection and not by a writer (core)
+- two failures that were reported as something else (core)
+- a record refused by the local clock stops being lost forever (core)
+- "the vault forces nothing" and "we never found out" stop being the same value (core)
+- drop the domain copies my own verification restored (core)
+
+### Refactoring
+
+- the palette keeps verbs, not a copy of a hub's contents (obsidian)
+- one rule for "is anything working", tested by behaviour (obsidian)
+- every startup phase is timed by the same three lines (core)
+- the startup pass comes out of start(), in two pieces (core)
+- one call points the engine at the auth it now has (obsidian)
+- the engine graph is built by a function a test can call (obsidian)
+- the database open becomes a phase, and the fallback gets run (obsidian)
+- the first boot phase leaves bin/ and gets tested (obsidian)
+- one mutable global left, and a test that keeps it that way (obsidian)
+- the recovery ladder folds its own events (obsidian)
+- the plan gets an object, not four globals (obsidian)
+- the session names what it needs, so teardown can be tested (obsidian)
+- one slot for what a load owns, not twenty (obsidian)
+- the host probes move where they can be named (obsidian)
+- the pipeline is assembled in one place, once (core)
+- the blob backend, its hub and its id key become one object (core)
+- the domain is a declared dependency, not an ambient one (core)
+- the rules about time move out of the store that reads the clock (core)
+- a device's choice of what to sync is not a rule about how things converge (core)
+- the blob format and the merge vocabulary were never the store's (core)
+- the domain tests move with the domain, and the move stops half-done (core)
+- the domain moves into a package that cannot reach a runtime (core)
+
+### Other
+
+- ask at boot whether this database can be flushed at all (obsidian)
+- log the flush before it awaits, not only after (obsidian)
+- say which VFS the database opened on (obsidian)
+- separate "never written" from "written and unreadable" (core)
+- say how much state survived, and whether the flush ran (core)
+- the log says which build wrote it (obsidian)
+- the two fixes that landed after the version bump (obsidian)
+- bump plugin to 3.17.0 (obsidian)
+- the gate is shared, asserted where it is wired (obsidian)
+- a first sync of 300 attachments, on one connection, at real concurrency (core)
+- say the same things in fewer words (core)
+- state what belongs in the domain and what a change here costs (core)
+
 ## [3.16.3] - 2026-09-01
 
 **A large first sync is several times faster.**

@@ -9,6 +9,7 @@ environment:
   sdk: ^3.11.0
 
 dependencies:
+  rhyolite_core: any
   convergent: any
 
   rpc_dart: any
@@ -24,6 +25,10 @@ dependencies:
   cryptography: ^2.9.0
   unorm_dart: ^0.3.0
 
+  # Added by `dart fix`: used by lib and never declared.
+  http: any
+  rpc_dart_websocket: any
+  web_socket_channel: any
 dev_dependencies:
   rpc_data_sqlite: any
   lints: ^6.0.0
@@ -31,3 +36,4 @@ dev_dependencies:
   fake_async: ^1.3.1
   build_runner: ^2.11.1
   rpc_dart_generator: any
+  rpc_blob_sqlite: any

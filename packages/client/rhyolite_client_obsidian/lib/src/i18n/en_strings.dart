@@ -793,7 +793,7 @@ class EnStrings extends AppStrings {
       'support, and keeps a copy in your vault. Note names are replaced with '
       'pseudonyms and nothing you wrote is included.';
   @override
-  String get bugReportCommand => 'Rhyolite: create bug report';
+  String get bugReportCommand => 'Create a bug report';
   @override
   String get bugReportTitle => 'Create bug report';
   @override
@@ -1152,9 +1152,9 @@ class EnStrings extends AppStrings {
   @override
   String get panelStorageLabel => 'Storage';
   @override
-  String get vaultSizeLabel => 'Vault size';
+  String get vaultSizeLabel => 'Vault';
   @override
-  String get settingsSizeLabel => 'Settings size';
+  String get settingsSizeLabel => 'Settings';
   @override
   String get storageDetails => 'Storage details →';
   @override
@@ -1207,6 +1207,21 @@ class EnStrings extends AppStrings {
       'Saved by a device running a newer Rhyolite. Update the plugin to the '
       'latest version and they will sync. Until then they are left untouched, '
       'on disk and on the server, and editing them here will not sync.';
+  @override
+  String databaseFull(String size, String limit) =>
+      'Local database is full ($size of $limit)';
+  @override
+  String get databaseFullHint =>
+      'Cache was cleared and the space did not come back, so what is left is '
+      'live data. Syncing continues, but a database that cannot grow will '
+      'eventually stop accepting writes. Compacting returns the space.';
+  @override
+  String tooLargeToFetch(int n) => 'Too large to download here ($n)';
+  @override
+  String get tooLargeToFetchHint =>
+      'Over this device\'s per-file limit, so they were not written to disk. '
+      'Nothing was lost: they are intact on the server and on the devices that '
+      'can hold them.';
   @override
   String andMore(int n) => '…and $n more';
   @override
@@ -1363,20 +1378,58 @@ class EnStrings extends AppStrings {
   String get cmdSyncNow => 'Sync now';
   @override
   String get cmdReconnect => 'Reconnect now';
+
+  @override
+  String get cmdDatabaseReport => 'Save the local database report';
+
+  @override
+  String get cmdCompactDatabase => 'Compact the local database';
+
+  @override
+  String categoriesCount(int n) => n == 1 ? '1 category' : '$n categories';
+
+  @override
+  String get featureOff => 'Off';
+
+  @override
+  String get databaseSection => 'Local database';
+
+  @override
+  String get databaseFileSize => 'File size';
+
+  @override
+  String get databaseEmptySpace => 'Empty space';
+
+  @override
+  String get databaseCompactHint =>
+      'Most of this file is empty. Compacting rewrites it and returns the '
+      'space; it takes a while, so pause sync first.';
+
+  @override
+  String get databaseReportAction => 'Report';
+
+  @override
+  String get databaseCompactAction => 'Compact';
+
+
+  @override
+  String compactOffer(String free) =>
+      '$free of the local database is empty — compact it';
+
+  @override
+  String get compactRunning =>
+      'Compacting — this rewrites the whole database and may take a while. '
+      'Leave Obsidian open.';
+
+  @override
+  String compactDone(String before, String after) =>
+      'Database compacted: $before to $after.';
   @override
   String get cmdSyncSettingsNow => 'Sync settings now (.obsidian)';
-  @override
-  String get cmdCleanupStorage => 'Clean up storage (history + blobs)';
-  @override
-  String get cmdManageDevices => 'Manage sync devices';
-  @override
-  String get cmdReclaimOrphans => 'Reclaim orphaned blobs';
   @override
   String get cmdConfigureSelfHost => 'Configure self-host server';
   @override
   String get cmdShowHistory => 'Show version history for current file';
-  @override
-  String get cmdRestoreBackup => 'Restore from backup';
 
   // ── Payment activation ──
   @override

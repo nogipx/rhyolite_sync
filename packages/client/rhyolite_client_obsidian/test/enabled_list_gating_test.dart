@@ -14,12 +14,11 @@ void main() {
       List<String> input, {
       Set<String> vaultCode = const {},
       Set<String> installed = const {},
-    }) =>
-        partitionEnabledList(
-          input,
-          vaultHasCode: vaultCode.contains,
-          installedHere: installed.contains,
-        );
+    }) => partitionEnabledList(
+      input,
+      vaultHasCode: vaultCode.contains,
+      installedHere: installed.contains,
+    );
 
     test('holds back a plugin whose code is coming but has not landed', () {
       final r = split(['dataview'], vaultCode: {'dataview'});
@@ -90,10 +89,7 @@ void main() {
 
     test('rejects non-arrays and junk', () {
       expect(parseEnabledList(jb({'a': 1})), isNull);
-      expect(
-        parseEnabledList(Uint8List.fromList(utf8.encode('{'))),
-        isNull,
-      );
+      expect(parseEnabledList(Uint8List.fromList(utf8.encode('{'))), isNull);
     });
   });
 
@@ -111,8 +107,11 @@ void main() {
       // remains the user's call.
       final diskOnPhone = jb(<String>[]);
       final restored = restoreWithheld(diskOnPhone, {'realclaudian'});
-      expect(ids(restored), ['realclaudian'],
-          reason: 'templater was disabled by the user and stays disabled');
+      expect(
+        ids(restored),
+        ['realclaudian'],
+        reason: 'templater was disabled by the user and stays disabled',
+      );
     });
   });
 }

@@ -66,10 +66,9 @@ class VaultCountExceeded extends SyncServerRejected {
   VaultCountExceeded({
     required this.currentCount,
     required this.limitCount,
-    required String message,
+    required super.message,
   }) : super(
          code: 'app_policy.quota.vault_count',
-         message: message,
          params: {'current': '$currentCount', 'limit': '$limitCount'},
        );
 
@@ -91,10 +90,9 @@ class FileSizeLimitExceeded extends SyncServerRejected {
   FileSizeLimitExceeded({
     required this.attemptedBytes,
     required this.limitBytes,
-    required String message,
+    required super.message,
   }) : super(
          code: 'app_policy.quota.file_size',
-         message: message,
          params: {'current': '$attemptedBytes', 'limit': '$limitBytes'},
        );
 
@@ -116,10 +114,9 @@ class StorageQuotaExceeded extends SyncServerRejected {
   StorageQuotaExceeded({
     required this.currentBytes,
     required this.limitBytes,
-    required String message,
+    required super.message,
   }) : super(
          code: 'app_policy.quota.storage',
-         message: message,
          params: {'current': '$currentBytes', 'limit': '$limitBytes'},
        );
 
@@ -141,10 +138,9 @@ class StorageQuotaExceeded extends SyncServerRejected {
 /// credentials) is applied by the engine itself and read from `engine.config`,
 /// never sent on the broadcast events stream.
 class ExternalBlobConfigDiscovered extends SyncServerRejected {
-  ExternalBlobConfigDiscovered({required this.kind, required String message})
+  ExternalBlobConfigDiscovered({required this.kind, required super.message})
     : super(
         code: 'feature.external_blob_config_discovered',
-        message: message,
         params: {'kind': kind},
       );
 

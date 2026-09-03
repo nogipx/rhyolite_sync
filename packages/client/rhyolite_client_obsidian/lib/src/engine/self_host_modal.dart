@@ -19,8 +19,11 @@ Future<bool> showSelfHostModal(
     build: (ctx) {
       ctx.h3(S.selfHostModalTitle);
       ctx.spaceVertical(px: 8);
-      ctx.createEl('p',
-          cls: 'rhyolite-setting-desc', text: S.selfHostModalDescription);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.selfHostModalDescription,
+      );
       ctx.spaceVertical(px: 8);
 
       ctx.createEl('span', cls: 'rhyolite-vault-label', text: S.serverUrl);

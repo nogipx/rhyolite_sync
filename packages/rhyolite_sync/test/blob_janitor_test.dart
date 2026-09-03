@@ -10,6 +10,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart' show RpcContext;
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _v = '12345678-1234-4abc-8def-1234567890ab';
 

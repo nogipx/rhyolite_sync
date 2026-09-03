@@ -3,12 +3,7 @@ import 'dart:convert';
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/src/sync_v3/fugue_store.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_tail.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_codec.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_state.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_parser.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_document.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_render.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:test/test.dart';
 
@@ -154,7 +149,7 @@ void main() {
       final tailed = blobOf('---\nx: 1\n---\nbody\n', build('x: 1\n'));
       expect(classifyBlob(tailed, isTextPath: true), BlobKind.fugue);
       expect(
-        utf8.decode(materializeFileContent(tailed, 'n.md')!),
+        utf8.decode(materializeFileContent(tailed, 'n.md', isTextPath: true)!),
         '---\nx: 1\n---\nbody\n',
       );
     });

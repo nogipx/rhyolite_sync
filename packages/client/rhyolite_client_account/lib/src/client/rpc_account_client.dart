@@ -398,10 +398,7 @@ class RpcAccountClient {
     required String encryptedMeta,
   }) async {
     await _vault.updateVaultMeta(
-      UpdateVaultMetaRequest(
-        vaultId: vaultId,
-        encryptedMeta: encryptedMeta,
-      ),
+      UpdateVaultMetaRequest(vaultId: vaultId, encryptedMeta: encryptedMeta),
       context: await _authContext(),
     );
   }

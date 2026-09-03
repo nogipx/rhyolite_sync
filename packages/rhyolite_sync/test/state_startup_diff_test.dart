@@ -1,21 +1,11 @@
-/// Tests for the StartupDiff fast-path short-circuits. The previous
-/// logic only skipped single-chunk files with sha-match, missing two
-/// common cases:
-///   * Empty files (chunks list is empty in the stored state) → always
-///     pending → useless re-upload of a 0-byte blob every startup.
-///   * Multi-chunk files (large binaries) → never a single-chunk match
-///     → pending → useless re-upload of multi-megabyte blob every
-///     startup.
-import 'dart:typed_data';
-
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:rhyolite_sync/src/sync_v3/state_startup_diff.dart';
 import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
 import 'package:uuid/uuid.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _vaultPath = '/vault';
 const _vaultId = '00000000-0000-4000-8000-0000000000bb';
@@ -117,6 +107,7 @@ _newFixture({
   Uint8List? blobIdKey,
   Set<String>? excludedExtensions,
   PathScope? pathScope,
+  bool Function()? isCancelled,
 }) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
@@ -146,6 +137,7 @@ _newFixture({
         ? null
         : () => excludedExtensions,
     pathScope: pathScope == null ? null : () => pathScope,
+    isCancelled: isCancelled,
   );
   return (
     diff: diff,
@@ -155,6 +147,16 @@ _newFixture({
     fileIdFor: fileIdFor,
   );
 }
+
+/// Reports cancelled once it has been asked [after] times.
+class _CancelAfter {
+  _CancelAfter(this.after);
+  final int after;
+  int calls = 0;
+  bool get done => ++calls > after;
+}
+
+var _cancelAfter = _CancelAfter(1 << 30);
 
 Uint8List _randomBytes(int length, int seed) {
   // Pseudorandom-looking but deterministic. Matters for the
@@ -266,6 +268,38 @@ class _FailsPartWayRemote extends _MemRemote {
 }
 
 void main() {
+  group('a cancelled pass stops and claims nothing', () {
+    test('the scan ends early and reports no missing files', () async {
+      // StateStartupDiff had no cancellation at all: the engine checked
+      // _running before calling in and never again, so a pass could outlive
+      // the session that started it. What it reports matters as much as when
+      // it stops — missingFileIds drives tombstone creation, so a pass that
+      // walked half the vault must not answer "the rest is missing".
+      final f = await _newFixture(isCancelled: () => _cancelAfter.done);
+      _cancelAfter = _CancelAfter(20);
+
+      for (var i = 0; i < 200; i++) {
+        f.io.files['$_vaultPath/note$i.md'] = _randomBytes(64, i);
+      }
+
+      final result = await f.diff();
+
+      expect(
+        _cancelAfter.calls,
+        lessThan(200),
+        reason: 'the scan must stop asking once the run is gone',
+      );
+      expect(
+        result.missingFileIds,
+        isEmpty,
+        reason:
+            'a partial walk has no opinion about what is missing; answering '
+            'from it would tombstone every file the scan had not reached',
+      );
+      expect(result.newFiles, 0);
+    });
+  });
+
   group('StateStartupDiff fast-path skips', () {
     test('empty file with empty state → skipped, no upload', () async {
       final f = await _newFixture();

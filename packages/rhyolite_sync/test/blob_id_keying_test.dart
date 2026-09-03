@@ -5,6 +5,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _v = 'vault-keying-test';
 

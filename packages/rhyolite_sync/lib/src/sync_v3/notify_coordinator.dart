@@ -15,19 +15,32 @@ import 'package:rpc_notify/rpc_notify.dart';
 /// The subscription is SELF-HEALING: if the server-stream errors or
 /// completes (e.g. the server closes the logical stream while the socket
 /// stays alive), the coordinator resubscribes on its own with capped
-/// exponential backoff, so notify doesn't silently stay dead. A genuine
-/// transport reconnect — where the old stream goes silent WITHOUT erroring
-/// or completing — is still the engine's job to handle (it builds a fresh
-/// coordinator on the new connection); this only covers terminated streams.
+/// exponential backoff, so notify doesn't silently stay dead.
+///
+/// [resolveEndpoint] is asked again on EVERY attempt, and that is the point.
+/// It used to be a captured value, which made a resubscribe useful only while
+/// the connection it was captured from still lived: after a transport swap
+/// every retry re-attached to the dead one and failed identically, forever,
+/// while the log filled with `transport not connected — resubscribing` and
+/// notify was simply gone. Recovery then depended on someone outside noticing
+/// and building a whole new coordinator, and nine minutes of a real session
+/// went that way because nobody did.
+///
+/// Returning null means "no connection right now" — a wait, not a failure.
+/// The coordinator backs off and asks again rather than treating it as an
+/// error, because there is nothing to report and nothing to fix.
 class NotifyCoordinator {
   NotifyCoordinator({
-    required this.endpoint,
+    required this.resolveEndpoint,
     required this.topic,
     required this.onNotify,
     void Function(String message)? onWarning,
-  }) : _onWarning = onWarning;
+    void Function(String message)? onInfo,
+  }) : _onWarning = onWarning,
+       _onInfo = onInfo;
 
-  final RpcCallerEndpoint endpoint;
+  /// The connection to subscribe on, asked for fresh at every attempt.
+  final RpcCallerEndpoint? Function() resolveEndpoint;
   final String topic;
 
   /// Invoked on each delivered notification. Receives the publisher's
@@ -35,6 +48,14 @@ class NotifyCoordinator {
   /// set one) so a subscriber can ignore the echo of its own push.
   final void Function(String? sourceClientId) onNotify;
   final void Function(String message)? _onWarning;
+
+  /// Says when a subscription is ESTABLISHED, which nothing did before.
+  ///
+  /// Only failures were logged, so "subscribed and the server sends nothing"
+  /// and "never subscribed at all" produced identical silence — and a report
+  /// of missing notifications could not be told apart from a healthy client
+  /// waiting on a quiet server.
+  final void Function(String message)? _onInfo;
 
   static const Duration _minBackoff = Duration(seconds: 1);
   static const Duration _maxBackoff = Duration(seconds: 30);
@@ -62,12 +83,24 @@ class NotifyCoordinator {
     _resubscribeTimer = null;
     unawaited(_sub?.cancel());
     _sub = null;
+    final endpoint = resolveEndpoint();
+    if (endpoint == null) {
+      // No connection to attach to. Silent on purpose: this is the ordinary
+      // state between a drop and a reconnect, and warning about it once per
+      // backoff is how a log becomes unreadable.
+      _scheduleResubscribe();
+      return;
+    }
     try {
       _subscriber = NotifySubscriber.endpoint(endpoint);
+      _onInfo?.call('Notify subscribing to $topic');
       _sub = _subscriber!
           .subscribe(topic)
           .listen(
             (event) {
+              if (_backoff != _minBackoff) {
+                _onInfo?.call('Notify delivering again on $topic');
+              }
               _backoff = _minBackoff; // healthy delivery → reset backoff
               onNotify(event.payload['sourceClientId'] as String?);
             },

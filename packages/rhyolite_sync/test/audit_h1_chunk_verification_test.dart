@@ -81,6 +81,13 @@ void main() {
         final original = _bytes('cached content that survives a bit flip');
         final up = await io.upload(original, <String>{});
 
+        // Warm the cache the way a pull does. Uploads no longer mirror into
+        // it — the vault already holds those bytes — so the download path is
+        // the only thing that puts a chunk here, and it is the path whose
+        // rot-handling this test is about.
+        await io.download(up.manifestHash);
+        final callsBeforeHeal = backing.downloadCalls;
+
         // Rot the cached chunk in place (same length). The remote still holds
         // the correct copy (the upload populated it too).
         final good = (await local.read(
@@ -100,7 +107,7 @@ void main() {
         );
         expect(
           backing.downloadCalls,
-          greaterThan(0),
+          greaterThan(callsBeforeHeal),
           reason: 'healing required a re-download, not a cache hit',
         );
         // The cache is repaired for next time.
@@ -127,6 +134,8 @@ void main() {
 
         final original = _bytes('content whose remote copy will be dropped');
         final up = await io.upload(original, <String>{});
+        // As above: the download path is what fills the cache now.
+        await io.download(up.manifestHash);
 
         // Rot the cache AND remove the remote copy.
         final good = (await local.read(

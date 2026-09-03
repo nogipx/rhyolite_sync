@@ -48,28 +48,28 @@ class Plan {
   final PlanAcquisition acquisition;
 
   factory Plan.fromJson(Map<String, dynamic> json) => Plan(
-        planId: json['planId'] as String,
-        name: json['name'] as String,
-        description: json['description'] as String,
-        amountKopecks: (json['amountKopecks'] as num).toInt(),
-        periodDays: (json['periodDays'] as num).toInt(),
-        caps: PlanCapabilities.fromJson(
-          (json['caps'] as Map).cast<String, dynamic>(),
-        ),
-        acquisition: PlanAcquisition.fromJson(
-          (json['acquisition'] as Map).cast<String, dynamic>(),
-        ),
-      );
+    planId: json['planId'] as String,
+    name: json['name'] as String,
+    description: json['description'] as String,
+    amountKopecks: (json['amountKopecks'] as num).toInt(),
+    periodDays: (json['periodDays'] as num).toInt(),
+    caps: PlanCapabilities.fromJson(
+      (json['caps'] as Map).cast<String, dynamic>(),
+    ),
+    acquisition: PlanAcquisition.fromJson(
+      (json['acquisition'] as Map).cast<String, dynamic>(),
+    ),
+  );
 
   Map<String, dynamic> toJson() => {
-        'planId': planId,
-        'name': name,
-        'description': description,
-        'amountKopecks': amountKopecks,
-        'periodDays': periodDays,
-        'caps': caps.toJson(),
-        'acquisition': acquisition.toJson(),
-      };
+    'planId': planId,
+    'name': name,
+    'description': description,
+    'amountKopecks': amountKopecks,
+    'periodDays': periodDays,
+    'caps': caps.toJson(),
+    'acquisition': acquisition.toJson(),
+  };
 
   @override
   bool operator ==(Object other) =>
@@ -84,16 +84,17 @@ class Plan {
 
   @override
   int get hashCode => Object.hash(
-        planId,
-        name,
-        description,
-        amountKopecks,
-        periodDays,
-        caps,
-        acquisition,
-      );
+    planId,
+    name,
+    description,
+    amountKopecks,
+    periodDays,
+    caps,
+    acquisition,
+  );
 
   @override
-  String toString() => 'Plan($planId, ${amountKopecks ~/ 100}₽/'
+  String toString() =>
+      'Plan($planId, ${amountKopecks ~/ 100}₽/'
       '${periodDays}d, ${acquisition.kind})';
 }

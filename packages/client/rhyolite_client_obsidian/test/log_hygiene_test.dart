@@ -30,7 +30,6 @@ void main() {
     r')\b',
   );
 
-
   test('no log message interpolates a vault path or an endpoint url', () {
     final offenders = <String>[];
 
@@ -67,11 +66,11 @@ void main() {
     expect(
       offenders,
       isEmpty,
-      reason: 'Declare it instead of interpolating it:\n'
+      reason:
+          'Declare it instead of interpolating it:\n'
           "  _log.info('message', data: {'path': LogPath(relPath)});\n"
           "  _log.info('message', data: {'url': LogUrl(serverUrl)});\n"
           'Offending sites:\n${offenders.join('\n')}',
     );
   });
-
 }

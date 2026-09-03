@@ -9,10 +9,7 @@
 ///
 /// Kept pure and free of IO so every branch is testable.
 class PluginUninstallDecision {
-  const PluginUninstallDecision({
-    this.tombstone = const [],
-    this.abortReason,
-  });
+  const PluginUninstallDecision({this.tombstone = const [], this.abortReason});
 
   /// Plugin ids to mark removed in the vault.
   final List<String> tombstone;
@@ -90,7 +87,8 @@ PluginUninstallDecision detectPluginUninstalls({
       : cap;
   if (tombstone.length > limit) {
     return PluginUninstallDecision(
-      abortReason: 'refusing to remove ${tombstone.length} of ${known.length} '
+      abortReason:
+          'refusing to remove ${tombstone.length} of ${known.length} '
           'plugins at once',
     );
   }

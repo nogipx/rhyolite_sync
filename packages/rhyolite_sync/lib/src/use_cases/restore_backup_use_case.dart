@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import '../contract/backup_contract.dart' show GetBackupResponse;
 import '../contract/state_sync_contract.dart' show StateRecord;
 import '../platform/i_platform_io.dart';
-import '../sync_v3/file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Restores a backup snapshot IN PLACE: it writes each frozen file back to its
 /// original path under [targetRoot] (= the vault root), so the restore syncs as

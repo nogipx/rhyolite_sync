@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart'
@@ -13,13 +12,13 @@ import 'package:rhyolite_sync/rhyolite_sync.dart'
         TaskCancelToken,
         canonicalJsonBytes,
         jsonCanonicalEqual;
-import 'package:rpc_dart/rpc_dart.dart' show RpcCallerEndpoint;
 import 'package:rpc_dart/rpc_dart.dart';
 
+import '../engine/session_contracts.dart';
+import 'blob_dir_sync.dart';
 import 'enabled_list_gating.dart';
 import 'obsidian_settings_registry.dart';
 import 'plugin_code_overview.dart';
-import 'blob_dir_sync.dart';
 import 'plugin_uninstall_detection.dart';
 
 /// Platform glue that drives [SettingsSync] against the Obsidian `.obsidian`
@@ -44,7 +43,7 @@ import 'plugin_uninstall_detection.dart';
 /// and diffs files whose on-disk signature differs from the last sync, and a
 /// pull-write records the new signature so it is not re-pushed. This keeps the
 /// hot path off the file bytes entirely for the common "nothing changed" case.
-class ObsidianConfigSync {
+class ObsidianConfigSync implements SessionConfigSync {
   ObsidianConfigSync({
     required AdapterHandle adapter,
     required SettingsSync sync,
@@ -53,6 +52,7 @@ class ObsidianConfigSync {
     Duration initialScanDelay = const Duration(seconds: 4),
     BlobDirSync? pluginCode,
     Future<int?> Function(List<String> blobIds)? releaseBlobs,
+
     /// The engine's CURRENT caller endpoint, resolved per use.
     ///
     /// Doubles as the connectivity check: null means the engine has no
@@ -69,20 +69,21 @@ class ObsidianConfigSync {
     Future<void> Function(
       Future<void> Function(TaskCancelToken token) task, {
       Object? key,
-    })? runBackground,
-  })  : _adapter = adapter,
-        _sync = sync,
-        _enabled = enabledCategories,
-        _pullOnly = pullOnlyCategories,
-        _initialScanDelay = initialScanDelay,
-        _blobDirs = pluginCode,
-        _releaseBlobs = releaseBlobs,
-        _notifyEndpointOf = notifyEndpoint,
-        _notifyTopic = notifyTopic,
-        _onActivity = onActivity,
-        _onRemoteApplied = onRemoteApplied,
-        _log = log ?? LogScope.noop,
-        _runBackground = runBackground;
+    })?
+    runBackground,
+  }) : _adapter = adapter,
+       _sync = sync,
+       _enabled = enabledCategories,
+       _pullOnly = pullOnlyCategories,
+       _initialScanDelay = initialScanDelay,
+       _blobDirs = pluginCode,
+       _releaseBlobs = releaseBlobs,
+       _notifyEndpointOf = notifyEndpoint,
+       _notifyTopic = notifyTopic,
+       _onActivity = onActivity,
+       _onRemoteApplied = onRemoteApplied,
+       _log = log ?? LogScope.noop,
+       _runBackground = runBackground;
 
   static const _configDir = '.obsidian';
 
@@ -100,6 +101,29 @@ class ObsidianConfigSync {
   final AdapterHandle _adapter;
   final SettingsSync _sync;
   final Set<SettingsCategory> _enabled;
+
+  /// How many categories this vault syncs.
+  ///
+  /// The panel asks for coverage rather than bytes: "9 categories" answers
+  /// what is being kept in step, where "156 KB" answers a question nobody has.
+  int get enabledCategoryCount => _enabled.length;
+
+  /// Whether plugin CODE is synced, as opposed to plugin settings.
+  ///
+  /// Its absence is how the feature is turned off — no dir sync is
+  /// constructed — so this is the difference between "no plugins yet" and
+  /// "plugins are not being synced", which a panel cannot tell from an empty
+  /// overview.
+  bool get pluginCodeEnabled => _blobDirs != null;
+
+  /// Whether settings sync has work in flight or left over.
+  ///
+  /// Readable at any moment, which is the point. Pushing this to the surfaces
+  /// on each transition left anything built afterwards holding the value it
+  /// was born with: a panel reopened mid-sync showed "up to date" beside a dot
+  /// that was still blue, because the transition it needed had happened before
+  /// it existed.
+  bool get hasOutstandingWork => _busy || _outstanding;
 
   /// Categories this device syncs DOWN but must not push up.
   ///
@@ -157,7 +181,8 @@ class ObsidianConfigSync {
   final Future<void> Function(
     Future<void> Function(TaskCancelToken token) task, {
     Object? key,
-  })? _runBackground;
+  })?
+  _runBackground;
 
   /// Cancel token of the background task currently running, if any. Read
   /// through [_cancelled] at every loop boundary so a pause stops this work
@@ -166,6 +191,19 @@ class ObsidianConfigSync {
 
   NotifyCoordinator? _notify;
   bool _busy = false;
+
+  /// A pass ended before it finished its work, so work remains.
+  ///
+  /// Settings run at background priority and are marked preemptible, which
+  /// means the scheduler signals their token the moment anything above them
+  /// wants the slot. The task returns early and its future completes
+  /// NORMALLY — indistinguishable, to the caller, from having finished.
+  ///
+  /// Reporting that as "no longer active" is how the panel came to say
+  /// "up to date" while settings files sat in the transfer queue. What the
+  /// host is told now is whether WORK REMAINS, not whether a call is in
+  /// flight, and this is the difference between the two.
+  bool _outstanding = false;
   bool _disposed = false;
 
   /// The settings store has loaded, so [liveBlobIds] can answer truthfully.
@@ -231,8 +269,10 @@ class ObsidianConfigSync {
       _ready = true;
       final sw = Stopwatch()..start();
       await _writeChanged(changed);
-      _log.info('config start: writeChanged ${changed.length} '
-          'in ${sw.elapsedMilliseconds}ms');
+      _log.info(
+        'config start: writeChanged ${changed.length} '
+        'in ${sw.elapsedMilliseconds}ms',
+      );
     });
     Future<void>.delayed(_initialScanDelay, () {
       if (!_disposed) unawaited(sync());
@@ -244,6 +284,7 @@ class ObsidianConfigSync {
   /// Push local `.obsidian` changes then pull remote ones. Called (deferred) on
   /// start, on resume (return to Obsidian), and from the manual command.
   /// Reentrancy-safe: overlapping calls are dropped while one is in flight.
+  @override
   Future<void> sync() async {
     if (_busy || _disposed) return;
     // Nothing to reach. Silent rather than an error: being offline is not a
@@ -252,18 +293,21 @@ class ObsidianConfigSync {
     _busy = true;
     _onActivity?.call(true);
     var remoteChanged = 0;
+    var completed = false;
     try {
       await _bg('settings:sync', () async {
         await _scanAndPush();
         final changed = await _sync.pull();
         await _writeChanged(changed);
         remoteChanged = changed.length;
+        completed = true;
       });
     } catch (e) {
       _log.warning('config sync error: $e');
     } finally {
       _busy = false;
-      _onActivity?.call(false);
+      _outstanding = !completed && !_disposed;
+      _onActivity?.call(_outstanding);
     }
     if (remoteChanged > 0) _onRemoteApplied?.call();
   }
@@ -278,17 +322,20 @@ class ObsidianConfigSync {
     _busy = true;
     _onActivity?.call(true);
     var remoteChanged = 0;
+    var completed = false;
     try {
       await _bg('settings:pull', () async {
         final changed = await _sync.pull();
         await _writeChanged(changed);
         remoteChanged = changed.length;
+        completed = true;
       });
     } catch (e) {
       _log.warning('config notify pull error: $e');
     } finally {
       _busy = false;
-      _onActivity?.call(false);
+      _outstanding = !completed && !_disposed;
+      _onActivity?.call(_outstanding);
     }
     if (remoteChanged > 0) _onRemoteApplied?.call();
   }
@@ -296,6 +343,7 @@ class ObsidianConfigSync {
   /// Re-upload: make THIS device authoritative — wipe the server settings
   /// keyspace + local store, then push every enabled `.obsidian` resource from
   /// disk. Other devices re-sync on their next pull/notify.
+  @override
   Future<void> resetFromThisDevice() async {
     if (_disposed) return;
     _busy = true;
@@ -303,15 +351,19 @@ class ObsidianConfigSync {
     try {
       await _sync.wipeServerAndLocal();
       await _scanAndPush();
+      // Runs outside the scheduler and cannot be preempted, so reaching here
+      // really does mean nothing is left over from an earlier partial pass.
+      _outstanding = false;
     } finally {
       _busy = false;
-      _onActivity?.call(false);
+      _onActivity?.call(_outstanding);
     }
   }
 
   /// Download: discard local settings state and re-download everything from the
   /// server, overwriting the on-disk `.obsidian` files. Most settings apply
   /// after an Obsidian restart.
+  @override
   Future<void> restoreFromServer() async {
     if (_disposed) return;
     _busy = true;
@@ -319,15 +371,17 @@ class ObsidianConfigSync {
     try {
       final changed = await _sync.restoreFromServer();
       await _writeChanged(changed);
+      _outstanding = false;
     } finally {
       _busy = false;
-      _onActivity?.call(false);
+      _onActivity?.call(_outstanding);
     }
   }
 
   /// After a transport reconnect the notify server-stream is dead (rpc_dart
   /// does not carry in-flight calls across the socket swap). Reissue the
   /// subscription on the fresh transport and pull to catch up on missed pushes.
+  @override
   void handleReconnect() {
     if (_disposed) return;
     _setupNotify();
@@ -337,12 +391,15 @@ class ObsidianConfigSync {
   /// (Re)subscribes the config-keyspace notify stream. Idempotent — stops any
   /// existing coordinator first, so it is safe to call again after a reconnect.
   void _setupNotify() {
-    final endpoint = _notifyEndpointOf?.call();
     final topic = _notifyTopic;
-    if (endpoint == null || topic == null) return;
+    if (topic == null) return;
     unawaited(_notify?.stop());
     _notify = NotifyCoordinator(
-      endpoint: endpoint,
+      // Asked again on every attempt. Captured once, this kept resubscribing
+      // to the connection that existed at setup — so after a transport swap
+      // the config keyspace went deaf and stayed deaf, retrying a dead
+      // endpoint until something outside happened to rebuild the coordinator.
+      resolveEndpoint: () => _notifyEndpointOf?.call(),
       topic: topic,
       onNotify: (sourceClientId) {
         if (_disposed) return;
@@ -354,9 +411,11 @@ class ObsidianConfigSync {
         unawaited(pullRemote());
       },
       onWarning: _log.warning,
+      onInfo: _log.info,
     )..start();
   }
 
+  @override
   void dispose() {
     _disposed = true;
     unawaited(_notify?.stop());
@@ -382,10 +441,12 @@ class ObsidianConfigSync {
     if (_blobDirs != null) {
       final dirs = candidates.keys.where(_isPluginDir).length;
       final paused = _pullOnly.map((c) => c.name).join(',');
-      _log.info('config scan: $dirs plugin dir(s) of '
-          '${candidates.length} candidates'
-          '${_scanSkipCount == 0 ? '' : ', $_scanSkipCount dir(s) skipped'}'
-          '${paused.isEmpty ? '' : ' (upload paused: $paused)'}');
+      _log.info(
+        'config scan: $dirs plugin dir(s) of '
+        '${candidates.length} candidates'
+        '${_scanSkipCount == 0 ? '' : ', $_scanSkipCount dir(s) skipped'}'
+        '${paused.isEmpty ? '' : ' (upload paused: $paused)'}',
+      );
       // The names, once. The count above is on every scan, so "was anything
       // declined" is always answerable; what stops repeating is the list,
       // which does not change between two window switches and is the same
@@ -393,7 +454,10 @@ class ObsidianConfigSync {
       if (!_loggedScanSkips && _scanSkips.isNotEmpty) {
         _loggedScanSkips = true;
         for (final skip in _scanSkips.toList()..sort()) {
-          _log.info('config scan skipped', data: {'resource': LogPath.config(skip)});
+          _log.info(
+            'config scan skipped',
+            data: {'resource': LogPath.config(skip)},
+          );
         }
         // Never read again, and the collection sites stop building the
         // strings at all once this is set.
@@ -424,8 +488,10 @@ class ObsidianConfigSync {
             !_repairedThisSession.add(resourceId)) {
           continue;
         }
-        _log.info('plugin dir has a signature but no manifest, '
-            're-capturing: $resourceId');
+        _log.info(
+          'plugin dir has a signature but no manifest, '
+          're-capturing: $resourceId',
+        );
       }
       // Isolate per-resource: a malformed file (e.g. unexpected JSON shape)
       // must not abort the push for every other resource in this scan.
@@ -438,8 +504,10 @@ class ObsidianConfigSync {
           // the log claim work that did not happen, on every scan, forever.
           if (await _capturePluginDir(resourceId, cand.sig)) {
             processed++;
-            _log.info('config captured $resourceId '
-                'in ${each.elapsedMilliseconds}ms');
+            _log.info(
+              'config captured $resourceId '
+              'in ${each.elapsedMilliseconds}ms',
+            );
           }
           continue;
         }
@@ -452,16 +520,33 @@ class ObsidianConfigSync {
         }
         await _sync.applyLocalChange(resourceId, bytes, sourceSig: cand.sig);
         processed++;
-        _log.info('config processed $resourceId (${bytes.length} B) '
-            'in ${each.elapsedMilliseconds}ms');
-      } catch (e) {
-        _log.warning('config push failed: $e',
-            data: {'resource': LogPath.config(resourceId)});
+        _log.info(
+          'config processed $resourceId (${bytes.length} B) '
+          'in ${each.elapsedMilliseconds}ms',
+        );
+      } catch (e, st) {
+        // With the stack, because without it this is unactionable. A real
+        // report read `config push failed: Null check operator used on a null
+        // value`, repeated for every resource in the scan, and named neither
+        // the resource's role in it nor a line to look at. The `!` is
+        // somewhere down a path that spans the adapter, the withheld-list
+        // rewrite and the settings store, and picking between them by reading
+        // is guesswork.
+        //
+        // First frames only: dart2js stacks are long and mostly async
+        // machinery, and the whole point is that this fires once per resource.
+        final frames = st.toString().split('\n').take(4).join(' | ');
+        _log.warning(
+          'config push failed: $e | $frames',
+          data: {'resource': LogPath.config(resourceId)},
+        );
       }
     }
     if (processed > 0) {
-      _log.info('config scan: ${candidates.length} candidates, '
-          '$processed processed in ${sw.elapsedMilliseconds}ms');
+      _log.info(
+        'config scan: ${candidates.length} candidates, '
+        '$processed processed in ${sw.elapsedMilliseconds}ms',
+      );
     }
 
     await _detectPluginUninstalls();
@@ -507,16 +592,18 @@ class ObsidianConfigSync {
     // list in Obsidian at all (only the SELECTED theme is recorded), so they
     // lean on "this device once had it" instead.
     final isPlugin = kind == SyncedDirKind.plugin;
-    final rendered =
-        isPlugin ? _sync.renderResource(_enabledListResource) : null;
+    final rendered = isPlugin
+        ? _sync.renderResource(_enabledListResource)
+        : null;
 
     final decision = detectPluginUninstalls(
       vaultPluginIds: live,
       installedDirs: listed == null
           ? null
           : {for (final f in listed.folders) _baseName(f)},
-      enabledInVault:
-          rendered == null ? null : parseEnabledList(rendered)?.toSet(),
+      enabledInVault: rendered == null
+          ? null
+          : parseEnabledList(rendered)?.toSet(),
       requiresEnabledList: isPlugin,
       // A recorded signature is the record of this device having synced it.
       hadItHere: (id) => _sync.sourceSigOf('${kind.folder}/$id') != null,
@@ -553,8 +640,10 @@ class ObsidianConfigSync {
     ).withHistoryFrom(previous);
 
     await _sync.applyLocalChange(resourceId, removed.toBytes());
-    _log.info('removed from vault: $resourceId '
-        '(was ${previous.version ?? "?"})');
+    _log.info(
+      'removed from vault: $resourceId '
+      '(was ${previous.version ?? "?"})',
+    );
     await _releaseSupersededBlobs(resourceId, previous, removed);
     return true;
   }
@@ -562,6 +651,7 @@ class ObsidianConfigSync {
   /// Removes a plugin from the vault on the user's explicit request, and from
   /// this device too. Unlike the scan-time detection there is nothing to infer:
   /// the user said so.
+  @override
   Future<bool> removeFromVault(String resourceId) async {
     if (_disposed) return false;
     final code = _blobDirs;
@@ -595,7 +685,11 @@ class ObsidianConfigSync {
     // is the common case right after another device's version landed here.
     // Recording the signature regardless is what stops the next scan from
     // re-reading and re-hashing the same megabytes.
-    await _sync.applyLocalChange(resourceId, manifest.toBytes(), sourceSig: sig);
+    await _sync.applyLocalChange(
+      resourceId,
+      manifest.toBytes(),
+      sourceSig: sig,
+    );
 
     await _releaseSupersededBlobs(resourceId, previous, manifest);
     return true;
@@ -629,11 +723,15 @@ class ObsidianConfigSync {
     if (superseded.isEmpty) return;
     try {
       final deleted = await release(superseded.toList());
-      _log.info('plugin ${captured.pluginId}: released '
-          '${deleted ?? 0}/${superseded.length} superseded blobs');
+      _log.info(
+        'plugin ${captured.pluginId}: released '
+        '${deleted ?? 0}/${superseded.length} superseded blobs',
+      );
     } catch (e) {
-      _log.warning('plugin blob release failed: $e',
-          data: {'resource': LogPath.config(resourceId)});
+      _log.warning(
+        'plugin blob release failed: $e',
+        data: {'resource': LogPath.config(resourceId)},
+      );
     }
   }
 
@@ -745,8 +843,10 @@ class ObsidianConfigSync {
       ..clear()
       ..addAll(split.withheld);
     if (split.withheld.isEmpty) return null;
-    _log.info('enabled list: withholding ${split.withheld.join(", ")} '
-        'until their code lands');
+    _log.info(
+      'enabled list: withholding ${split.withheld.join(", ")} '
+      'until their code lands',
+    );
     return canonicalJsonBytes(split.keep);
   }
 
@@ -764,15 +864,16 @@ class ObsidianConfigSync {
     try {
       applied = await code.apply(kind, resourceId, manifest);
     } catch (e) {
-      _log.warning('plugin apply failed: $e',
-          data: {'resource': LogPath.config(resourceId)});
+      _log.warning(
+        'plugin apply failed: $e',
+        data: {'resource': LogPath.config(resourceId)},
+      );
       return false;
     }
     // Record what we just wrote as the synced signature, or the next scan reads
     // this install back, re-chunks it and re-uploads what it just downloaded.
     final dirId = kind.idOf(resourceId);
-    final sig =
-        dirId == null ? null : await code.dirSignature(kind, dirId);
+    final sig = dirId == null ? null : await code.dirSignature(kind, dirId);
     if (sig != null) await _sync.recordSourceSig(resourceId, sig);
     return applied;
   }
@@ -785,6 +886,7 @@ class ObsidianConfigSync {
   /// plugin blob. Empty (not null) once loaded with plugin-code sync off: there
   /// is then genuinely nothing of ours to keep, including leftovers from when
   /// it was on.
+  @override
   Set<String>? liveBlobIds() {
     if (!_ready) return null;
     final out = <String>{};
@@ -801,10 +903,12 @@ class ObsidianConfigSync {
   /// id it came from — the vault's view, which may be ahead of or behind this
   /// device's disk. Empty when blob-backed sync is off.
   List<({String resourceId, SyncedDirKind kind, PluginDirManifest manifest})>
-      blobDirResources() {
+  blobDirResources() {
     if (_blobDirs == null) return const [];
     final out =
-        <({String resourceId, SyncedDirKind kind, PluginDirManifest manifest})>[];
+        <
+          ({String resourceId, SyncedDirKind kind, PluginDirManifest manifest})
+        >[];
     for (final id in _sync.resourceIdsOfKind(SettingsCrdtKind.blobDir)) {
       final kind = SyncedDirKind.forResource(id);
       final manifest = _pluginManifestOf(id);
@@ -820,23 +924,30 @@ class ObsidianConfigSync {
   /// The vault's plugin set joined with what this device actually has on disk,
   /// for the storage overview and the sync panel. Reads one small
   /// `manifest.json` per plugin, so it is user-triggered, never polled.
+  @override
   Future<PluginCodeOverview> pluginOverview() async {
     final code = _blobDirs;
     if (code == null) return PluginCodeOverview.empty;
     final rows = <PluginCodeRow>[];
     for (final entry in blobDirResources()) {
       final manifest = entry.manifest;
-      rows.add(PluginCodeRow(
-        resourceId: entry.resourceId,
-        isTheme: entry.kind == SyncedDirKind.theme,
-        pluginId: manifest.pluginId,
-        sizeBytes: manifest.totalSize,
-        vaultVersion: manifest.version,
-        localVersion: await _localVersionOf(code, entry.kind, entry.resourceId),
-        updatedBy: manifest.updatedBy,
-        updatedAtMs: manifest.updatedAtMs,
-        desktopOnly: manifest.desktopOnly,
-      ));
+      rows.add(
+        PluginCodeRow(
+          resourceId: entry.resourceId,
+          isTheme: entry.kind == SyncedDirKind.theme,
+          pluginId: manifest.pluginId,
+          sizeBytes: manifest.totalSize,
+          vaultVersion: manifest.version,
+          localVersion: await _localVersionOf(
+            code,
+            entry.kind,
+            entry.resourceId,
+          ),
+          updatedBy: manifest.updatedBy,
+          updatedAtMs: manifest.updatedAtMs,
+          desktopOnly: manifest.desktopOnly,
+        ),
+      );
     }
     return PluginCodeOverview(rows);
   }
@@ -978,8 +1089,10 @@ class ObsidianConfigSync {
     final kind = SyncedDirKind.forResource(resourceId);
     final dirId = kind?.idOf(resourceId);
     if (kind == null || dirId == null) {
-      _log.info('blob dir has no id',
-          data: {'resource': LogPath.config(resourceId)});
+      _log.info(
+        'blob dir has no id',
+        data: {'resource': LogPath.config(resourceId)},
+      );
       return;
     }
     // Null signature = no manifest.json, i.e. not a usable install (a leftover
@@ -1015,11 +1128,14 @@ class ObsidianConfigSync {
       // plugin data.json): reading + parse/canonicalize + double-base64 +
       // pure-Dart encrypt of them on the UI thread freezes the app for tens of
       // seconds. Caught here via stat — no read, no crypto.
-      final wholeFileKind = cls.kind == SettingsCrdtKind.wholeFile ||
+      final wholeFileKind =
+          cls.kind == SettingsCrdtKind.wholeFile ||
           cls.kind == SettingsCrdtKind.jsonWholeFile;
       if (wholeFileKind && (st.size ?? 0) > _maxWholeFileBytes) {
-        _log.info('config skip large ${cls.kind.name}: $resourceId '
-            '(${st.size} B > $_maxWholeFileBytes)');
+        _log.info(
+          'config skip large ${cls.kind.name}: $resourceId '
+          '(${st.size} B > $_maxWholeFileBytes)',
+        );
         return;
       }
       out[resourceId] = (path: adapterPath, sig: _sigOf(st));
@@ -1062,8 +1178,10 @@ class ObsidianConfigSync {
       if (!await _adapter.exists(path)) return null;
       return await _adapter.list(path);
     } catch (e) {
-      _log.warning('config list failed: $e',
-          data: {'resource': LogPath.config(path)});
+      _log.warning(
+        'config list failed: $e',
+        data: {'resource': LogPath.config(path)},
+      );
       return null;
     }
   }

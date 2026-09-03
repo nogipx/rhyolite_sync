@@ -12,7 +12,8 @@ class ObsidianIO implements IPlatformIO {
   String _rel(String path) => path.startsWith('/') ? path.substring(1) : path;
 
   @override
-  Future<Uint8List> readFile(String path) async => _vault.adapter.readBinary(_rel(path));
+  Future<Uint8List> readFile(String path) async =>
+      _vault.adapter.readBinary(_rel(path));
 
   @override
   Future<bool> fileExists(String path) async {
@@ -36,7 +37,10 @@ class ObsidianIO implements IPlatformIO {
       return files.map((f) => '/${f.path}').toList();
     }
     final prefix = rel.endsWith('/') ? rel : '$rel/';
-    return files.where((f) => f.path.startsWith(prefix)).map((f) => '/${f.path}').toList();
+    return files
+        .where((f) => f.path.startsWith(prefix))
+        .map((f) => '/${f.path}')
+        .toList();
   }
 
   @override

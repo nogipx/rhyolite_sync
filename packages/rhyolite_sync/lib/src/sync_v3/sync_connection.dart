@@ -5,11 +5,6 @@ import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_dart_websocket/rpc_dart_websocket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import '../auth/bearer_token_interceptor.dart';
-import '../auth/i_token_provider.dart';
-import '../contract/history_contract.dart';
-import '../contract/state_sync_contract.dart';
-
 /// Connection lifecycle transitions the engine reacts to, distilled from
 /// rpc_dart's richer `RpcClientState` into the three cases the engine
 /// actually branches on.

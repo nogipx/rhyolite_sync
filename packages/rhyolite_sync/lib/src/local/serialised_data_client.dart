@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:rpc_dart/rpc_dart.dart' show RpcContext;
 import 'package:rpc_data/rpc_data.dart';
 
+import 'connection_gate.dart';
+
 /// Runs every call to an [IDataClient] one at a time.
 ///
 /// A SQLite connection cannot hold two transactions. Two callers that overlap
@@ -34,37 +36,24 @@ import 'package:rpc_data/rpc_data.dart';
 /// nature — holding the queue for the life of a change subscription would
 /// deadlock everything behind it.
 class SerialisedDataClient implements IDataClient {
-  SerialisedDataClient(this._inner);
+  /// [gate] must be the one belonging to this client's CONNECTION, shared with
+  /// every other component that writes to it. Its own queue is not enough: the
+  /// blob store writes to the same handle and knows nothing about this class.
+  SerialisedDataClient(this._inner, {required ConnectionGate gate})
+    : _gate = gate;
 
   final IDataClient _inner;
+  final ConnectionGate _gate;
 
-  /// Tail of the queue: a token saying "the previous call has finished", not
-  /// its result.
+  /// The gate this client queues on.
   ///
-  /// The `onError` that flattens it is deliberate and loses nothing. The
-  /// caller's own error arrives through [Completer.completeError] below; this
-  /// derived future exists only for sequencing, and if it were allowed to
-  /// carry the error it would be a future nobody awaits for its value — an
-  /// unhandled error per failed call, which is the same orphaning that a
-  /// disposed transfer hub used to produce.
-  Future<void> _tail = Future<void>.value();
+  /// Public so the property that matters — every writer on a connection is on
+  /// the SAME gate — can be asserted by identity instead of inferred from a
+  /// load test. A collision needs the right shape and enough of it to show up;
+  /// identity is true or false.
+  ConnectionGate get gate => _gate;
 
-  Future<T> _serial<T>(Future<T> Function() body) {
-    final completer = Completer<T>();
-    final previous = _tail;
-    _tail = completer.future.then<void>((_) {}, onError: (_) {});
-    previous.whenComplete(() {
-      // `Future.sync`, not a bare call: a body that throws SYNCHRONOUSLY would
-      // otherwise throw out of this callback, leaving the completer to hang
-      // forever — the caller would wait on a future that can never settle,
-      // which is worse than the collision being prevented. This turns it into
-      // a rejection the caller actually receives.
-      Future<T>.sync(
-        body,
-      ).then(completer.complete, onError: completer.completeError);
-    });
-    return completer.future;
-  }
+  Future<T> _serial<T>(Future<T> Function() body) => _gate.run(body);
 
   // --- reads ---------------------------------------------------------------
 

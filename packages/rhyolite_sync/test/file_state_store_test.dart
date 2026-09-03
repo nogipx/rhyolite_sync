@@ -1,5 +1,5 @@
 import 'package:convergent/convergent.dart';
-import 'package:rhyolite_sync/src/sync_v3/file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/src/sync_v3/file_state_store.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
@@ -226,7 +226,10 @@ void main() {
           'sizeBytes': 1,
           'hlc': '1-0-A',
         }),
-        throwsA(isA<FormatException>()),
+        // Typed, not FormatException: the cipher throws that too, for an
+        // unreadable envelope, and the applier has to tell "this peer is newer,
+        // tell the user to update" from "this row is corrupt".
+        throwsA(isA<UnsupportedStateSchema>()),
       );
     });
 
@@ -244,7 +247,7 @@ void main() {
             'sizeBytes': 1,
             'hlc': '1-0-A',
           }),
-          throwsA(isA<FormatException>()),
+          throwsA(isA<UnsupportedStateSchema>()),
         );
       },
     );
@@ -253,7 +256,7 @@ void main() {
       final badPayload = '{"v":99,"path":"x","blobRef":"y","sizeBytes":1}';
       expect(
         () => FileState.wirePayloadFromBytes(badPayload.codeUnits),
-        throwsA(isA<FormatException>()),
+        throwsA(isA<UnsupportedStateSchema>()),
       );
     });
 

@@ -127,7 +127,9 @@ class ObsidianLogFileStore implements LogFileStore {
     if (!await _adapter.exists(_dir)) return '';
     final byId = await _filesBySegment();
     final ids = byId.keys.toList()..sort();
-    final take = ids.length <= segments ? ids : ids.sublist(ids.length - segments);
+    final take = ids.length <= segments
+        ? ids
+        : ids.sublist(ids.length - segments);
 
     final paths = <String>[];
     for (final id in take) {
@@ -284,8 +286,9 @@ class ObsidianLogFileStore implements LogFileStore {
   /// `20260830-195622-731.head.log` -> `20260830-195622-731`. Null for
   /// anything this store does not own, including `problems.log`.
   static String? _segmentOf(String fileName) {
-    final match = RegExp(r'^(\d{8}-\d{6}-\d+)\.(?:head|tail\d+)\.log$')
-        .firstMatch(fileName);
+    final match = RegExp(
+      r'^(\d{8}-\d{6}-\d+)\.(?:head|tail\d+)\.log$',
+    ).firstMatch(fileName);
     return match?.group(1);
   }
 }

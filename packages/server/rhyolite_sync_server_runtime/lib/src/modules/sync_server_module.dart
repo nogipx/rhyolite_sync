@@ -22,19 +22,22 @@ class SyncServerModule extends RpcServerModule {
   SyncServerModule({
     List<RpcResponderContract> Function(RpcContainer container)? extraContracts,
     LogScope? logger,
-  })  : _extraContracts = extraContracts,
-        _logger = logger;
+  }) : _extraContracts = extraContracts,
+       _logger = logger;
 
   final List<RpcResponderContract> Function(RpcContainer container)?
-      _extraContracts;
+  _extraContracts;
   final LogScope? _logger;
 
   @override
   String get name => 'SyncServerModule';
 
   @override
-  List<Type> get dependencies =>
-      [PostgresModule, MinioModule, WebSocketListenerModule];
+  List<Type> get dependencies => [
+    PostgresModule,
+    MinioModule,
+    WebSocketListenerModule,
+  ];
 
   /// Registers the blob index's `vaultId` index once at boot.
   ///

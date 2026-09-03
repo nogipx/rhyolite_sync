@@ -7,12 +7,11 @@ void main() {
     bool selfHost = false,
     bool externalStorage = false,
     int? quota,
-  }) =>
-      pluginCodeAvailability(
-        selfHost: selfHost,
-        externalStorage: externalStorage,
-        managedStorageQuotaBytes: quota,
-      );
+  }) => pluginCodeAvailability(
+    selfHost: selfHost,
+    externalStorage: externalStorage,
+    managedStorageQuotaBytes: quota,
+  );
 
   test('self-host has no managed quota to protect', () {
     expect(gate(selfHost: true), PluginCodeAvailability.allowed);
@@ -29,10 +28,7 @@ void main() {
   });
 
   test('the free managed quota cannot hold a plugin set', () {
-    expect(
-      gate(quota: 50 * 1024 * 1024),
-      PluginCodeAvailability.quotaTooSmall,
-    );
+    expect(gate(quota: 50 * 1024 * 1024), PluginCodeAvailability.quotaTooSmall);
   });
 
   test('a paid managed quota can', () {
@@ -66,8 +62,7 @@ void main() {
     Set<SettingsCategory> pullOnly(
       PluginCodeAvailability availability, {
       Set<SettingsCategory> enabled = optedIn,
-    }) =>
-        pluginCodePullOnly(enabled: enabled, availability: availability);
+    }) => pluginCodePullOnly(enabled: enabled, availability: availability);
 
     test('a verdict never removes a category the user chose', () {
       // The regression this whole split exists for. The selection is the sync
@@ -88,19 +83,17 @@ void main() {
     });
 
     test('a quota too small pauses uploads, not the category', () {
-      expect(
-        pullOnly(PluginCodeAvailability.quotaTooSmall),
-        {SettingsCategory.communityPluginCode},
-      );
+      expect(pullOnly(PluginCodeAvailability.quotaTooSmall), {
+        SettingsCategory.communityPluginCode,
+      });
     });
 
     test('an unknown quota pauses uploads too, and only uploads', () {
       // Fail closed on spending storage, fail OPEN on receiving it: what the
       // vault already holds costs the quota nothing to download.
-      expect(
-        pullOnly(PluginCodeAvailability.unknownQuota),
-        {SettingsCategory.communityPluginCode},
-      );
+      expect(pullOnly(PluginCodeAvailability.unknownQuota), {
+        SettingsCategory.communityPluginCode,
+      });
     });
 
     test('nothing to pause when the user never opted in', () {

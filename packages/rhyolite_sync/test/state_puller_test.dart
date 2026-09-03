@@ -5,6 +5,7 @@ import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _vaultId = '00000000-0000-4000-8000-000000000001';
 

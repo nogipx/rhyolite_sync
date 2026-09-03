@@ -7,20 +7,21 @@ void main() {
     Set<String>? dirs = const {},
     Set<String>? enabled = const {},
     Set<String> hadHere = const {'dataview'},
-  }) =>
-      detectPluginUninstalls(
-        vaultPluginIds: vault,
-        installedDirs: dirs,
-        enabledInVault: enabled,
-        hadItHere: hadHere.contains,
-      );
+  }) => detectPluginUninstalls(
+    vaultPluginIds: vault,
+    installedDirs: dirs,
+    enabledInVault: enabled,
+    hadItHere: hadHere.contains,
+  );
 
-  test('a plugin removed from disk and from the enabled set is uninstalled',
-      () {
-    final d = decide();
-    expect(d.aborted, isFalse);
-    expect(d.tombstone, ['dataview']);
-  });
+  test(
+    'a plugin removed from disk and from the enabled set is uninstalled',
+    () {
+      final d = decide();
+      expect(d.aborted, isFalse);
+      expect(d.tombstone, ['dataview']);
+    },
+  );
 
   group('guards', () {
     test('a failed listing concludes nothing', () {
@@ -103,14 +104,13 @@ void main() {
       List<String> vault = const ['Minimal'],
       Set<String>? dirs = const {},
       Set<String> hadHere = const {'Minimal'},
-    }) =>
-        detectPluginUninstalls(
-          vaultPluginIds: vault,
-          installedDirs: dirs,
-          enabledInVault: null,
-          requiresEnabledList: false,
-          hadItHere: hadHere.contains,
-        );
+    }) => detectPluginUninstalls(
+      vaultPluginIds: vault,
+      installedDirs: dirs,
+      enabledInVault: null,
+      requiresEnabledList: false,
+      hadItHere: hadHere.contains,
+    );
 
     test('a removed theme is concluded without one', () {
       // Obsidian records the SELECTED theme, never the installed set, so there
@@ -122,12 +122,21 @@ void main() {
     });
 
     test('the remaining guards still hold', () {
-      expect(decideTheme(dirs: null).aborted, isTrue,
-          reason: 'a failed listing still concludes nothing');
-      expect(decideTheme(dirs: {'Minimal'}).tombstone, isEmpty,
-          reason: 'still on disk here');
-      expect(decideTheme(hadHere: const {}).tombstone, isEmpty,
-          reason: 'a device that never had it has no say');
+      expect(
+        decideTheme(dirs: null).aborted,
+        isTrue,
+        reason: 'a failed listing still concludes nothing',
+      );
+      expect(
+        decideTheme(dirs: {'Minimal'}).tombstone,
+        isEmpty,
+        reason: 'still on disk here',
+      );
+      expect(
+        decideTheme(hadHere: const {}).tombstone,
+        isEmpty,
+        reason: 'a device that never had it has no say',
+      );
     });
 
     test('plugins still refuse without the list', () {

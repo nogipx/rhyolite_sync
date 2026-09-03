@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Pull-side transport mechanics for one sync session.
 ///
@@ -43,6 +44,32 @@ class StatePuller {
     })
     prefetchFiles,
     required int downloadConcurrency,
+
+    /// Asked before each batch is staged: is there room in the local database?
+    ///
+    /// The pull is the only thing that grows it now, so this is where the
+    /// question belongs. A false answer does not stop the pull — see
+    /// `StateSyncEngine._relieveDatabasePressure` for why.
+    Future<bool> Function()? relievePressure,
+
+    /// Awaited once a batch is banked, so the host can make it durable BEFORE
+    /// the next batch starts writing.
+    ///
+    /// Awaited, not fired and forgotten, and that is the whole design. On a
+    /// host whose storage drains on the same event loop this pull runs on,
+    /// there is no such thing as a durability barrier that does not stop the
+    /// pull: the drain needs an idle loop, and the pull is what makes it busy.
+    /// Four flushes were observed starting and none finishing across a
+    /// four-minute pull applying thirty files a second — and the timers
+    /// themselves ran 24 to 47 seconds late, which is the same starvation seen
+    /// from the other end.
+    Future<void> Function()? checkpoint,
+
+    /// Opens and closes the batch's in-memory transit area — see [BlobStaging].
+    /// Paired: the pull opens before it fetches and closes once the batch is
+    /// applied, and nothing between those two points may assume otherwise.
+    void Function()? openStaging,
+    void Function()? closeStaging,
     Future<bool> Function(StateRecord record)? shouldPrefetch,
     Future<String?> Function(StateRecord record)? pathOfRecord,
     String Function()? clientName,
@@ -58,6 +85,10 @@ class StatePuller {
        _log = log,
        _prefetchFiles = prefetchFiles,
        _downloadConcurrency = downloadConcurrency,
+       _relievePressure = relievePressure,
+       _checkpoint = checkpoint,
+       _openStaging = openStaging,
+       _closeStaging = closeStaging,
        _shouldPrefetch = shouldPrefetch ?? ((_) async => true),
        _pathOfRecord = pathOfRecord ?? ((_) async => null),
        _clientName = clientName ?? (() => ''),
@@ -86,6 +117,13 @@ class StatePuller {
 
   /// Max prefetch groups in flight at once.
   final int _downloadConcurrency;
+
+  final Future<bool> Function()? _relievePressure;
+
+  final Future<void> Function()? _checkpoint;
+
+  final void Function()? _openStaging;
+  final void Function()? _closeStaging;
 
   /// Warms the local blob cache for a whole batch of files at once, so the
   /// subsequent (serial) apply is an all-cache-hit assemble.
@@ -139,6 +177,15 @@ class StatePuller {
   /// Consecutive failed apply attempts after which a file is skipped past
   /// (with a surfaced event) rather than blocking the cursor further.
   static const int _maxApplyAttempts = 5;
+
+  /// How long a batch waits for the host to make it durable.
+  ///
+  /// Generous, because the wait is the feature and a slow drain is still
+  /// progress. Bounded because a host whose drain never completes would
+  /// otherwise stop the pull forever, which is worse than the risk it was
+  /// added to remove.
+  static const Duration _checkpointTimeout = Duration(seconds: 30);
+
 
   /// Per-file apply lines kept before the rest are counted instead of logged.
   ///
@@ -236,10 +283,21 @@ class StatePuller {
     // Pre-count missing blobs across the whole batch so progress events
     // can show a stable total even as we interleave prefetch with apply.
     final totalMissing = await _countMissingBlobRefs(response.records);
+    // How much of this response we already hold, which is what decides whether
+    // a re-pull is cheap or a re-download of the vault.
+    //
+    // The two numbers are NOT the same question and reading one as the other
+    // cost a diagnosis: `prefetching N` counts refs not filtered out, and says
+    // nothing about how many of those the local cache already has. `held`
+    // counts files whose register matches the incoming record — the state that
+    // survived the last run. A pull that fetches the same records with
+    // `held=0` every time is a durability problem; one with `held` high is
+    // just a cursor that cannot advance, which is cheap and expected.
+    final alreadyHeld = _selfEchoedFileIds(response.records).length;
     if (totalMissing > 0) {
       _log.info(
         'Pull: prefetching $totalMissing blob(s) interleaved with apply, '
-        'fileBatch=$_pullFileBatchSize',
+        'fileBatch=$_pullFileBatchSize, held=$alreadyHeld/$totalFiles',
       );
       _emit(SyncBlobDownloadProgress(completed: 0, total: totalMissing));
     }
@@ -286,9 +344,35 @@ class StatePuller {
       final safe = minUnapplied == null ? response.cursor : minUnapplied - 1;
       // Monotone. Nothing here may walk the cursor backwards: an applied file
       // has left [unapplied], so the bound only ever rises.
-      if (safe <= store.serverCursor) return;
-      store.setServerCursor(safe);
-      await store.persistMeta();
+      if (safe > store.serverCursor) {
+        store.setServerCursor(safe);
+        await store.persistMeta();
+      }
+      // Announced whether or not the cursor moved, and that is the point.
+      //
+      // The host drains its write queue on this — see [SyncPullBatchApplied].
+      // Hanging that on the cursor instead would have hung it on almost
+      // nothing: files are applied smallest-first, the cursor is bounded by
+      // the lowest unapplied serverSeq, and the two orders are unrelated, so
+      // the cursor can stand still through a whole vault's worth of applied
+      // files. Those files' register rows are banked and are what makes the
+      // next pull cheap; losing them is what made an interrupted sync start
+      // over.
+      _emit(SyncPullBatchApplied(cursor: store.serverCursor));
+      // AWAITED. The pull stops here while the host makes the batch durable,
+      // and stopping is the point rather than a cost to be minimised: the
+      // host's drain runs on the loop this pull saturates, so an unawaited
+      // barrier is one that can never complete. Bounded and best-effort — a
+      // drain that fails or hangs must not end the pull, it only means this
+      // batch is at risk like every batch used to be.
+      final checkpoint = _checkpoint;
+      if (checkpoint != null) {
+        try {
+          await checkpoint().timeout(_checkpointTimeout);
+        } catch (e) {
+          _log.warning('Pull: checkpoint did not complete: $e');
+        }
+      }
     }
 
     // Interleaved pipeline: for each batch of fileIds, prefetch only that
@@ -298,19 +382,31 @@ class StatePuller {
     // 2026-06-12). Atomicity is preserved per-batch: a network drop during
     // a batch's prefetch leaves the prior batches' files fully applied and
     // the failed batch wholly skipped (idempotent on next pull).
-    for (
-      var batchStart = 0;
-      batchStart < fileIds.length;
-      batchStart += _pullFileBatchSize
-    ) {
+    // Batched by COUNT, and bounded in MEMORY by the staging area itself.
+    //
+    // Sizing the batch by bytes here was tried and reverted the same hour: a
+    // record carries a chunk list but not a size, so the only bound available
+    // in advance is chunk-count times the chunker's maximum — and a note is one
+    // chunk of a few kilobytes counted as four megabytes. Batches came out six
+    // files long, the pull ran five times slower for no memory saved, and it
+    // was visible from outside as files arriving one at a time.
+    //
+    // So the estimate is gone and the real limit sits where the real sizes
+    // are: [BlobStaging] stops accepting once it is full, and the prefetch
+    // stops warming. Files past that point are fetched by the apply itself.
+    var batchStart = 0;
+    while (batchStart < fileIds.length) {
       final batchEnd = batchStart + _pullFileBatchSize > fileIds.length
           ? fileIds.length
           : batchStart + _pullFileBatchSize;
       final batchFileIds = fileIds.sublist(batchStart, batchEnd);
+      batchStart = batchEnd;
       final batchRecords = <StateRecord>[];
       for (final fid in batchFileIds) {
         batchRecords.addAll(byFile[fid]!);
       }
+      // Everything this batch fetches lives here until it has been applied.
+      _openStaging?.call();
 
       // Cooperative preemption point: an interactive edit can cancel this
       // pull (see StateSyncEngine.triggerPull). Bail before spending the next
@@ -331,6 +427,14 @@ class StatePuller {
       swApplyTotal.start();
       for (final fileId in batchFileIds) {
         fileIdx += 1;
+        // Per file, and BEFORE the work rather than after: a file that takes
+        // three seconds is exactly the one during which the user is looking at
+        // the indicator, and reporting on completion leaves it frozen for the
+        // whole of it. The log line below is sampled and this is not — the
+        // sample exists to keep the log readable, and a progress bar that
+        // updates twenty times and then stops is worse than one that does not
+        // exist.
+        _emit(SyncPullProgress(applied: fileIdx, total: totalFiles));
         if (++applySamples <= _maxApplySamples) {
           _log.info(
             'Pull: applying file $fileIdx/$totalFiles '
@@ -389,6 +493,10 @@ class StatePuller {
         await applyYielder.maybeYield();
       }
       swApplyTotal.stop();
+      // Before the checkpoint, not after: the batch is on disk and in the
+      // store, so these bytes are now the only copy of nothing. Holding them
+      // across a drain that may take seconds is holding the peak twice.
+      _closeStaging?.call();
       await commitProgress();
     }
 
@@ -578,6 +686,20 @@ class StatePuller {
   /// measured, 255 blobs went from 39 s to 74 s. Fat requests AND overlap.
   static const int _prefetchGroupSize = 8;
 
+  /// Files whose content may be in flight at once, across all groups.
+  ///
+  /// Stated rather than emerging. It used to be the product of two constants
+  /// chosen for unrelated reasons — the group size, picked to amortise round
+  /// trips, times `downloadConcurrency`, which is wired from
+  /// `startupUploadConcurrency` and is a decision about UPLOADS. Multiplying
+  /// them gave 16 on mobile and 32 on desktop, and nobody had decided either
+  /// number.
+  ///
+  /// A ceiling on files, not on requests, because that is what the far side
+  /// and the link actually feel: a BYO WebDAV serving 32 concurrent transfers
+  /// of a megabyte each is the case that stalls.
+  static const int _maxFilesInFlight = 16;
+
   /// Counts how many distinct blobRefs from [records] are not yet in the
   /// local cache. Used by [pull] to emit a stable progress total across
   /// interleaved prefetch batches.
@@ -688,7 +810,31 @@ class StatePuller {
         if (r.blobRef.isNotEmpty) r.blobRef: r,
     };
     final namedRefs = <String, String>{};
-    final concurrency = _downloadConcurrency.clamp(1, groups.length);
+    // Before the batch, not per group: staging is what fills the database, and
+    // one check per batch is the granularity at which anything can be done
+    // about it.
+    await _relievePressure?.call();
+
+    // Whichever binds first: the host's own limit, or the file ceiling above.
+    final byFiles = _maxFilesInFlight ~/ _prefetchGroupSize;
+    final concurrency = (_downloadConcurrency < byFiles
+            ? _downloadConcurrency
+            : byFiles)
+        .clamp(1, groups.length);
+    // The pull's quiet phase, named because it was silent for minutes.
+    //
+    // A batch's whole fetch used to produce one line, AFTER it finished. On a
+    // vault holding 16 MB attachments over a BYO backend that is two and a
+    // half minutes in which the log says nothing and the file counter — which
+    // counts APPLIED files, and nothing has been applied — stands still. The
+    // reading from outside is "it is stuck", and there was no line to say
+    // otherwise.
+    final swFetch = Stopwatch()..start();
+    _log.info(
+      'Pull: fetching ${refs.length} blob(s) for this batch, '
+      '$concurrency group(s) in flight',
+    );
+    var fetchedInBatch = 0;
     await boundedParallel(groups, concurrency, (group) async {
       context?.cancellationToken?.throwIfCancelled();
       try {
@@ -722,7 +868,40 @@ class StatePuller {
         if (e is RpcCancelledException) rethrow;
         _log.warning('Pull: prefetch failed for ${group.length} file(s): $e');
       }
+      // Per GROUP, not once the whole batch has landed. A batch of large
+      // files takes minutes, and reporting only at the end of it is reporting
+      // nothing for the part anyone would want to watch.
+      fetchedInBatch += group.length;
+      _emit(
+        SyncBlobDownloadProgress(
+          completed: (progressOffset + fetchedInBatch).clamp(0, total),
+          total: total,
+        ),
+      );
     });
+    swFetch.stop();
+    // Close out everything this batch opened, whatever became of it.
+    //
+    // Reporting completion is not enough on its own: a transfer that FAILED —
+    // a refusal, a 404, the idle bound cutting a dead connection — never
+    // reaches its total, so its last report says `done: false` and the entry
+    // outlives the fetch. One such entry is enough to hold the status at
+    // "syncing" indefinitely. The batch's fetch is over here by definition,
+    // so nothing it opened may still be open.
+    for (final path in namedRefs.values) {
+      _emit(
+        SyncBlobTransfer(
+          path: path,
+          upload: false,
+          sentBytes: 0,
+          totalBytes: 0,
+          done: true,
+        ),
+      );
+    }
+    _log.info(
+      'Pull: fetched ${refs.length} blob(s) in ${swFetch.elapsedMilliseconds}ms',
+    );
     _emit(
       SyncBlobDownloadProgress(
         completed: (progressOffset + refs.length).clamp(0, total),
@@ -745,13 +924,21 @@ class StatePuller {
     return refs.length;
   }
 
+  /// Reports a file's transfer, and says when it is over.
+  ///
+  /// `done` was hard-coded false here, so the prefetch opened a transfer for
+  /// every file above the narration threshold and closed none of them. The
+  /// status is folded from `engineBusy || hasOpenTransfers || settingsBusy`,
+  /// so a single unclosed entry holds the whole plugin at "syncing" for a
+  /// vault that finished minutes ago — observed after a pull that had logged
+  /// `applied 966 record(s)` and stopped.
   void _emitTransfer(String path, int sent, int total) => _emit(
     SyncBlobTransfer(
       path: path,
       upload: false,
       sentBytes: sent,
       totalBytes: total,
-      done: false,
+      done: total > 0 && sent >= total,
     ),
   );
 

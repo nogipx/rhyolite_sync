@@ -77,7 +77,12 @@ String _formatEvent(LogEvent e, DiagnosticRedactor? redactor) {
     ..write(escapeInline(e.message));
 
   _writeFields(b, e.data, redactor);
-  _writeCorrelation(b, traceId: e.traceId, requestId: e.requestId, spanId: e.spanId);
+  _writeCorrelation(
+    b,
+    traceId: e.traceId,
+    requestId: e.requestId,
+    spanId: e.spanId,
+  );
   _writeFailure(b, error: e.error, stackTrace: e.stackTrace);
   return b.toString();
 }
@@ -98,7 +103,12 @@ String _formatSpan(LogSpan s, DiagnosticRedactor? redactor) {
     ..write('ms');
 
   _writeFields(b, s.data, redactor);
-  _writeCorrelation(b, traceId: s.traceId, spanId: s.spanId, parentSpanId: s.parentSpanId);
+  _writeCorrelation(
+    b,
+    traceId: s.traceId,
+    spanId: s.spanId,
+    parentSpanId: s.parentSpanId,
+  );
   _writeFailure(b, error: s.error, stackTrace: s.stackTrace);
   return b.toString();
 }
@@ -110,14 +120,17 @@ void _writeFields(
 ) {
   if (data == null || data.isEmpty) return;
   for (final entry in data.entries) {
-    b.write(' ${entry.key}=${escapeInline(renderField(entry.value, redactor))}');
+    b.write(
+      ' ${entry.key}=${escapeInline(renderField(entry.value, redactor))}',
+    );
   }
 }
 
 /// Renders one `data` value. [LogPath] and [LogUrl] are the only values this
 /// treats specially, and they are special precisely because they were declared
 /// to be — no inspection of the text decides anything.
-String renderField(Object value, DiagnosticRedactor? redactor) => switch (value) {
+String renderField(Object value, DiagnosticRedactor? redactor) =>
+    switch (value) {
       // A config path is declared exempt at the call site — see LogPath.config.
       LogPath(isConfigRelative: true, :final value) => value,
       LogPath(:final value) =>
@@ -135,7 +148,9 @@ void _writeCorrelation(
   String? parentSpanId,
 }) {
   if (traceId != null && traceId.isNotEmpty) b.write(' traceId=$traceId');
-  if (requestId != null && requestId.isNotEmpty) b.write(' requestId=$requestId');
+  if (requestId != null && requestId.isNotEmpty) {
+    b.write(' requestId=$requestId');
+  }
   if (spanId != null && spanId.isNotEmpty) b.write(' spanId=$spanId');
   if (parentSpanId != null && parentSpanId.isNotEmpty) {
     b.write(' parentSpanId=$parentSpanId');

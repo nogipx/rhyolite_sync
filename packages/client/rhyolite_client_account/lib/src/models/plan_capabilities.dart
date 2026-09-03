@@ -70,18 +70,18 @@ class PlanCapabilities {
         canUseExternalStorage: json['canUseExternalStorage'] as bool,
         maxVaultCount: (json['maxVaultCount'] as num?)?.toInt(),
         maxFileSizeBytes: (json['maxFileSizeBytes'] as num?)?.toInt(),
-        managedStorageQuotaBytes:
-            (json['managedStorageQuotaBytes'] as num?)?.toInt(),
+        managedStorageQuotaBytes: (json['managedStorageQuotaBytes'] as num?)
+            ?.toInt(),
       );
 
   Map<String, dynamic> toJson() => {
-        'canUseManagedStorage': canUseManagedStorage,
-        'canUseExternalStorage': canUseExternalStorage,
-        if (maxVaultCount != null) 'maxVaultCount': maxVaultCount,
-        if (maxFileSizeBytes != null) 'maxFileSizeBytes': maxFileSizeBytes,
-        if (managedStorageQuotaBytes != null)
-          'managedStorageQuotaBytes': managedStorageQuotaBytes,
-      };
+    'canUseManagedStorage': canUseManagedStorage,
+    'canUseExternalStorage': canUseExternalStorage,
+    if (maxVaultCount != null) 'maxVaultCount': maxVaultCount,
+    if (maxFileSizeBytes != null) 'maxFileSizeBytes': maxFileSizeBytes,
+    if (managedStorageQuotaBytes != null)
+      'managedStorageQuotaBytes': managedStorageQuotaBytes,
+  };
 
   @override
   bool operator ==(Object other) =>
@@ -94,12 +94,12 @@ class PlanCapabilities {
 
   @override
   int get hashCode => Object.hash(
-        canUseManagedStorage,
-        canUseExternalStorage,
-        maxVaultCount,
-        maxFileSizeBytes,
-        managedStorageQuotaBytes,
-      );
+    canUseManagedStorage,
+    canUseExternalStorage,
+    maxVaultCount,
+    maxFileSizeBytes,
+    managedStorageQuotaBytes,
+  );
 
   @override
   String toString() =>

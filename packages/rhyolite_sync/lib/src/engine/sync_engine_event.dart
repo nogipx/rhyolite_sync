@@ -64,6 +64,72 @@ class SyncFileSizeBlocked extends SyncEngineEvent {
   final int limitBytes;
 }
 
+/// How far a pull has got, counted in FILES rather than in blobs.
+///
+/// The only progress a pull reported was [SyncBlobDownloadProgress], which
+/// counts blobs still to fetch. That was the right measure when fetching was
+/// the work; it is no longer. A pull now spends most of its time applying,
+/// reconciling and pushing, and it emits nothing at all for a batch whose
+/// files are already held locally — so on a vault where half the files were
+/// already present the bar sat still through half the run and looked stuck.
+///
+/// Emitted per applied file, which is also the unit the user is counting.
+class SyncPullProgress extends SyncEngineEvent {
+  SyncPullProgress({required this.applied, required this.total});
+
+  final int applied;
+  final int total;
+}
+
+/// One batch of a pull has been applied and banked.
+///
+/// A DURABILITY checkpoint, not progress for display. A host whose storage
+/// acknowledges writes before performing them (the plugin's SQLite sits on an
+/// IndexedDB VFS) should drain its queue here.
+///
+/// It exists because the only such checkpoint used to be [SyncCursorAdvanced],
+/// which a pull emits once, at the very end. A pull of a whole vault therefore
+/// wrote for minutes into a queue nothing drained, and closing the host
+/// mid-pull discarded every register row it had applied — so the next run
+/// re-fetched every record and re-downloaded every blob, only to find the
+/// content already on disk and write nothing.
+///
+/// Emitted per batch whether or not the CURSOR moved, which is the point: the
+/// cursor is held back by the lowest unapplied serverSeq while files are
+/// applied smallest-first, so it can sit still for most of a large pull with
+/// real work banked behind it. The register rows are what make a resumed pull
+/// cheap, not the cursor.
+class SyncPullBatchApplied extends SyncEngineEvent {
+  SyncPullBatchApplied({required this.cursor});
+
+  /// Where the cursor stands now. May be unchanged since the last checkpoint.
+  final int cursor;
+}
+
+/// A file on the SERVER is too large for this device to fetch, so it was not
+/// materialised.
+///
+/// The mirror image of [SyncFileSizeBlocked] and deliberately not the same
+/// event: that one is about a local file we decline to send, which stays safe
+/// on disk. This one is about a file that exists and is not here, which is the
+/// opposite reassurance and the opposite next step.
+///
+/// It exists because both cases reached the user as `Blob not available` — the
+/// message for a blob the server LOST. Someone told their vault was missing
+/// data goes looking for a recovery, when nothing was lost and the file is
+/// intact on every device that could hold it.
+class SyncFileTooLargeToFetch extends SyncEngineEvent {
+  SyncFileTooLargeToFetch({
+    required this.path,
+    required this.sizeBytes,
+    required this.limitBytes,
+  });
+
+  final String path;
+  final int sizeBytes;
+  final int limitBytes;
+}
+
 /// A previously size-blocked file is no longer blocked: it was deleted, shrank
 /// below the limit, or the tier's limit rose. Paired with [SyncFileSizeBlocked]
 /// so UI can drop it from the "too large" list instead of leaving it stuck.
@@ -219,6 +285,20 @@ class SyncStorageRefused extends SyncEngineEvent {
   SyncStorageRefused(this.detail);
 
   final String detail;
+}
+
+/// The local database is at its limit and reclaiming did not help.
+///
+/// Emitted once per pull, not per file: at this point the space is live data
+/// rather than staging, so nothing the engine does on its own will change it —
+/// the host decides whether to offer compaction, and the user decides whether
+/// to take it. Syncing continues, because a stale vault is worse than a full
+/// database.
+class SyncDatabaseFull extends SyncEngineEvent {
+  SyncDatabaseFull({required this.bytes, required this.limitBytes});
+
+  final int bytes;
+  final int limitBytes;
 }
 
 class SyncError extends SyncEngineEvent {

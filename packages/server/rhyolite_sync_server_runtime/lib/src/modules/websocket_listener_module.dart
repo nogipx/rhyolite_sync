@@ -53,18 +53,15 @@ class WebSocketListenerModule extends RpcModule {
   @override
   Future<void> onStart(RpcContainer container) async {
     _httpServer = await HttpServer.bind('0.0.0.0', _port, shared: true);
-    _httpServer!.listen(
-      (req) async {
-        if (WebSocketTransformer.isUpgradeRequest(req)) {
-          final ws = await WebSocketTransformer.upgrade(req);
-          _controller.add(IOWebSocketChannel(ws));
-        } else {
-          req.response.statusCode = 426;
-          await req.response.close();
-        }
-      },
-      onError: (Object e) => _log.error('listener error', error: e),
-    );
+    _httpServer!.listen((req) async {
+      if (WebSocketTransformer.isUpgradeRequest(req)) {
+        final ws = await WebSocketTransformer.upgrade(req);
+        _controller.add(IOWebSocketChannel(ws));
+      } else {
+        req.response.statusCode = 426;
+        await req.response.close();
+      }
+    }, onError: (Object e) => _log.error('listener error', error: e));
   }
 
   @override

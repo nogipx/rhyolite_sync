@@ -56,7 +56,10 @@ void main() {
     });
 
     test('serialised, the same writes both land', () async {
-      final client = SerialisedDataClient(await rawSqliteClient());
+      final client = SerialisedDataClient(
+        await rawSqliteClient(),
+        gate: ConnectionGate(),
+      );
 
       await Future.wait([
         client.create(collection: 'c', payload: const {'n': 1}),
@@ -76,7 +79,10 @@ void main() {
       // enough that the four rarely overlap — so this pins that the wrapper
       // does not BREAK the realistic shape, not that it fixes it. The two
       // tests around it are what pin the concurrency.
-      final client = SerialisedDataClient(await rawSqliteClient());
+      final client = SerialisedDataClient(
+        await rawSqliteClient(),
+        gate: ConnectionGate(),
+      );
 
       await Future.wait([
         for (var worker = 0; worker < 4; worker++)
@@ -105,7 +111,7 @@ void main() {
   group('the queue itself', () {
     test('one call runs at a time', () async {
       final probe = _OverlapProbe();
-      final client = SerialisedDataClient(probe);
+      final client = SerialisedDataClient(probe, gate: ConnectionGate());
 
       await Future.wait([
         for (var i = 0; i < 8; i++)
@@ -121,7 +127,7 @@ void main() {
       // alone would let one refused write stop the vault syncing until a
       // restart, which is a worse fault than the one being fixed.
       final probe = _OverlapProbe(failOn: {0});
-      final client = SerialisedDataClient(probe);
+      final client = SerialisedDataClient(probe, gate: ConnectionGate());
 
       await expectLater(
         client.create(collection: 'c', payload: const {'n': 0}),
@@ -138,7 +144,10 @@ void main() {
         // Without Future.sync the throw escapes the queue callback, the
         // completer never settles, and the caller waits on a future that cannot
         // ever complete — a hang is worse than the collision being prevented.
-        final client = SerialisedDataClient(_SyncThrowingClient());
+        final client = SerialisedDataClient(
+          _SyncThrowingClient(),
+          gate: ConnectionGate(),
+        );
 
         await expectLater(
           client
@@ -160,7 +169,7 @@ void main() {
 
     test('order is preserved', () async {
       final probe = _OverlapProbe();
-      final client = SerialisedDataClient(probe);
+      final client = SerialisedDataClient(probe, gate: ConnectionGate());
 
       await Future.wait([
         for (var i = 0; i < 5; i++)
@@ -174,7 +183,7 @@ void main() {
       // It outlives every call around it; putting it in the queue would stop
       // the engine dead the first time anything watched a collection.
       final probe = _OverlapProbe();
-      final client = SerialisedDataClient(probe);
+      final client = SerialisedDataClient(probe, gate: ConnectionGate());
 
       final events = client.watchChanges(collection: 'c');
       expect(events, isNotNull);

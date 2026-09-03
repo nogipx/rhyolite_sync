@@ -7,6 +7,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 import 'data_json_writer.dart';
 import 'plan_status.dart';
+import 'boot/auth_boot.dart';
 
 /// Adapts the Obsidian [PluginHandle] to the testable [RawDataStore] seam.
 class _PluginRawDataStore implements RawDataStore {
@@ -21,38 +22,7 @@ class _PluginRawDataStore implements RawDataStore {
   Future<void> save(Map<String, dynamic> data) => _plugin.saveData(data);
 }
 
-/// Account service configuration — stored in plaintext plugin data.
-class AuthConfig {
-  const AuthConfig({required this.accountServiceUrl});
-
-  final String accountServiceUrl;
-
-  bool get isConfigured => accountServiceUrl.isNotEmpty;
-
-  Map<String, dynamic> toJson() => {'accountServiceUrl': accountServiceUrl};
-
-  factory AuthConfig.fromJson(Map<String, dynamic> json) {
-    final url = json['accountServiceUrl'] as String? ?? '';
-
-    if (url.isNotEmpty) {
-      final uri = Uri.tryParse(url);
-      if (uri == null || uri.host.isEmpty) {
-        throw FormatException(
-          'AuthConfig: accountServiceUrl must be a valid URL',
-          url,
-        );
-      }
-    }
-
-    return AuthConfig(accountServiceUrl: url);
-  }
-
-  AuthConfig copyWith({String? accountServiceUrl}) => AuthConfig(
-    accountServiceUrl: accountServiceUrl ?? this.accountServiceUrl,
-  );
-}
-
-class ObsidianConfigStorage {
+class ObsidianConfigStorage implements AuthBootStorage {
   ObsidianConfigStorage(this._plugin)
     : _data = DataJsonWriter(_PluginRawDataStore(_plugin));
 
@@ -300,9 +270,9 @@ class ObsidianConfigStorage {
   }
 
   Future<void> savePlan(PlanSnapshot snapshot) => _data.update((m) {
-        m[_planKey] = snapshot.toJson();
-        m.remove(_legacyCapabilitiesKey);
-      });
+    m[_planKey] = snapshot.toJson();
+    m.remove(_legacyCapabilitiesKey);
+  });
 
   // ---------------------------------------------------------------------------
   // Remember passphrase

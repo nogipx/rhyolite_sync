@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:convergent/convergent.dart' show Hlc;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 class _FakeIO implements IPlatformIO {
   final writes = <String, Uint8List>{};

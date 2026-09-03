@@ -31,6 +31,9 @@ Future<void> showStorageOverviewModal(
   PluginCodeOverview plugins = PluginCodeOverview.empty,
   ({int usedBytes, int quotaBytes})? usage,
   Future<void> Function()? onManagePlugins,
+  Future<({int? fileBytes, int? freeBytes})?> Function()? onDatabaseStats,
+  Future<void> Function()? onCompactDatabase,
+  Future<void> Function()? onDatabaseReport,
 }) async {
   if (engine is! StateSyncEngine) {
     showNotice(S.storageOverviewUnavailable);
@@ -38,6 +41,15 @@ Future<void> showStorageOverviewModal(
   }
 
   final stats = engine.statsSnapshot();
+  // Read before the modal opens, like everything else here — three O(1)
+  // pragmas, and a card that filled in after the fact would move under the
+  // pointer.
+  ({int? fileBytes, int? freeBytes})? dbStats;
+  try {
+    dbStats = await onDatabaseStats?.call();
+  } catch (_) {
+    dbStats = null;
+  }
   final janitor = engine.createBlobJanitor();
   final registry = engine.createDeviceRegistry();
 
@@ -80,8 +92,9 @@ Future<void> showStorageOverviewModal(
 
       // ── Summary strip ──
       // The three figures worth seeing before anything else.
-      final liveFiles =
-          stats == null ? null : stats.totalFiles - stats.tombstones;
+      final liveFiles = stats == null
+          ? null
+          : stats.totalFiles - stats.tombstones;
       _tiles(doc, root, [
         (S.files, liveFiles == null ? '—' : '$liveFiles'),
         (
@@ -128,7 +141,7 @@ Future<void> showStorageOverviewModal(
                   () async {
                     ctx.close(null);
                     await onManagePlugins();
-                  }
+                  },
                 ),
         );
         void line(String label, List<PluginCodeRow> rows) {
@@ -153,7 +166,7 @@ Future<void> showStorageOverviewModal(
           () async {
             ctx.close(null);
             await showStorageCleanupModal(plugin, engine);
-          }
+          },
         ),
       );
       if (plan == null) {
@@ -166,7 +179,7 @@ Future<void> showStorageOverviewModal(
             history,
             S.range,
             '${_fmtDate(plan.oldestRemainingAt!)} → '
-                '${_fmtDate(plan.newestRemainingAt!)}',
+            '${_fmtDate(plan.newestRemainingAt!)}',
           );
         }
       }
@@ -181,7 +194,7 @@ Future<void> showStorageOverviewModal(
           () async {
             ctx.close(null);
             await showDeviceManagementModal(plugin, engine);
-          }
+          },
         ),
       );
       if (devices.isEmpty) {
@@ -213,7 +226,7 @@ Future<void> showStorageOverviewModal(
                 () async {
                   ctx.close(null);
                   await showBackupModal(plugin, engine);
-                }
+                },
               ),
       );
       if (restorePointsUnavailable) {
@@ -222,13 +235,55 @@ Future<void> showStorageOverviewModal(
         _muted(doc, backups, S.restorePointsNoneYet);
       } else {
         _kv(doc, backups, S.kept, '${restorePoints.length}');
-        final oldest =
-            DateTime.fromMillisecondsSinceEpoch(restorePoints.last.createdAtMs);
+        final oldest = DateTime.fromMillisecondsSinceEpoch(
+          restorePoints.last.createdAtMs,
+        );
         final newest = DateTime.fromMillisecondsSinceEpoch(
           restorePoints.first.createdAtMs,
         );
         _kv(doc, backups, S.range, '${_fmtDate(oldest)} → ${_fmtDate(newest)}');
         _muted(doc, backups, S.restorePointsHoldBlobs);
+      }
+
+      // The local database, last: it is the only card here about the plugin's
+      // own plumbing rather than about the vault, and it earns its place only
+      // because two of its numbers are actionable and were previously visible
+      // nowhere. One vault carried 1.4 GB of which 1.35 GB was empty, and
+      // spent twenty-two seconds opening it on every launch.
+      final dbFile = dbStats?.fileBytes;
+      if (dbFile != null) {
+        final dbFree = dbStats?.freeBytes ?? 0;
+        final body = _card(doc, root, S.databaseSection);
+        _kv(doc, body, S.databaseFileSize, formatBytes(dbFile));
+        _kv(doc, body, S.databaseEmptySpace, formatBytes(dbFree));
+        // Said only when it is worth minutes of rewriting.
+        if (dbFree > dbFile / 2) {
+          _muted(doc, body, S.databaseCompactHint);
+        }
+
+        final row = _el(doc, body, 'div');
+        _css(row, {
+          'display': 'flex',
+          'gap': '8px',
+          'marginTop': '8px',
+          'flexWrap': 'wrap',
+        });
+        if (onDatabaseReport != null) {
+          final btn = _el(doc, row, 'button', text: S.databaseReportAction);
+          _css(btn, {'fontSize': '12px', 'padding': '2px 10px'});
+          _onClick(btn, () async {
+            ctx.close(null);
+            await onDatabaseReport();
+          });
+        }
+        if (onCompactDatabase != null) {
+          final btn = _el(doc, row, 'button', text: S.databaseCompactAction);
+          _css(btn, {'fontSize': '12px', 'padding': '2px 10px'});
+          _onClick(btn, () async {
+            ctx.close(null);
+            await onCompactDatabase();
+          });
+        }
       }
 
       // Only what acts on the vault as a whole stays in the footer; everything
@@ -241,10 +296,12 @@ Future<void> showStorageOverviewModal(
         }),
       ];
       if (restorePoints.isNotEmpty) {
-        actions.add(ButtonSpec(S.clearRestorePointsAction, () async {
-          ctx.close(null);
-          await _clearRestorePoints(plugin, engine, restorePoints.length);
-        }));
+        actions.add(
+          ButtonSpec(S.clearRestorePointsAction, () async {
+            ctx.close(null);
+            await _clearRestorePoints(plugin, engine, restorePoints.length);
+          }),
+        );
       }
       actions.add(ButtonSpec(S.close, () => ctx.close(null)));
       ctx.buttonRow(actions);
@@ -275,9 +332,11 @@ Future<void> _clearRestorePoints(
           ctx.close(null);
           try {
             final n = await engine.clearBackups();
-            showNotice(n == null
-                ? S.notConnectedNothingCleared
-                : S.clearedRestorePoints(n));
+            showNotice(
+              n == null
+                  ? S.notConnectedNothingCleared
+                  : S.clearedRestorePoints(n),
+            );
           } catch (e) {
             showNotice(S.clearRestorePointsFailed(e));
           }
@@ -413,15 +472,16 @@ void _meter(
   _css(fill, {
     'height': '100%',
     'width': '${(ratio * 100).toStringAsFixed(1)}%',
-    'background':
-        ratio >= 0.9 ? 'var(--text-error)' : 'var(--interactive-accent)',
+    'background': ratio >= 0.9
+        ? 'var(--text-error)'
+        : 'var(--interactive-accent)',
   });
   _kv(
     doc,
     host,
     S.storageUsedLabel,
     '${formatBytes(usage.usedBytes)} / ${formatBytes(usage.quotaBytes)}'
-        '  (${(ratio * 100).toStringAsFixed(0)}%)',
+    '  (${(ratio * 100).toStringAsFixed(0)}%)',
   );
 }
 

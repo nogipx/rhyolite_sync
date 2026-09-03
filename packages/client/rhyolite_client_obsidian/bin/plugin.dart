@@ -11,39 +11,39 @@ import 'package:rhyolite_client_obsidian/rhyolite_client_obsidian.dart';
 import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report.dart';
 import 'package:rhyolite_client_obsidian/src/diagnostics/bug_report_modal.dart';
 import 'package:rhyolite_client_obsidian/src/diagnostics/diagnostic_redactor.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/log_file_store.dart';
-import 'package:rhyolite_client_obsidian/src/diagnostics/obsidian_log_file_store.dart';
 import 'package:rhyolite_client_obsidian/src/diagnostics/persistent_log_sink.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_recovery.dart';
 import 'package:rhyolite_client_obsidian/src/engine/auth_session_state.dart';
-import 'package:rhyolite_client_obsidian/src/engine/backup_modal.dart';
+import 'package:rhyolite_client_obsidian/src/engine/boot/auth_boot.dart';
+import 'package:rhyolite_client_obsidian/src/engine/boot/database_boot.dart';
+import 'package:rhyolite_client_obsidian/src/engine/boot/engine_boot.dart';
+import 'package:rhyolite_client_obsidian/src/engine/host_info.dart';
 import 'package:rhyolite_client_obsidian/src/engine/build_env.dart';
 import 'package:rhyolite_client_obsidian/src/engine/connection_recovery.dart';
+import 'package:rhyolite_client_obsidian/src/engine/durability_barrier.dart';
 import 'package:rhyolite_client_obsidian/src/engine/db_recovery.dart';
-import 'package:rhyolite_client_obsidian/src/engine/device_management_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/diagnostics_logging.dart';
 import 'package:rhyolite_client_obsidian/src/engine/file_version_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/frontmatter_audit_binding.dart';
 import 'package:rhyolite_client_obsidian/src/engine/modal_lock.dart';
-import 'package:rhyolite_client_obsidian/src/engine/orphan_sweep_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/plan_status.dart';
 import 'package:rhyolite_client_obsidian/src/engine/plugin_management_modal.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/log_file_store.dart';
+import 'package:rhyolite_client_obsidian/src/diagnostics/obsidian_log_file_store.dart';
+import 'package:rhyolite_client_obsidian/src/engine/plugin_session.dart';
+import 'package:rhyolite_client_obsidian/src/engine/recovery_state.dart';
 import 'package:rhyolite_client_obsidian/src/engine/self_host_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/server_rejections.dart';
-import 'package:rhyolite_client_obsidian/src/engine/storage_cleanup_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/storage_overview_modal.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_panel.dart';
 import 'package:rhyolite_client_obsidian/src/engine/sync_status_indicator.dart';
 import 'package:rhyolite_client_obsidian/src/engine/vault_picker_modal.dart';
 import 'package:rhyolite_client_obsidian/src/i18n/i18n.dart';
 import 'package:rhyolite_client_obsidian/src/platform/obsidian_http_client.dart';
-import 'package:rpc_blob_sqlite/rpc_blob_sqlite.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_dart_compression/rpc_dart_compression.dart';
-import 'package:rpc_dart_http/rpc_dart_http.dart';
 import 'package:rpc_dart_log/rpc_dart_log.dart';
 import 'package:rpc_data/rpc_data.dart';
-import 'package:rpc_data_sqlite/rpc_data_sqlite.dart';
 
 // Baseline level. This codebase logs at info/warning/error and almost nothing
 // below, so `info` captures everything the plugin and the engine actually say
@@ -55,43 +55,35 @@ import 'package:rpc_data_sqlite/rpc_data_sqlite.dart';
 // diagnostics, [DiagnosticsLogging] drops this to debug and restores it after.
 const _baselineLogLevel = kDebug ? RpcLogLevel.debug : RpcLogLevel.info;
 
-// Release builds log to this device and nowhere else. [_logSink] keeps a
-// memory ring plus a two-generation file under the plugin folder; that file is
-// what a bug report ships. Nothing is transmitted anywhere unless the user
-// turns on remote diagnostics, which is still off by default.
+// Release builds log to this device and nowhere else. The session's log sink
+// keeps a memory ring plus a two-generation file under the plugin folder; that
+// file is what a bug report ships. Nothing is transmitted anywhere unless the
+// user turns on remote diagnostics, which is still off by default.
 final _logController = LogController(
   outputs: kDebug ? [ConsoleOutput()] : [],
   minLevel: _baselineLogLevel,
 );
 final _log = _logController.scope('plugin');
 
-/// The always-on local log. Installed at the very top of onLoad, before
-/// anything that can fail, so a boot that dies still leaves something to read.
-PersistentLogSink? _logSink;
-
-/// Manages the optional remote log sink. Off until the user opts in; installed
-/// during boot from the persisted [DiagnosticsPrefs] and re-applied live from
-/// the settings tab.
-DiagnosticsLogging? _diagnostics;
-
-ISyncEngine? _engine;
-DatabaseConnection? _dbConn;
-SyncStatusIndicator? _syncIndicator;
-SyncPanel? _syncPanel;
-
-/// User-requested sync pause (toggled from the side panel, persisted in
-/// data.json). When true, every incidental start path is skipped — sync stays
-/// off until an explicit resume (the "Start Sync" command or the panel's Resume
-/// button), which is the only thing that clears it.
-bool _syncPaused = false;
+/// Everything the current load owns. The ONE top-level slot holding
+/// per-load state — see [PluginSession] for why the count is the point.
+///
+/// Read from `onUnload` and nowhere else. Everything built during `onLoad`
+/// captures the object, so a closure made by one load acts on that load's
+/// resources even while the next load has already replaced this slot.
+PluginSession? _session;
 
 /// Starts the engine unless the user paused sync. ALL non-explicit start paths
 /// (boot, reconnect, token refresh, config/vault change, subscription) route
 /// through this so a persisted pause is honoured everywhere — otherwise the
 /// flag desyncs from reality (engine running while "paused"). The pause flag is
 /// cleared only by an explicit resume (`setSyncPaused(false)` in boot).
-Future<void> _guardedStart(ISyncEngine engine, [TaskCancelToken? token]) async {
-  if (_syncPaused) {
+Future<void> _guardedStart(
+  PluginSession session,
+  ISyncEngine engine, [
+  TaskCancelToken? token,
+]) async {
+  if (session.syncPaused) {
     _log.info('Engine start skipped — sync paused by user.');
     return;
   }
@@ -109,70 +101,17 @@ String _startBlockReason(SyncStartBlock block) => switch (block) {
   SyncStartBlock.storageRefused => S.blockedStorageRefused,
 };
 
-/// Best-effort OS label for [DeviceInfo] on the log collector: `desktop`, or
-/// `iOS`/`Android` sniffed from the user agent on mobile (Obsidian doesn't
-/// expose the OS directly). The bug this diagnostics feature exists to debug is
-/// iOS-specific, so telling iPhone from Android in the collector matters.
-String _diagnosticsOs(bool isMobile) {
-  if (!isMobile) return 'desktop';
-  try {
-    final nav = jsu.getProperty<JSObject?>(jsu.globalThis, 'navigator');
-    final ua = nav != null
-        ? (jsu.getProperty<String?>(nav, 'userAgent') ?? '')
-        : '';
-    return ua.contains('Android') ? 'Android' : 'iOS';
-  } catch (_) {
-    return 'mobile';
-  }
-}
-
-/// Best-effort read of this build's version from the Obsidian manifest.
-String _pluginVersion(PluginHandle plugin) {
-  try {
-    final manifest = jsu.getProperty<JSObject?>(plugin.raw, 'manifest');
-    if (manifest == null) return '';
-    return jsu.getProperty<String?>(manifest, 'version') ?? '';
-  } catch (_) {
-    return '';
-  }
-}
-
-/// Obsidian's own API version, so a report says which host it came from.
-String _obsidianVersion() {
-  try {
-    return jsu.getProperty<String?>(obsidianModule(), 'apiVersion') ?? '';
-  } catch (_) {
-    return '';
-  }
-}
-
-/// Whether Obsidian considers this a mobile host. Read defensively — every
-/// caller has a sensible answer for "could not tell".
-bool _isMobileHost(PluginHandle plugin) {
-  try {
-    return jsu.getProperty<bool>(plugin.app.raw, 'isMobile');
-  } catch (_) {
-    return false;
-  }
-}
-
-/// Starts the on-device log.
+/// Builds the local log and hands it to [session], which owns it from then on.
 ///
-/// Runs at the very top of onLoad, before the first await, for the same reason
-/// the panel view is registered there: whatever this call is placed after is
-/// something a report can no longer explain. Boot is where the interesting
-/// failures are, and until this feature existed a release build recorded none
-/// of them.
-///
-/// Local only. This writes to a file inside the plugin's own folder and to a
-/// memory ring, and transmits nothing; shipping the result anywhere is a
-/// separate, deliberate act by the user (see [showBugReportModal]).
-void _installPersistentLog(PluginHandle plugin) {
-  if (_logSink != null) return;
+/// The build lives here because it needs the Obsidian handle: the vault adapter
+/// to write through, and the version/OS probes for the banner. Everything after
+/// that — install, remove, close — belongs to the session, which is what makes
+/// the teardown order testable.
+void _installPersistentLog(PluginSession session, PluginHandle plugin) {
   LogFileStore store;
   try {
     store = ObsidianLogFileStore(plugin.app.vault);
-  } catch (e) {
+  } catch (_) {
     // No vault adapter is not a reason to lose the session's logs — the ring
     // still holds them, and the report falls back to it.
     store = const NoopLogFileStore();
@@ -188,45 +127,17 @@ void _installPersistentLog(PluginHandle plugin) {
     segmentId: PersistentLogSink.segmentIdFor(DateTime.now()),
     memoryCapacity: 4000,
   );
-  _logSink = sink;
-  _logController.addOutput(sink);
-  final os = _isMobileHost(plugin) ? _diagnosticsOs(true) : 'desktop';
+  if (!session.attachLog(sink)) return;
+  final os = isMobileHost(plugin) ? diagnosticsOs(true) : 'desktop';
   unawaited(
     sink.start(
       banner:
-          'rhyolite ${_pluginVersion(plugin)} on $os, '
-          'Obsidian ${_obsidianVersion()}'
+          'rhyolite ${pluginVersion(plugin)} on $os, '
+          'Obsidian ${obsidianVersion()}'
           '${kDebug ? ', debug build' : ''}',
     ),
   );
 }
-
-/// Tears the local log down on unload, flushing what is buffered.
-///
-/// Nulled out, not just disposed: onLoad runs again on a soft reload, and a
-/// sink left in place would leave the next session appending to a disposed
-/// output while its own boot went unrecorded.
-void _disposePersistentLog() {
-  final sink = _logSink;
-  if (sink == null) return;
-  _logController.removeOutput(sink);
-  sink.dispose();
-  _logSink = null;
-}
-
-/// Supplies the parts of a report that only the boot block knows: the vault,
-/// the account, the filters in force. Installed once boot reaches the engine.
-///
-/// Absent before that, and a report taken in that window is still worth having
-/// — a boot that never finishes is exactly the sort of thing being reported,
-/// and the environment plus the log will show it.
-List<BugReportSection> Function()? _reportFacts;
-
-/// Salt for the report's path pseudonyms — the vaultId, so a name maps to the
-/// same pseudonym in every report from this vault (a bug reported twice about
-/// one file is visibly about one file) and to nothing in any other vault.
-/// Empty before a vault is connected, when there are no vault paths to hide.
-String _reportPathSalt = '';
 
 /// Problems reach back across sessions and are rare, so this can be generous.
 const _kReportProblemLines = 600;
@@ -266,10 +177,11 @@ String? _logCompletenessNotice(LogStats stats, {required int fileCount}) {
 /// read by whoever is debugging it, not by the user who produced it. What the
 /// user reads — the modal, the preview, every button — is localised.
 Future<(BugReport, List<(String, String)>)> _buildBugReport(
+  PluginSession session,
   PluginHandle plugin,
   String description,
 ) async {
-  final sink = _logSink;
+  final sink = session.logSink;
   var problems = '';
   var logFiles = <(String, String)>[];
   String? logNotice;
@@ -290,50 +202,43 @@ Future<(BugReport, List<(String, String)>)> _buildBugReport(
       userDescription: description,
       problems: problems,
       logNotice: logNotice,
-      pathsRedacted: _reportPathSalt.isNotEmpty,
-      sections: [_environmentSection(plugin), ...?_reportFacts?.call()],
+      pathsRedacted: session.reportPathSalt.isNotEmpty,
+      sections: [
+        _environmentSection(session, plugin),
+        ...?session.reportFacts?.call(),
+      ],
     ),
     logFiles,
   );
 }
 
-BugReportSection _environmentSection(PluginHandle plugin) {
-  final mobile = _isMobileHost(plugin);
+BugReportSection _environmentSection(
+  PluginSession session,
+  PluginHandle plugin,
+) {
+  final mobile = isMobileHost(plugin);
   return BugReportSection.compact('Environment', [
-    ('Plugin', _pluginVersion(plugin)),
-    ('Obsidian', _obsidianVersion()),
-    ('Platform', mobile ? _diagnosticsOs(true) : 'desktop'),
+    ('Plugin', pluginVersion(plugin)),
+    ('Obsidian', obsidianVersion()),
+    ('Platform', mobile ? diagnosticsOs(true) : 'desktop'),
     ('Build', kDebug ? 'debug' : 'release'),
-    ('Edition', _selfHostActive ? 'self-host' : 'managed'),
+    ('Edition', session.selfHost ? 'self-host' : 'managed'),
     ('Language', obsidianLanguage()),
     ('Account server', kEnv.accountServiceUrl),
     ('Site', kEnv.siteUrl),
     // Stated rather than assumed: an unwritable log is the difference between
     // "the session was quiet" and "the session was never recorded".
-    ('Log file', _logSink?.lastStoreError == null ? 'ok' : 'unwritable'),
+    ('Log file', session.logSink?.lastStoreError == null ? 'ok' : 'unwritable'),
   ]);
 }
-
-/// Uploads a report archive, or null when there is nobody to upload to.
-///
-/// Filled during boot, once it is known whether there is an account service to
-/// talk to. Read when the button is pressed rather than when the command is
-/// registered — the command exists before boot, deliberately, so that a boot
-/// which never finished can still produce a report.
-///
-/// Null on self-host (no account service) and while signed out (the account is
-/// both the identity and the storage key). In both cases the archive stays a
-/// file to attach by hand, which is the path that worked before this existed.
-Future<String> Function(Uint8List archive, String description)?
-_reportSubmitter;
 
 /// Erases the on-device diagnostic logs, reporting what it freed.
 ///
 /// Logging continues afterwards — this clears history, it does not turn
 /// anything off. The size is read before the delete because afterwards there
 /// is nothing left to measure.
-Future<void> _clearDiagnosticLogs() async {
-  final sink = _logSink;
+Future<void> _clearDiagnosticLogs(PluginSession session) async {
+  final sink = session.logSink;
   if (sink == null) return;
   try {
     final freed = await sink.diskBytes();
@@ -364,111 +269,25 @@ Future<({int usedBytes, int quotaBytes})?> _fetchVaultUsage(
   }
 }
 
-ObsidianConfigSync? _configSync;
-StreamSubscription<SyncEngineEvent>? _configReconnectSub;
-
-/// The auth/recovery event listener (session-expiry re-auth, blob-config
-/// adopt, token refresh). Held so onUnload can cancel it — without this a
-/// soft reload (unload + re-onload) leaks one listener bound to the prior
-/// engine's event stream each cycle.
-StreamSubscription<SyncEngineEvent>? _engineAuthEventsSub;
-
-/// Watches for the connected vault being permanently deleted on another device
-/// (its registry entry comes back tombstoned). Cancelled on unload like the
-/// others to avoid leaking a listener across soft reloads.
-StreamSubscription<SyncEngineEvent>? _deletedVaultWatchSub;
-StreamSubscription<SyncEngineEvent>? _stateLostSub;
-StreamSubscription<SyncEngineEvent>? _flushSub;
-Timer? _flushDebounce;
-
-/// Drives the offline self-heal: watches connection events to arm/cancel the
-/// periodic recovery timer. Held so onUnload can cancel it.
-StreamSubscription<SyncEngineEvent>? _selfHealSub;
-
-/// Periodic self-heal timer. Armed when the engine reports it lost the backend
-/// (SyncDisconnected) and rpc_dart's own reconnect loop gave up; cancelled on
-/// SyncConnected. Drives recovery on a capped backoff so getting back online no
-/// longer depends on a DOM online/visibility event firing — those never fire
-/// when the OS network stayed up but the server/token dropped.
-Timer? _selfHealTimer;
-int _selfHealAttempt = 0;
-
-/// Set when the blob backend refused this device, cleared when a start gets
-/// past the point where it would have refused again.
-///
-/// Sticky on purpose. A 401 is not a passing condition: every later edit is
-/// dropped the same way, and the whole failure used to live in one log
-/// warning while the engine went on pulling and looking healthy.
-bool _storageRefused = false;
-
-/// Whether the engine says it is busy.
-///
-/// It guarantees this: `SyncBusy(true)` is raised for the whole startup
-/// pipeline and released in a `finally`, and the invariant is to fail toward
-/// stuck-busy rather than stuck-idle. So "busy" is trustworthy as "work is
-/// happening" — which is precisely what the connection probe cannot tell from
-/// "socket is dead".
-bool _engineBusy = false;
-
-/// When the engine last emitted ANY event.
-///
-/// The liveness signal the health check should have been using. An engine
-/// that is emitting is alive whatever a ping says — and unlike the ping it
-/// costs no round trip and cannot be starved by the very work it reports on.
-DateTime? _lastEngineEventAt;
-
-/// Debounce for the auth-rejection -> token-refresh path. A burst of auth.*
-/// rejections (every pending RPC failing at once) must not spawn a refresh
-/// grind loop — refresh at most once per cooldown, one in flight at a time.
-bool _authRefreshInFlight = false;
-DateTime? _lastAuthRefreshAt;
-
-/// Consecutive "rebind the live session and restart" recoveries. Bounded so a
-/// rebind that does not actually fix the rejection can't restart the engine on
-/// every cooldown; past the cap the handler falls through to refresh/prompt.
-/// Reset on the next successful connect.
-int _authRebindAttempts = 0;
-const int _kMaxAuthRebinds = 3;
-
-/// Stops the offline self-heal loop and resets its backoff. Called on connect,
-/// on pause and on unload.
-void _cancelSelfHeal() {
-  _selfHealTimer?.cancel();
-  _selfHealTimer = null;
-  _selfHealAttempt = 0;
+/// Stops the offline self-heal loop and resets its backoff. Called on connect
+/// and on pause; unload goes through [PluginSession.dispose].
+void _cancelSelfHeal(PluginSession session) {
+  session.cancelSelfHealTimer();
+  session.recovery.resetSelfHeal();
 }
 
-/// Latest known plan (managed edition), as the server last described it.
-/// Loaded from `data.json` at boot, refreshed by every getSubscription.
-PlanSnapshot? _plan;
-
-/// The plan the previous session ended on, kept for the whole session.
+/// Persists a fresh plan answer, if it said anything new.
 ///
-/// The account service reports a lapsed subscription as `none` with free
-/// capabilities — the same answer it gives someone who never paid. Comparing
-/// against what we remembered is the only way to tell those apart, so the
-/// remembered value must survive being overwritten by the fresh one.
-PlanSnapshot? _rememberedPlan;
-
-/// Plan capabilities, or null when no answer has ever been obtained. The engine
-/// reads `maxFileSizeBytes` from this for the per-file size gate.
-PlanCapabilities? get _capabilities => _plan?.capabilities;
-
-/// Records a fresh plan and remembers it for the next session.
-///
-/// Every consumer treats null as "no answer", and the only way to get one is a
-/// network call made while a sync session starts — so it fails at exactly the
-/// times sessions are hardest to start. Persisting the last real answer turns
-/// a failed lookup into "what the server said last time", which is right far
-/// more often than "nothing is allowed".
+/// The decision of what to keep is [PlanTracker.absorb]; this only writes what
+/// it hands back. A failed write costs the next cold start its cached plan and
+/// nothing else, so it is logged and swallowed.
 Future<void> _rememberPlan(
+  PluginSession session,
   SubscriptionDto? dto,
   ObsidianConfigStorage storage,
 ) async {
-  if (dto == null) return;
-  final next = resolvePlan(prior: _plan ?? _rememberedPlan, fresh: dto);
-  if (_plan == next) return;
-  _plan = next;
+  final next = session.plans.absorb(dto);
+  if (next == null) return;
   try {
     await storage.savePlan(next);
   } catch (e) {
@@ -476,44 +295,17 @@ Future<void> _rememberPlan(
   }
 }
 
-/// What the panel and settings currently say about the plan, if anything.
-PlanNotice _planAlert = PlanNotice.quiet;
-
 /// Recomputes the plan alert and pushes it everywhere that shows it.
-///
-/// Called after every subscription lookup rather than on a timer: the alert
-/// only changes when the answer does, or when a date passes — and a date that
-/// passes mid-session is caught by the next session's lookup, which is soon
-/// enough for something measured in days.
-void _refreshPlanNotice() {
-  // Self-host has no account, no plan and nothing to renew.
-  final next = _selfHostActive
-      ? PlanNotice.quiet
-      : planNotice(
-          remembered: _rememberedPlan,
-          current: _plan,
-          now: DateTime.now(),
-        );
-  if (next == _planAlert) return;
-  _planAlert = next;
-  _syncPanel?.setPlanNotice(next);
-  if (!next.isQuiet) _announcePlanOnce(next);
+void _refreshPlanNotice(PluginSession session) {
+  final next = session.plans.refresh(DateTime.now());
+  if (next == null) return;
+  session.panel?.setPlanNotice(next);
+  if (!next.isQuiet) _announcePlanOnce(session, next);
 }
 
-/// The period a plan notice has already been announced for, so the one-off
-/// notice is one-off. Keyed on the date itself: renewing moves the date, which
-/// re-arms the announcement for the new period without any bookkeeping.
-String? _announcedPlanPeriod;
-
 /// Shows the plan alert once, as a notice with a way to act on it.
-///
-/// The panel strip is what persists; this exists because the panel may well be
-/// closed, and an alert nobody is looking at explains nothing. One per period,
-/// never per start.
-void _announcePlanOnce(PlanNotice notice) {
-  final key = '${notice.alert.name}:${notice.date?.toIso8601String() ?? "-"}';
-  if (_announcedPlanPeriod == key) return;
-  _announcedPlanPeriod = key;
+void _announcePlanOnce(PluginSession session, PlanNotice notice) {
+  if (!session.plans.claimAnnouncement(notice)) return;
   final date = notice.date == null ? null : formatPlanDay(notice.date!);
   final message = switch (notice.alert) {
     PlanAlert.ended => date == null ? S.planEndedNoDate : S.planEndedOn(date),
@@ -533,21 +325,12 @@ void _openSubscriptionPage() {
   _openExternalUrl('${kEnv.siteUrl}/account');
 }
 
-/// Whether this session talks to a self-hosted server. Held here because the
-/// settings-sync launcher runs from several call sites that no longer have the
-/// boot block's locals in scope, and the plugin-code storage gate needs it.
-bool _selfHostActive = false;
-
-/// Bytes the community plugins installed on THIS device occupy, measured on
-/// each settings-sync launch. Shown in the settings row so enabling plugin-code
-/// sync is a decision made with the number in hand. Null until first measured.
-int? _pluginCodeLocalBytes;
-
 /// The vault's plugin set joined with this device's disk, or empty when
 /// plugin-code sync is off / settings sync isn't running.
-Future<PluginCodeOverview> _pluginOverview() async {
+Future<PluginCodeOverview> _pluginOverview(PluginSession session) async {
   try {
-    return await _configSync?.pluginOverview() ?? PluginCodeOverview.empty;
+    return await session.configSync?.pluginOverview() ??
+        PluginCodeOverview.empty;
   } catch (e) {
     _log.warning('plugin overview failed: $e');
     return PluginCodeOverview.empty;
@@ -557,6 +340,7 @@ Future<PluginCodeOverview> _pluginOverview() async {
 /// Opens the storage overview. Single definition so the sync panel, the
 /// command palette and the settings tab all show the same thing.
 Future<void> _showStorageOverview(
+  PluginSession session,
   PluginHandle plugin,
   ISyncEngine engine, {
   Future<({int usedBytes, int quotaBytes})?> Function()? fetchUsage,
@@ -571,21 +355,66 @@ Future<void> _showStorageOverview(
   await showStorageOverviewModal(
     plugin,
     engine,
-    plugins: await _pluginOverview(),
+    plugins: await _pluginOverview(session),
     usage: usage,
-    onManagePlugins: () => _showPluginManagement(plugin),
+    onManagePlugins: () => _showPluginManagement(session, plugin),
+    // The modal cannot reach the database — the handle does not leave
+    // GatedDatabase — so its numbers and its two actions are handed in.
+    onDatabaseStats: () async => session.db?.stats(),
+    onDatabaseReport: () => _writeDatabaseReport(session, plugin),
+    onCompactDatabase: () => _compactDatabase(session),
   );
+}
+
+/// Writes the database report into the vault and names where it went.
+Future<void> _writeDatabaseReport(
+  PluginSession session,
+  PluginHandle plugin,
+) async {
+  final db = session.db;
+  if (db == null) return;
+  try {
+    const path = 'rhyolite-database-report.md';
+    await ObsidianIO(
+      plugin.app.vault,
+    ).writeFile(path, Uint8List.fromList(utf8.encode(await db.report())));
+    showNotice(path);
+    _log.info('Database report written');
+  } catch (e) {
+    _log.warning('Database report failed: $e');
+    showNotice('$e');
+  }
+}
+
+/// Compacts the database and reports what it gave back.
+Future<void> _compactDatabase(PluginSession session) async {
+  final db = session.db;
+  if (db == null) return;
+  showNotice(S.compactRunning);
+  try {
+    final r = await db.compact();
+    String mb(int? b) =>
+        b == null ? '?' : '${(b / (1024 * 1024)).toStringAsFixed(0)} MB';
+    final done = S.compactDone(mb(r.beforeBytes), mb(r.afterBytes));
+    _log.warning(done);
+    showNotice(done);
+  } catch (e) {
+    _log.warning('Database compaction failed: $e');
+    showNotice('$e');
+  }
 }
 
 /// Opens plugin management, where a plugin can be dropped from the vault for
 /// every device at once.
-Future<void> _showPluginManagement(PluginHandle plugin) =>
-    showPluginManagementModal(
-      plugin,
-      load: _pluginOverview,
-      onRemove: (resourceId) async =>
-          await _configSync?.removeFromVault(resourceId) ?? false,
-    );
+Future<void> _showPluginManagement(
+  PluginSession session,
+  PluginHandle plugin,
+) => showPluginManagementModal(
+  plugin,
+  load: () => _pluginOverview(session),
+  onRemove: (resourceId) async =>
+      await session.configSync?.removeFromVault(resourceId) ?? false,
+);
 
 /// Obsidian's own mobile flag. Desktop-only plugins are not materialized here.
 bool _isMobileApp(PluginHandle plugin) {
@@ -595,13 +424,6 @@ bool _isMobileApp(PluginHandle plugin) {
     return false;
   }
 }
-
-/// Plugin-owned task lane. Created in onLoad, injected into the engine so the
-/// engine's steady-state sync work (reconcile/pull/GC/settings) and the
-/// plugin's lifecycle work (boot/restart) share one serialized,
-/// connection-fair scheduler instead of racing the single WebSocket. Outlives
-/// every engine session; disposed on unload. See [[engine_sync_scheduler_plan]].
-PriorityTaskScheduler? _scheduler;
 
 /// Priority for lifecycle (boot/restart) tasks. Above the engine's interactive
 /// lane (100) so a restart is never blocked by the user-active typing gate.
@@ -627,10 +449,11 @@ const int _kRecoveryPriority = 500;
 /// [_kRecoveryPriority] and yields its token when a user-initiated boot
 /// arrives, so the engine can abandon a start nobody is waiting for any more.
 Future<void> _scheduleBoot(
+  PluginSession session,
   Future<void> Function(TaskCancelToken token) body, {
   bool automatic = false,
 }) {
-  final scheduler = _scheduler;
+  final scheduler = session.scheduler;
   if (scheduler == null) return body(TaskCancelController().token);
   return scheduler.schedule(
     key: 'engine-lifecycle',
@@ -664,17 +487,12 @@ Future<void> _adoptDeviceId(
   }
 }
 
-/// (Re)starts `.obsidian` settings sync. Idempotent — disposes any running
-/// instance first. No-op when disabled, before the engine has an endpoint, or
-/// before a vault key is available. The config caller reuses the engine's live
-/// connection via a distinct service name.
-/// Debounce for the "settings changed — reload" prompt: a burst of synced
-/// resources coalesces into a single notice.
-Timer? _settingsReloadDebounce;
-
-void _scheduleSettingsReloadNotice(PluginHandle plugin) {
-  _settingsReloadDebounce?.cancel();
-  _settingsReloadDebounce = Timer(const Duration(seconds: 3), () {
+/// Prompts a reload once per burst of settings arriving from another device.
+/// Debounced because a sync lands many resources at once and one prompt is the
+/// whole point.
+void _scheduleSettingsReloadNotice(PluginSession session, PluginHandle plugin) {
+  session.settingsReloadDebounce?.cancel();
+  session.settingsReloadDebounce = Timer(const Duration(seconds: 3), () {
     _showReloadNotice(
       plugin,
       'Settings synced from another device. Reload to apply them.',
@@ -682,9 +500,6 @@ void _scheduleSettingsReloadNotice(PluginHandle plugin) {
   });
 }
 
-/// Persistent notice with a clickable "Reload" that runs Obsidian's reload
-/// command. Falls back to a plain notice if the DOM/command wiring is
-/// unavailable (e.g. mobile has no app:reload).
 /// A notice that stays until dismissed and carries one button.
 ///
 /// Obsidian's own Notice has no such affordance, so the button is appended to
@@ -733,7 +548,12 @@ void _showReloadNotice(PluginHandle plugin, String message) =>
       },
     );
 
+/// (Re)starts `.obsidian` settings sync. Idempotent — disposes any running
+/// instance first. No-op when disabled, before the engine has an endpoint, or
+/// before a vault key is available. The config caller reuses the engine's live
+/// connection via a distinct service name.
 Future<void> _launchConfigSync({
+  required PluginSession session,
   required ISyncEngine engine,
   required IDataClient dataClient,
   required IVaultCipher cipher,
@@ -741,12 +561,29 @@ Future<void> _launchConfigSync({
   required PluginHandle plugin,
   required SettingsSyncPrefs prefs,
 }) async {
-  _stopConfigSync();
-  if (!prefs.enabled || engine is! StateSyncEngine) return;
-  if (engine.endpoint == null) return;
-  _configSyncLaunching = true;
+  // Serialised against every other launch — see [PluginSession.configSyncLaunch].
+  // The guard cannot live with the callers: there are five of them, and only
+  // the automatic re-arm ever checked.
+  final previous = session.configSyncLaunch;
+  final mine = Completer<void>();
+  session.configSyncLaunch = mine.future;
+  session.configSyncLaunching = true;
+  // A failed predecessor must not cancel this launch; it had its own caller to
+  // report to.
+  if (previous != null) await previous.catchError((_) {});
+
+  session.stopConfigSync();
+  if (!prefs.enabled || engine is! StateSyncEngine) {
+    _finishConfigSyncLaunch(session, mine);
+    return;
+  }
+  if (engine.endpoint == null) {
+    _finishConfigSyncLaunch(session, mine);
+    return;
+  }
   try {
     await _launchConfigSyncInner(
+      session: session,
       engine: engine,
       dataClient: dataClient,
       cipher: cipher,
@@ -755,19 +592,22 @@ Future<void> _launchConfigSync({
       prefs: prefs,
     );
   } finally {
-    _configSyncLaunching = false;
+    _finishConfigSyncLaunch(session, mine);
   }
 }
 
-/// True while a launch is between its stop and its start.
-///
-/// Only the AUTOMATIC re-arm consults it. An explicit relaunch — a restart, a
-/// storage change, a settings edit — must always win, because it is rebinding
-/// to something that changed; the re-arm is only there to revive a sync that
-/// nothing else will.
-bool _configSyncLaunching = false;
+/// Releases this launch's place in the queue, and the flag with it when no
+/// later launch has queued behind us.
+void _finishConfigSyncLaunch(PluginSession session, Completer<void> mine) {
+  mine.complete();
+  if (identical(session.configSyncLaunch, mine.future)) {
+    session.configSyncLaunch = null;
+    session.configSyncLaunching = false;
+  }
+}
 
 Future<void> _launchConfigSyncInner({
+  required PluginSession session,
   required StateSyncEngine engine,
   required IDataClient dataClient,
   required IVaultCipher cipher,
@@ -775,7 +615,6 @@ Future<void> _launchConfigSyncInner({
   required PluginHandle plugin,
   required SettingsSyncPrefs prefs,
 }) async {
-
   // Resolved per call, like [BlobDirSync.blobIO] just below and for the same
   // reason: the engine rebuilds its connection on reconnect, and on the
   // re-upload and restore buttons, which stop and start it from inside
@@ -799,6 +638,7 @@ Future<void> _launchConfigSyncInner({
       serviceNameOverride: StateSyncContractNames.instance('config'),
     );
   }
+
   // Plugin *code* is the one category whose bytes are measured in hundreds of
   // megabytes, so it is gated on the storage backing this vault as well as on
   // the user's own toggle.
@@ -811,9 +651,10 @@ Future<void> _launchConfigSyncInner({
   // statement about spending managed storage; it must not be able to rewrite
   // what this device is subscribed to.
   final gate = pluginCodeAvailability(
-    selfHost: _selfHostActive,
+    selfHost: session.selfHost,
     externalStorage: engine.config.externalStorageKind != null,
-    managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
+    managedStorageQuotaBytes:
+        session.plans.capabilities?.managedStorageQuotaBytes,
   );
   final categories = prefs.categories;
   final pluginCodeWanted = categories.contains(
@@ -862,7 +703,7 @@ Future<void> _launchConfigSyncInner({
     pluginCode
         .localTotalBytes(SyncedDirKind.plugin)
         .then((bytes) {
-          _pluginCodeLocalBytes = bytes;
+          session.pluginCodeLocalBytes = bytes;
         })
         .catchError((Object _) {}),
   );
@@ -907,18 +748,24 @@ Future<void> _launchConfigSyncInner({
     // Event-driven remote->local: react to another device's settings push on
     notifyEndpoint: currentEndpoint,
     notifyTopic: 'vault:${vaultId}_config',
-    onActivity: (active) => _syncIndicator?.setSettingsActivity(active),
+    onActivity: (active) {
+      // Both surfaces, from one report: the dot says whether anything is
+      // working, the panel says what. Feeding only the dot is how the panel
+      // came to say "up to date" while settings files were still moving.
+      session.indicator?.setSettingsActivity(active);
+      session.panel?.setSettingsActivity(active);
+    },
     // Obsidian doesn't hot-apply config files from disk, so a settings change
     // synced from another device lands on disk but isn't live until a reload.
     // Prompt one (debounced, one notice per burst).
-    onRemoteApplied: () => _scheduleSettingsReloadNotice(plugin),
+    onRemoteApplied: () => _scheduleSettingsReloadNotice(session, plugin),
     log: _logController.scope('settings'),
     // Share the note engine's connection-fair scheduler: settings sync runs
     // as low-priority background work that yields to interactive note sync
     // and pauses while the user is actively editing.
     runBackground: engine.scheduleBackground,
   );
-  _configSync = cs;
+  session.configSync = cs;
   try {
     await cs.start();
     _log.info('Settings sync started (${prefs.categories.length} categories)');
@@ -932,7 +779,7 @@ Future<void> _launchConfigSyncInner({
     // a failure would put an error in front of the user for a state that
     // resolves itself in seconds.
     _log.info('Settings sync deferred: the engine is between connections');
-    _stopConfigSync();
+    session.stopConfigSync();
   } catch (e, st) {
     _log.error('Settings sync start failed', error: e, stackTrace: st);
   }
@@ -947,21 +794,32 @@ class _EngineOffline implements Exception {
   String toString() => 'the engine is between connections';
 }
 
-void _stopConfigSync() {
-  _configSync?.dispose();
-  _configSync = null;
-}
-
-/// Updates the engine's reference to the auth-backed vault meta storage.
+/// Points the engine at whatever [auth] now holds, after any rebind.
 ///
-/// `metaStorage` is set once at engine construction; without this helper a
-/// post-construction sign-in (session-expired refresh, manual re-auth,
-/// onAuthChanged callback) would leave the engine with a stale null
-/// `metaStorage` and `_checkExternalBlobConfig` would silently never
-/// load the server-side external blob config.
-void _setEngineAuth(ISyncEngine engine, AuthSessionState auth) {
-  if (engine is! StateSyncEngine) return;
-  engine.metaStorage = auth.metaStorage;
+/// One call instead of the two lines that used to follow every
+/// `auth.bindAccount(...)` at eight sites, in two of which only the first line
+/// was there. Nothing was broken by that — see below — but a rule kept by hand
+/// at eight sites is not a rule.
+///
+/// The meta storage is the load-bearing half. It is set once at construction,
+/// so without this a post-construction sign-in (session-expired refresh, manual
+/// re-auth, the settings callback) leaves the engine holding a stale null and
+/// `_checkExternalBlobConfig` silently never loads the server-side blob config.
+///
+/// The config rebuild is the other half, and it is currently a no-op: the two
+/// fields `buildConfig` sets are a `MutableTokenProvider` that is one instance
+/// for the life of [AuthSessionState] (rebinding mutates it in place — that is
+/// what it is for) and a device id read once at boot. It stays because the
+/// invariant is "the engine's config is rebuilt whenever auth changes", and
+/// keeping it in one place is what makes that survive `buildConfig` ever
+/// gaining a term that does depend on auth.
+void _applyAuth(
+  ISyncEngine engine,
+  AuthSessionState auth,
+  VaultConfig Function(VaultConfig) buildConfig,
+) {
+  if (engine is StateSyncEngine) engine.metaStorage = auth.metaStorage;
+  engine.config = buildConfig(engine.config);
 }
 
 /// Opens [url] in the user's real system browser, not Obsidian's in-app Web
@@ -1085,26 +943,42 @@ Uri _resolveWasmUri() {
 ///
 /// [immediate] skips the debounce — used when the host is about to be
 /// suspended and there may be no later chance.
-Future<void> _flushDb({bool immediate = false}) async {
-  final conn = _dbConn;
-  if (conn == null) return;
+Future<void> _flushDb(PluginSession session, {bool immediate = false}) async {
+  final db = session.db;
+  if (db == null) return;
   if (immediate) {
-    _flushDebounce?.cancel();
-    _flushDebounce = null;
+    session.flushDebounce?.cancel();
+    session.flushDebounce = null;
+    final sw = Stopwatch()..start();
+    // Logged BEFORE the await as well as after, because the interesting
+    // outcome is a flush that starts and never finishes. With only the
+    // completion line, "the barrier never fired" and "the barrier is still
+    // waiting" are the same silence — and they need opposite fixes.
+    final seq = ++session.flushSeq;
+    _log.info('db flush #$seq: draining');
     try {
-      await conn.flush();
+      await db.flush();
+      sw.stop();
+      // Logged on SUCCESS, not only on failure. The failure line existed and
+      // the success line did not, so a run in which no flush ever happened and
+      // a run in which every flush succeeded produced identical silence —
+      // which is exactly the pair that had to be told apart when an
+      // interrupted sync kept starting over. Once per barrier at most, and the
+      // barriers are debounced.
+      _log.info('db flush #$seq done in ${sw.elapsedMilliseconds}ms');
     } catch (e) {
-      _log.warning('db flush failed: $e');
+      sw.stop();
+      _log.warning('db flush #$seq failed after ${sw.elapsedMilliseconds}ms: $e');
     }
     return;
   }
   // Coalesce: a sync burst emits many convergence points, and each flush only
   // waits for work queued before it — flushing per event would serialise the
   // write queue for no added durability.
-  if (_flushDebounce != null) return;
-  _flushDebounce = Timer(const Duration(seconds: 3), () {
-    _flushDebounce = null;
-    unawaited(_flushDb(immediate: true));
+  if (session.flushDebounce != null) return;
+  session.flushDebounce = Timer(const Duration(seconds: 3), () {
+    session.flushDebounce = null;
+    unawaited(_flushDb(session, immediate: true));
   });
 }
 
@@ -1121,6 +995,46 @@ Future<void> _flushDb({bool immediate = false}) async {
 /// blocking a boot over — hence the timeout and the swallowed errors. The
 /// outcome is logged because it is the first thing to check when a device
 /// keeps losing its database.
+/// Logs `navigator.storage.estimate()` — bytes used and the origin's quota.
+///
+/// A grant of persistence says the storage will not be evicted. It says
+/// nothing about how much of it is left, and those are the two different
+/// failures a full database can have. Best-effort in every direction, like
+/// the grant above: absent on old WebViews, and never worth blocking a boot.
+Future<void> _logStorageEstimate() async {
+  try {
+    final navigator = jsu.getProperty<Object?>(jsu.globalThis, 'navigator');
+    if (navigator == null) return;
+    final storage = jsu.getProperty<Object?>(navigator, 'storage');
+    if (storage == null || !jsu.hasProperty(storage, 'estimate')) {
+      _log.warning('boot: storage.estimate() unavailable');
+      return;
+    }
+    final estimate = await jsu
+        .promiseToFuture<Object?>(
+          jsu.callMethod<Object>(storage, 'estimate', const []),
+        )
+        .timeout(const Duration(seconds: 3), onTimeout: () => null);
+    if (estimate == null) {
+      _log.warning('boot: storage.estimate() timed out');
+      return;
+    }
+    final usage = jsu.getProperty<Object?>(estimate, 'usage');
+    final quota = jsu.getProperty<Object?>(estimate, 'quota');
+    final used = usage is num ? usage.toDouble() : null;
+    final cap = quota is num ? quota.toDouble() : null;
+    final pct = (used != null && cap != null && cap > 0)
+        ? (used / cap * 100).toStringAsFixed(1)
+        : '?';
+    _log.warning(
+      'boot: storage usage=$usage quota=$quota ($pct% used, '
+      'free=${cap != null && used != null ? (cap - used).round() : '?'} bytes)',
+    );
+  } catch (e) {
+    _log.warning('boot: storage.estimate() failed: $e');
+  }
+}
+
 Future<void> _requestPersistentStorage() async {
   Future<Object?> call(Object storage, String method) => jsu
       .promiseToFuture<Object?>(
@@ -1186,26 +1100,35 @@ $kSyncPanelCss
       // Pick UI strings from Obsidian's language before any UI is built.
       initLocale();
 
+      // First statement with any state in it, deliberately: everything built
+      // below is registered ON this object, so a teardown that arrives at any
+      // point finds a complete picture of what this load owns. `session` is a
+      // local, captured by every closure made here — the global slot exists
+      // only so onUnload can find it.
+      final session = PluginSession(logs: _logController);
+      _session = session;
+
       // Before the first await too, and before anything that can throw: from
       // here on the session is recorded, so a boot failure below leaves a bug
       // report that can explain itself.
-      _installPersistentLog(plugin);
+      _installPersistentLog(session, plugin);
 
       // Registered here rather than with the other commands, which live inside
       // the boot block: the reports worth the most are the ones from a boot
       // that never finished, and a command registered down there would not
       // exist in exactly that case. It degrades instead of failing — without
-      // [_reportFacts] the report carries the environment and the log, which
-      // is what such a report is for.
+      // [PluginSession.reportFacts] the report carries the environment and the
+      // log, which is what such a report is for.
       plugin.addCommand(
         id: 'rhyolite-sync-bug-report',
         name: S.bugReportCommand,
         callback: () => showBugReportModal(
           plugin,
-          buildReport: (description) => _buildBugReport(plugin, description),
+          buildReport: (description) =>
+              _buildBugReport(session, plugin, description),
           openUrl: _openExternalUrl,
           supportUrl: kSupportUrl,
-          submit: _reportSubmitter,
+          submit: session.reportSubmitter,
           log: _logController.scope('report'),
         ),
       );
@@ -1226,10 +1149,12 @@ $kSyncPanelCss
         handlingCorruption = true;
         () async {
           try {
-            await _engine?.stop();
-            await _dbConn?.close();
-            _engine = null;
-            _dbConn = null;
+            final engine = session.engine;
+            session.engine = null;
+            await engine?.stop();
+            final db = session.db;
+            session.db = null;
+            await db?.close();
           } catch (_) {}
           await showDbCorruptionModal(
             plugin,
@@ -1244,160 +1169,40 @@ $kSyncPanelCss
         () async {
           final configStorage = ObsidianConfigStorage(plugin);
 
-          // Before anything that reads the plan. The size gate and the
-          // plugin-code storage gate both run during boot, and both would
-          // otherwise spend the whole session on "no answer" whenever the
-          // subscription lookup below is slow or fails.
-          _plan = await configStorage.loadPlan();
-          // Held apart from _plan, which the first successful lookup
-          // overwrites. A lapse is only visible as the difference between the
-          // two, so this side of the comparison has to outlive the refresh.
-          _rememberedPlan = _plan;
+          // Auth, edition and the stored session, in one phase that knows
+          // nothing about Obsidian — see [bootstrapAuth]. Everything it needs
+          // from `data.json` is named by [AuthBootStorage], which
+          // ObsidianConfigStorage satisfies.
+          final booted = await bootstrapAuth(
+            storage: configStorage,
+            accountServiceUrl: kEnv.accountServiceUrl,
+            managedSyncUrl: kEnv.syncServiceUrl,
+            log: _log,
+            registryLog: _logController.scope('registry'),
+          );
+          final auth = booted.auth;
+          final accountClient = booted.accountClient;
+          final authConfig = booted.authConfig;
+          final syncServerUrl = booted.syncServerUrl;
+          final selfHostActive = booted.selfHostActive;
 
-          // -----------------------------------------------------------------------
-          // Self-host mode: point the plugin at a self-hosted sync server with a
-          // static bearer token, bypassing the managed account service entirely.
-          // -----------------------------------------------------------------------
-          final selfHost = await configStorage.loadSelfHost();
-          final selfHostToken = selfHost.enabled
-              ? (await configStorage.loadSelfHostToken() ?? '')
-              : '';
-          final selfHostActive =
-              selfHost.enabled &&
-              selfHost.syncUrl.isNotEmpty &&
-              selfHostToken.isNotEmpty;
-          _selfHostActive = selfHostActive;
+          session.selfHost = selfHostActive;
+          session.plans.selfHost = selfHostActive;
+          // Seeds both sides of the tracker before anything reads a plan: the
+          // first successful lookup overwrites one of them, and a lapse is
+          // only visible as the difference between the two.
+          session.plans.seed(booted.cachedPlan);
+          // Self-host only, and null otherwise. Owned for the load and given
+          // back with it; before the session existed this was a local nothing
+          // closed.
+          session.registryConnection = booted.registryConnection;
 
           // From the remembered plan alone, before any lookup. A paused vault
           // never reaches startSyncSession and an offline one gets nothing back
           // from it, and both are cases where a lapse that was already recorded
-          // still needs saying — a period ends on its date regardless.
-          _refreshPlanNotice();
-
-          // Server URL: self-host overrides the compile-time managed sync URL.
-          final syncServerUrl = selfHostActive
-              ? selfHost.syncUrl
-              : kEnv.syncServiceUrl;
-
-          // Session bindings (token provider, vault directory, meta store) for
-          // whichever edition is active. ONE instance, read back through
-          // `auth.*` everywhere — never copied into a local, or a later
-          // sign-in updates one copy and the rest of the plugin keeps acting
-          // signed out. See [AuthSessionState].
-          final auth = AuthSessionState(selfHost: selfHostActive);
-          WebSocketSyncConnection? registryConn; // self-host: kept alive
-
-          // -----------------------------------------------------------------------
-          // Auth — account service URL comes from compile-time dart-define only.
-          // -----------------------------------------------------------------------
-          final authConfig = AuthConfig(
-            accountServiceUrl: kEnv.accountServiceUrl,
-          );
-
-          final accountTransport = RpcHttpCallerTransport(
-            baseUrl: authConfig.accountServiceUrl,
-          );
-          final accountEndpoint = RpcCallerEndpoint(
-            transport: accountTransport,
-          );
-          final accountClient = RpcAccountClient(accountEndpoint);
-          // Persist every server-issued session (sign-in + every background
-          // refresh). The server rotates the refresh token on each refresh, so
-          // without this the on-disk token goes stale within ~15 min and the
-          // next cold start is forced to re-login with a revoked token.
-          accountClient.onSessionPersist = configStorage.saveAuthSession;
-
-          // Boot-time session restore. The result is handed to `auth` below —
-          // this local exists only for the length of that restore.
-          RpcAccountClient? restoredClient;
-
-          if (!selfHostActive && authConfig.isConfigured) {
-            final savedSession = await configStorage.loadAuthSession();
-            if (savedSession != null) {
-              if (!savedSession.isExpired) {
-                accountClient.useSession(savedSession);
-                restoredClient = accountClient;
-              } else {
-                // Access token expired (they live 15 minutes, so this is the
-                // normal cold-start path) — refresh it.
-                try {
-                  accountClient.useSession(savedSession);
-                  // Bounded: onLoad must never hang on the network. A timeout
-                  // is not a verdict, and the catch below treats every
-                  // non-refusal as inconclusive — the session is kept and the
-                  // token provider refreshes again on first use. Without this
-                  // an unreachable account service held the whole plugin load
-                  // open for the HTTP stack's own timeout.
-                  await accountClient.refreshSession().timeout(
-                    const Duration(seconds: 8),
-                  );
-                  final newSession = accountClient.session;
-                  if (newSession != null) {
-                    await configStorage.saveAuthSession(newSession);
-                  }
-                  restoredClient = accountClient;
-                } catch (e) {
-                  // Only a refusal the server actually issued discards the
-                  // session. Matching on '(401)' used to stand in for that,
-                  // and never matched anything: the transport reports
-                  // `HTTP 401 from <path>` and an RPC-level refusal arrives
-                  // as `unauthenticated: ...`.
-                  if (classifyRefreshFailure(e) == RefreshOutcome.refused) {
-                    _log.warning(
-                      'Stored session refused by the server — '
-                      'cleared: $e',
-                    );
-                    await configStorage.clearAuthSession();
-                  } else {
-                    // Offline at boot, or an answer we never got. Keep the
-                    // session: the provider refreshes again on first use, and
-                    // on a timeout the very same refresh is still in flight —
-                    // `ensureValidToken` joins it rather than starting a second
-                    // one against a single-use token.
-                    //
-                    // Deliberately NOT re-applying `savedSession` here. It was
-                    // already applied above, before the attempt, so the only
-                    // thing a second `useSession` can do is overwrite a NEWER
-                    // session that the in-flight refresh has meanwhile stored —
-                    // leaving the client holding a refresh token the server has
-                    // already revoked, i.e. a forced logout on the next call.
-                    _log.warning(
-                      'Boot refresh inconclusive — keeping the '
-                      'stored session: $e',
-                    );
-                    restoredClient = accountClient;
-                  }
-                }
-              }
-            }
-          }
-
-          // Bind the vault directory + engine auth to the active edition.
-          if (selfHostActive) {
-            auth.bindSelfHostToken(selfHostToken);
-            registryConn = WebSocketSyncConnection(
-              serverUrl: syncServerUrl,
-              tokenProvider: auth.tokenProvider,
-              logger: _logController.scope('registry'),
-            );
-            try {
-              // Bounded: onLoad must never hang on a stalled connect, or the
-              // rest of onLoad (settings tab, commands, engine) never runs and
-              // the settings page shows up blank.
-              await registryConn.connect().timeout(const Duration(seconds: 10));
-              final regCaller = VaultRegistryContractCaller(
-                registryConn.endpoint,
-              );
-              auth.bindSelfHostRegistry(
-                directory: SelfHostVaultDirectory(regCaller),
-                metaStorage: SelfHostVaultMetaStorage(regCaller),
-              );
-            } catch (e) {
-              _log.warning('Self-host registry connect failed: $e');
-            }
-          } else {
-            auth.bindAccount(restoredClient);
-          }
+          // still needs saying — a period ends on its date regardless. Left
+          // here rather than inside the phase: announcing is UI.
+          _refreshPlanNotice(session);
 
           // -----------------------------------------------------------------------
           // Vault
@@ -1429,11 +1234,13 @@ $kSyncPanelCss
           // behind them ([SyncStartBlock.noVault], [SyncStartBlock.locked]),
           // which the user opens when they choose to rather than being
           // ambushed by a modal while Obsidian is still starting.
-          final booted = config;
-          final bootedToken = booted?.verificationToken;
-          if (booted != null && bootedToken != null && bootedToken.isNotEmpty) {
+          final bootedConfig = config;
+          final bootedToken = bootedConfig?.verificationToken;
+          if (bootedConfig != null &&
+              bootedToken != null &&
+              bootedToken.isNotEmpty) {
             cipher = await configStorage.tryUnlockFromStorage(
-              booted.vaultId,
+              bootedConfig.vaultId,
               bootedToken,
             );
           }
@@ -1469,9 +1276,11 @@ $kSyncPanelCss
           _log.info('boot: loadData ${bootSw.elapsedMilliseconds}ms');
           final dbSuffix =
               (raw as Map<Object?, Object?>?)?['dbSuffix'] as String? ?? '';
-          final suffix = dbSuffix.isNotEmpty ? '-$dbSuffix' : '';
-          dbFileName = '$vaultId$suffix.db';
-          dbName = 'rhyolite-$vaultId$suffix';
+          final names = DatabaseNames.forVault(vaultId, suffix: dbSuffix);
+          // The corruption modal tells the user which file to remove, and it
+          // is registered outside this block, so the names have to reach it.
+          dbFileName = names.fileName;
+          dbName = names.databaseName;
 
           // .obsidian settings sync preferences (opt-in; default off).
           var settingsPrefs = SettingsSyncPrefs.fromData(raw);
@@ -1490,74 +1299,18 @@ $kSyncPanelCss
 
           // User-requested sync pause (from the side panel). Gates the boot
           // start below; the panel toggles it live.
-          _syncPaused = raw is Map && raw['syncPaused'] == true;
+          session.syncPaused = raw is Map && raw['syncPaused'] == true;
 
-          // Ask for a durable storage bucket BEFORE the database is opened.
-          // Everything this plugin persists — FileState registers, the pull
-          // cursor, Fugue trees, the local blob cache — lives in one SQLite
-          // file on OPFS (IndexedDB fallback), i.e. in WebView origin storage.
-          // Without a persistence grant that storage is best-effort and the OS
-          // is free to evict it while Obsidian sits unused; the next launch
-          // then starts from cursor 0 and re-downloads the whole vault.
-          await _requestPersistentStorage();
-
-          // Open the database, refusing the library's silent in-memory
-          // fallback. In-memory looks exactly like a working-but-empty
-          // database: sync would run, pull the entire vault from cursor 0,
-          // write everything into RAM, and do it all again on the next launch
-          // — without a single line saying why. Better to know.
-          //
-          // Not fatal, though: on a device that genuinely has neither OPFS nor
-          // IndexedDB, refusing to open at all would just mean no sync. So the
-          // second attempt takes the fallback deliberately, with the user
-          // warned that nothing will persist past this session.
-          DatabaseConnection dbConn;
-          try {
-            dbConn = await openFileDb(
-              options: SqliteConnectionOptions(
-                webDatabaseName: dbName,
-                webFileName: dbFileName,
-                webSqliteWasmUri: wasmUri,
-                webRequireDurableStorage: true,
-              ),
-            );
-          } on DurableWebStorageUnavailable catch (e) {
-            _log.error('boot: no durable storage for the sync database: $e');
-            showNotice(S.noDurableStorageNotice);
-            dbConn = await openFileDb(
-              options: SqliteConnectionOptions(
-                webDatabaseName: dbName,
-                webFileName: dbFileName,
-                webSqliteWasmUri: wasmUri,
-              ),
-            );
-          }
-          _dbConn = dbConn;
-          _log.info('boot: openFileDb ${bootSw.elapsedMilliseconds}ms');
-
-          // Set up database logger
-          final dataRepository = SqliteDataRepository(
-            storage: SqliteDataStorageAdapter.connection(dbConn),
+          final opened = await openVaultDatabase(
+            names: names,
+            wasmUri: wasmUri,
+            requestPersistence: _requestPersistentStorage,
+            onFallback: (_) => showNotice(S.noDurableStorageNotice),
+            log: _log,
           );
-          // Serialised at the point of construction, so every store the engine
-          // builds and settings sync on top all share one queue.
-          //
-          // They are separate objects over ONE SQLite connection, and a
-          // connection cannot hold two transactions: overlapping callers get
-          // `cannot start a transaction within a transaction` on BEGIN and
-          // then SQL-logic errors on COMMIT as they unwind over each other. No
-          // store can fix that for itself, which is why the wrapper goes here
-          // rather than inside the engine — the engine does not own everything
-          // that writes.
-          final dataClient = SerialisedDataClient(
-            IDataClient.repository(repository: dataRepository),
-          );
-          // Database logging removed during logger migration
-
-          final blobRepo = SqliteBlobRepository.db(
-            dbConn.database,
-            enableWal: false,
-          );
+          session.db = opened.db;
+          final dataClient = opened.db.dataClient;
+          final blobRepo = opened.db.blobRepository;
 
           String platformTag;
           bool isMobile = false;
@@ -1572,55 +1325,128 @@ $kSyncPanelCss
           // the OS (iOS/Android/desktop) so the collector can tell devices
           // apart — the bug this exists to debug is device-specific. Off unless
           // the user enabled it; re-applied live from the settings tab.
-          _diagnostics = DiagnosticsLogging(
+          session.diagnostics = DiagnosticsLogging(
             controller: _logController,
             baselineLevel: _baselineLogLevel,
             log: _log,
             device: () => DeviceInfo(
               name: cfg.vaultName.isNotEmpty ? cfg.vaultName : 'Obsidian',
               app: 'rhyolite_sync',
-              os: _diagnosticsOs(isMobile),
+              os: diagnosticsOs(isMobile),
             ),
           );
-          _diagnostics!.apply(diagnosticsPrefs);
+          session.diagnostics!.apply(diagnosticsPrefs);
 
-          // On mobile (Obsidian iOS/Android) RAM is tight. StartupDiff
-          // holds N × file_bytes in memory while uploading; with large
-          // attachments (PDFs, attachments in MB range) concurrency=4
-          // can OOM the host process. Cap to 2 on mobile.
-          final startupUploadConcurrency = isMobile ? 2 : 4;
+          // How long the open took, restated where it can be heard.
+          //
+          // `openVaultDatabase` logs this itself, and that line has never once
+          // reached a collector: it is written before the sink above exists,
+          // and the controller has no replay. The plan item asking how 44
+          // seconds divides between the persistence grant and the open itself
+          // was not missing instrumentation — it was reading a line that never
+          // left the device. (First answer once it did: all of it is the open.
+          // The grant costs nothing.)
+          _log.info(
+            'boot: openFileDb ${opened.totalMs}ms '
+            '(persist ${opened.persistMs}ms, open ${opened.openMs}ms, '
+            'durable ${opened.durable})',
+          );
 
-          // Plugin version (from the Obsidian manifest) + client kind, reported
-          // with this device's head so the device-management UI and support can
-          // tell devices/versions apart. Best-effort — empty on any failure.
-          String pluginVersion = '';
+          // WHICH BUILD IS THIS. Nothing in the log said, and answering it
+          // once took reconstructing a timeline from commit timestamps against
+          // session start times to find out whether a fix under test was even
+          // present. Every "did that land?" question starts here, so it is the
+          // first thing said after the sink exists.
+          _log.info(
+            'boot: plugin ${pluginVersion(plugin)} '
+            '${selfHostActive ? 'selfhost' : 'managed'} '
+            '${isMobile ? 'mobile' : 'desktop'}',
+          );
+
+          // Which VFS, because it decides whether flush() does anything —
+          // see [GatedDatabase.storageKind].
           try {
-            final manifest = jsu.getProperty<JSObject?>(plugin.raw, 'manifest');
-            if (manifest != null) {
-              pluginVersion =
-                  jsu.getProperty<String?>(manifest, 'version') ?? '';
+            _log.info('boot: storage ${await session.db?.storageKind()}');
+          } catch (e) {
+            _log.warning('boot: storage kind unavailable: $e');
+          }
+
+          // Can this database be flushed AT ALL?
+          //
+          // Twenty-three flushes across two sessions started and not one
+          // finished, which is not what a queue that is merely behind looks
+          // like. The VFS runs its work items strictly one at a time and
+          // re-arms itself on completion, so a single item that never
+          // completes stalls the chain permanently and every later flush waits
+          // forever behind it.
+          //
+          // Asked here because here is the only moment nothing else is
+          // running: no pull, no settings sync, one statement's worth of
+          // writes. A flush that cannot complete HERE is broken outright, and
+          // no amount of scheduling barriers elsewhere can matter.
+          unawaited(() async {
+            final sw = Stopwatch()..start();
+            try {
+              await session.db?.flush().timeout(const Duration(seconds: 10));
+              _log.info('boot: flush probe ok in ${sw.elapsedMilliseconds}ms');
+            } catch (e) {
+              _log.error(
+                'boot: flush probe DID NOT COMPLETE in '
+                '${sw.elapsedMilliseconds}ms — durability barriers cannot '
+                'work on this database: $e',
+              );
             }
-          } catch (_) {}
-          final clientKind = selfHostActive ? 'obsidian-selfhost' : 'obsidian';
+          }());
+
+          // Clear out the change feed earlier builds wrote.
+          //
+          // Nothing writes it any more, but nothing deleted what was already
+          // there either, and on one vault that was 106.5 MB — most of the
+          // live database. Compacting alone would have kept every row of it:
+          // VACUUM packs a database, it does not prune one.
+          //
+          // Before the size is reported below, so the number the user is shown
+          // is the one they can act on.
+          try {
+            final freed = await session.db!.dropLegacyChangeJournal();
+            if (freed != null && freed > 0) {
+              _log.warning(
+                'Dropped the local change journal — $freed pages freed. '
+                'Nothing read it; compacting now returns them to the disk.',
+              );
+            }
+          } catch (e) {
+            _log.warning('boot: could not drop the change journal: $e');
+          }
+
+          // What this vault's database looks like, every boot — and the same
+          // reason for being here rather than at the open.
+          try {
+            _log.info(await session.db!.describe());
+          } catch (e) {
+            _log.warning('boot: could not describe the database: $e');
+          }
+
+          // And how much room the origin has left, which the database's own
+          // size cannot tell you. Two different ways to run out.
+          await _logStorageEstimate();
 
           // One scheduler for the whole plugin: the engine's sync work and the
           // lifecycle boot/restart work below share it (see [_scheduleBoot]).
           final scheduler = PriorityTaskScheduler(
             onError: (e, _) => _log.warning('scheduler task error: $e'),
           );
-          _scheduler = scheduler;
+          session.scheduler = scheduler;
 
-          final ISyncEngine engine = StateSyncEngine(
-            vaultPath: '',
+          // The graph itself — see [buildSyncEngine]. Every Obsidian-facing
+          // part is passed in from here, which is what lets a test assemble the
+          // same engine.
+          final built = buildSyncEngine(
             serverUrl: syncServerUrl,
-            config: activeConfig.copyWith(
-              clientName: 'Obsidian/$platformTag',
-              clientVersion: pluginVersion,
-              clientKind: clientKind,
-            ),
+            config: activeConfig,
             cipher: cipher,
             dataClient: dataClient,
-            blobStore: LocalBlobStore(blobRepo),
+            blobRepository: blobRepo,
             io: ObsidianIO(plugin.app.vault),
             changeProvider: ObsidianChangeProvider(
               plugin,
@@ -1628,50 +1454,33 @@ $kSyncPanelCss
             ),
             metaStorage: auth.metaStorage,
             httpClient: ObsidianHttpClient(),
-            logger: _logController.scope('engine'),
-            rejectionFactory: pluginRejectionFactory,
-            startupUploadConcurrency: startupUploadConcurrency,
             scheduler: scheduler,
-            // The managed per-file size limit only applies to managed storage —
-            // not BYO/external, where we never see the bytes. Callback so a
-            // tier change is picked up without reconstructing the engine.
-            //
-            // Keyed on the non-secret marker: the credentials are never
-            // persisted, so this snapshot has `externalBlobConfig == null` even
-            // on a BYO vault, and asking it applied the managed plan's
-            // per-file cap to storage the plan does not govern.
-            maxFileSizeBytes: () => activeConfig.externalStorageKind != null
-                ? null
-                : _capabilities?.maxFileSizeBytes,
-            // Per-device denylist, read live so a settings change is picked up
-            // on the next reconcile without reconstructing the engine.
+            logger: _logController.scope('engine'),
+            isMobile: isMobile,
+            platformTag: platformTag,
+            clientVersion: pluginVersion(plugin),
+            selfHost: selfHostActive,
+            plans: session.plans,
+            configSync: () => session.configSync,
+            settingsSyncEnabled: () => settingsPrefs.enabled,
             excludedExtensions: () => fileFilterPrefs.excludedExtensions,
-            // Per-device folder filter, same live-read contract. Narrowing
-            // takes effect on the next reconcile; widening needs the restart
-            // the settings callback performs.
             pathScope: () => fileFilterPrefs.pathScope,
+            // Resolved per call rather than captured: `session.db` is replaced
+            // on a recovery reopen, and a captured handle would go on measuring
+            // and flushing a database nobody is writing to any more.
+            databaseBytes: () async => (await session.db?.stats())?.fileBytes,
+            flushDatabase: () => _flushDb(session, immediate: true),
           );
-          _engine = engine;
-          // Settings sync stores plugin-code blobs in the SAME local cache
-          // under the same vaultId, but the engine's blob GC builds its live
-          // set from notes alone — without this hook it evicts every plugin
-          // blob on the next housekeeping pass. Null while settings sync is
-          // enabled but not yet loaded: the GC then skips rather than guesses.
-          if (engine is StateSyncEngine) {
-            engine.siblingLiveBlobIds = () {
-              if (!settingsPrefs.enabled) return const <String>{};
-              final cs = _configSync;
-              return cs == null ? null : cs.liveBlobIds();
-            };
-          }
+          final ISyncEngine engine = built.engine;
+          session.engine = engine;
           _log.info('boot: engine ctor ${bootSw.elapsedMilliseconds}ms');
 
-          _reportPathSalt = cfg.vaultId;
+          session.reportPathSalt = cfg.vaultId;
 
           // Uploading needs an account service and a session; self-host has
           // neither. Read live through `auth`, so signing in later enables it
           // without rebuilding anything.
-          _reportSubmitter = selfHostActive
+          session.reportSubmitter = selfHostActive
               ? null
               : (archive, description) async {
                   final client = auth.client;
@@ -1681,7 +1490,7 @@ $kSyncPanelCss
                   return client.submitReport(
                     archiveBase64: base64Encode(archive),
                     description: description,
-                    pluginVersion: pluginVersion,
+                    pluginVersion: pluginVersion(plugin),
                     platform: platformTag,
                   );
                 };
@@ -1689,14 +1498,14 @@ $kSyncPanelCss
           // during boot have not been formatted yet, so they get pseudonymised
           // too — that is the whole reason the sink holds records rather than
           // lines.
-          _logSink?.redactor = DiagnosticRedactor(salt: cfg.vaultId);
+          session.logSink?.redactor = DiagnosticRedactor(salt: cfg.vaultId);
 
           // Everything a report needs that only this block knows. A closure
           // over the boot locals rather than a snapshot: the prefs below are
           // reassigned live from the settings tab, and a report is worth
           // having only if it describes the state the user is actually in.
-          _reportFacts = () {
-            final stats = _engine?.statsSnapshot();
+          session.reportFacts = () {
+            final stats = session.engine?.statsSnapshot();
             final scope = fileFilterPrefs.pathScope;
             // Folder filters are known to be paths, so they go through
             // redactPath directly. The text scanner would miss a top-level
@@ -1711,8 +1520,11 @@ $kSyncPanelCss
                 BugReportSection.compact('Account', [
                   ('Signed in', auth.client?.email != null ? 'yes' : 'no'),
                   ('Email', auth.client?.email),
-                  ('Plan', _plan?.status.name),
-                  ('Plan ends', _plan?.periodEnd?.toUtc().toIso8601String()),
+                  ('Plan', session.plans.current?.status.name),
+                  (
+                    'Plan ends',
+                    session.plans.current?.periodEnd?.toUtc().toIso8601String(),
+                  ),
                 ]),
               BugReportSection.compact('Vault', [
                 ('Name', cfg.vaultName),
@@ -1725,8 +1537,8 @@ $kSyncPanelCss
                 ('Database', dbName),
               ]),
               BugReportSection.compact('Sync state', [
-                ('Engine', _engine != null ? 'built' : 'absent'),
-                ('Paused by user', _syncPaused ? 'yes' : 'no'),
+                ('Engine', session.engine != null ? 'built' : 'absent'),
+                ('Paused by user', session.syncPaused ? 'yes' : 'no'),
                 // A stopped engine has no store to read, and a report is
                 // written about a stopped engine almost by definition — one
                 // arrived with this whole section blank. It now carries the
@@ -1769,6 +1581,7 @@ $kSyncPanelCss
           Future<void> relaunchConfigSync() async {
             if (cipher == null) return;
             await _launchConfigSync(
+              session: session,
               engine: engine,
               dataClient: dataClient,
               cipher: cipher!,
@@ -1784,15 +1597,15 @@ $kSyncPanelCss
           // `engine.config` alone leaves the live socket authenticating as
           // whoever (or whatever) opened it.
           Future<void> restartForAuth() async {
-            await _scheduleBoot((token) async {
+            await _scheduleBoot(session, (token) async {
               await engine.stop();
-              await _guardedStart(engine, token);
+              await _guardedStart(session, engine, token);
             });
             await relaunchConfigSync();
             // A sign-in that can't start the engine yet (no vault picked) emits
             // no engine events, so the panel would keep showing "not signed in"
             // until its 30s tick.
-            _syncPanel?.refresh();
+            session.panel?.refresh();
           }
 
           // Starts a full sync session: cache plan caps (the size gate needs
@@ -1804,18 +1617,21 @@ $kSyncPanelCss
               final sub = await accountClient.getSubscription().timeout(
                 const Duration(seconds: 5),
               );
-              await _rememberPlan(sub, configStorage);
+              await _rememberPlan(session, sub, configStorage);
             } catch (e) {
               // Keep whatever we already know — the cached answer loaded at
               // boot, or a fresher one from earlier this session. Overwriting
               // it with null is what made a slow network look like a downgrade.
               _log.info(
                 'Subscription lookup failed, using last known plan '
-                '(${_capabilities?.toString() ?? "none cached"}): $e',
+                '(${session.plans.capabilities?.toString() ?? "none cached"}): $e',
               );
             }
-            _refreshPlanNotice();
-            await _scheduleBoot((token) => _guardedStart(engine, token));
+            _refreshPlanNotice(session);
+            await _scheduleBoot(
+              session,
+              (token) => _guardedStart(session, engine, token),
+            );
             await relaunchConfigSync();
             await _adoptDeviceId(engine, configStorage);
           }
@@ -1825,11 +1641,11 @@ $kSyncPanelCss
           // the two surfaces are the same action. Pausing persists + stops;
           // resuming persists + runs the full start session.
           Future<void> setSyncPaused(bool paused) async {
-            _syncPaused = paused;
+            session.syncPaused = paused;
             await configStorage.savePaused(paused);
             if (paused) {
-              _cancelSelfHeal();
-              _stopConfigSync();
+              _cancelSelfHeal(session);
+              session.stopConfigSync();
               await engine.stop();
             } else {
               await startSyncSession();
@@ -1873,7 +1689,7 @@ $kSyncPanelCss
               'Session refused by the server — signing out: $reason',
             );
             auth.bindAccount(null);
-            _setEngineAuth(engine, auth);
+            _applyAuth(engine, auth, buildConfig);
             unawaited(
               configStorage.clearAuthSession().catchError(
                 (Object e) => _log.warning('Clearing session failed: $e'),
@@ -1882,12 +1698,12 @@ $kSyncPanelCss
             // Stop rather than let the reconnect ladder grind: nothing it can
             // do will authenticate, and every retry costs a full refresh
             // round-trip before failing.
-            _cancelSelfHeal();
-            _stopConfigSync();
-            unawaited(_scheduleBoot((_) => engine.stop()));
+            _cancelSelfHeal(session);
+            session.stopConfigSync();
+            unawaited(_scheduleBoot(session, (_) => engine.stop()));
             // The settings tab rebuilds on every open and reads auth live, so
             // it needs no nudge — the panel is the one holding a stale render.
-            _syncPanel?.refresh();
+            session.panel?.refresh();
             showNotice(
               S.syncNotStartedNotice(S.blockedSignedOut),
               timeoutMs: 12000,
@@ -1908,9 +1724,9 @@ $kSyncPanelCss
             // No address to sync with, whichever edition this is.
             if (syncServerUrl.isEmpty) return SyncStartBlock.noServer;
             if (selfHostActive) {
-              // Self-host has no account: a URL and a token are all it needs.
-              if (selfHostToken.isEmpty) return SyncStartBlock.noServer;
-            } else if (selfHost.enabled) {
+              // Self-host has no account: a URL and a token are all it needs,
+              // and `selfHostActive` already means it has both.
+            } else if (booted.selfHostEnabled) {
               // Self-host switched on but not usable (missing URL or token) —
               // it never fell back to managed, so say what's actually wrong.
               return SyncStartBlock.noServer;
@@ -1932,7 +1748,8 @@ $kSyncPanelCss
             if (engine.cipher == null) return SyncStartBlock.locked;
             // Last, because everything above is a reason we could not even try.
             // This one means we tried and the storage said no.
-            if (_storageRefused) return SyncStartBlock.storageRefused;
+            if (session.recovery.storageRefused)
+              return SyncStartBlock.storageRefused;
             return null;
           }
 
@@ -1975,7 +1792,7 @@ $kSyncPanelCss
           final byo = activeConfig.externalStorageKind != null;
           final String backendLabel;
           if (selfHostActive) {
-            final host = Uri.tryParse(selfHost.syncUrl)?.host;
+            final host = Uri.tryParse(booted.selfHostUrl)?.host;
             backendLabel = (host != null && host.isNotEmpty)
                 ? 'Self-host · $host'
                 : 'Self-host';
@@ -1991,9 +1808,13 @@ $kSyncPanelCss
           // Docked right-side panel: live status, one-tap sync, and the
           // over-time warnings (size-blocked files, lossy conflicts) that
           // don't fit the status-bar dot. The indicator's tap reveals it.
-          // A soft restart re-runs this boot; drop the prior instance's engine
-          // subscription first (registerView itself is idempotent, see below).
-          _syncPanel?.dispose();
+          //
+          // Belt and braces. This block runs once per session object, so there
+          // is nothing here to drop — it used to read the global slot, where a
+          // reload really could leave the previous load's panel. Kept because
+          // a null check costs nothing and a second panel costs the user a
+          // duplicate sidebar entry. (registerView itself is idempotent.)
+          session.panel?.dispose();
           final syncPanel = SyncPanel(
             plugin: plugin,
             engine: engine,
@@ -2018,7 +1839,7 @@ $kSyncPanelCss
               jsu.callMethod<void>(setting, 'openTabById', ['rhyolite-sync']);
             },
             onBrowseVersions: () => showFileVersionModal(plugin, engine),
-            isPaused: () => _syncPaused,
+            isPaused: () => session.syncPaused,
             onSetPaused: setSyncPaused,
             // Turns "sync stopped / not connected" into the actual missing
             // step, with the button that performs it.
@@ -2036,15 +1857,24 @@ $kSyncPanelCss
             onFetchUsage: (selfHostActive || byo)
                 ? null
                 : () => _fetchVaultUsage(engine, vaultId),
-            onSettingsSize: () => SettingsStore(
-              client: dataClient,
-              vaultId: vaultId,
-            ).approxTotalBytes(),
+            // Null while settings sync is still coming up, so the tile can
+            // say "still asking" rather than "switched off" — they look the
+            // same and only one of them is worth acting on.
+            onSettingsCategories: () => session.configSync?.enabledCategoryCount,
+            onPluginSyncEnabled: () => session.configSync?.pluginCodeEnabled,
+            // Read live rather than remembered from a push, so a panel opened
+            // mid-sync starts with the truth instead of with false.
+            onSettingsBusy: () =>
+                session.configSync?.hasOutstandingWork ?? false,
             onPluginStats: () async {
-              final o = await _configSync?.pluginOverview();
-              return o == null || o.isEmpty
-                  ? null
-                  : (count: o.count, bytes: o.totalBytes);
+              // Null means "cannot answer yet", and ONLY that. An empty
+              // overview is an answer — no plugins are synced — and folding
+              // the two together is what made the tile show a dash for the
+              // first seconds and the real figure eight seconds later: the
+              // panel took "not ready" for "nothing here" and stopped
+              // treating itself as loading.
+              final o = await session.configSync?.pluginOverview();
+              return o == null ? null : (count: o.count, bytes: o.totalBytes);
             },
             // The user answers the vanished-files question; the engine only
             // ever reported it.
@@ -2057,7 +1887,12 @@ $kSyncPanelCss
                 showNotice(S.reclaimFailed(e));
               }
             },
+            // The panel cannot reach the database — the handle does not leave
+            // GatedDatabase — so the numbers and the action are handed in.
+            onDatabaseStats: () async => session.db?.stats(),
+            onCompactDatabase: () => _compactDatabase(session),
             onStorageDetails: () => _showStorageOverview(
+              session,
               plugin,
               engine,
               fetchUsage: (selfHostActive || byo)
@@ -2070,14 +1905,14 @@ $kSyncPanelCss
                 ? null
                 : _openSubscriptionPage,
           )..register();
-          _syncPanel = syncPanel;
+          session.panel = syncPanel;
           // The panel is built after the boot lookup may already have run.
-          syncPanel.setPlanNotice(_planAlert);
+          syncPanel.setPlanNotice(session.plans.notice);
 
           // Single indicator, surface picks itself by platform:
           // status bar on desktop, floating pill on mobile. Tap reveals
           // the docked panel.
-          _syncIndicator = SyncStatusIndicator(
+          session.indicator = SyncStatusIndicator(
             plugin: plugin,
             engine: engine,
             logger: _logController.scope('plugin'),
@@ -2085,6 +1920,11 @@ $kSyncPanelCss
             // In offline/error/auth-expired the tap forces a recovery instead of
             // just opening the panel (see recover assignment below).
             onReconnect: () => unawaited(recover?.call(requireVisible: false)),
+            // Same source as the panel, read at the same moments. Both used to
+            // hold a value pushed on transitions, and whichever was built
+            // after the last one held the wrong half of it.
+            settingsBusy: () =>
+                session.configSync?.hasOutstandingWork ?? false,
           )..init();
 
           // The settings notify subscription is an in-flight call too, so it
@@ -2092,8 +1932,8 @@ $kSyncPanelCss
           // every (re)connect; reissue the config notify + catch-up pull. The
           // first SyncConnected fires before config sync is launched, so the
           // null-guard makes it a no-op then and a real reissue on reconnects.
-          _configReconnectSub = engine.events.listen((e) {
-            if (e is SyncConnected) _configSync?.handleReconnect();
+          session.configReconnectSub = engine.events.listen((e) {
+            if (e is SyncConnected) session.configSync?.handleReconnect();
           });
 
           // The sync database was there yesterday and is gone today (evicted
@@ -2101,23 +1941,24 @@ $kSyncPanelCss
           // itself, but the user sees the whole vault download again and, if a
           // delete made here never reached the server, that file back on disk.
           // Tell them what happened instead of leaving it as a mystery.
-          _stateLostSub = engine.events.listen((e) {
+          session.stateLostSub = engine.events.listen((e) {
             if (e is! SyncLocalStateLost) return;
             _log.warning('Local sync state lost — device ${e.deviceId}');
             showNotice(S.localStateLostNotice);
           });
 
-          // Durability barriers at the engine's convergence points. These are
-          // the events emitted right after the store persists (the puller
-          // writes meta, then emits SyncCursorAdvanced), so a flush here means
-          // an abrupt kill costs at most the last few seconds of sync rather
-          // than everything since the last clean unload.
-          _flushSub = engine.events.listen((e) {
-            if (e is SyncCursorAdvanced ||
-                e is SyncFilePushed ||
-                e is SyncStartupBlobUploadDone) {
-              unawaited(_flushDb());
-            }
+          // Durability barriers at the engine's convergence points, so an
+          // abrupt kill costs at most the last few seconds of sync rather than
+          // everything since the last clean unload. Which events qualify is a
+          // rule that has been wrong twice — see [isDurabilityBarrier], where
+          // it is written down and tested.
+          //
+          // The barriers on `pagehide`/`visibilitychange` do not make these
+          // optional. They are `unawaited` and cannot hold the WebView open, so
+          // a queue holding a whole pull has no chance of draining there. A
+          // barrier is only as good as how little it has left to do.
+          session.flushSub = engine.events.listen((e) {
+            if (isDurabilityBarrier(e)) unawaited(_flushDb(session));
           });
 
           // Permanent-delete propagation. When another device permanently
@@ -2128,7 +1969,7 @@ $kSyncPanelCss
           // untouched (matches the initiating device). We act only on an
           // explicit tombstone, never on mere absence (which could be a
           // transient list failure or an access change).
-          _deletedVaultWatchSub = engine.events.listen((e) async {
+          session.deletedVaultWatchSub = engine.events.listen((e) async {
             if (e is! SyncConnected) return;
             final connectedVaultId = engine.config.vaultId;
             final d = auth.directory;
@@ -2146,7 +1987,7 @@ $kSyncPanelCss
               '— dropping it locally (files on disk untouched)',
             );
             engine.cipher = null;
-            await _scheduleBoot((_) async {
+            await _scheduleBoot(session, (_) async {
               await engine.stop();
               try {
                 await engine.wipeLocalState();
@@ -2206,7 +2047,7 @@ $kSyncPanelCss
             // If this device had that vault connected, clear its local state.
             if (engine.config.vaultId == vaultId) {
               engine.cipher = null;
-              await _scheduleBoot((_) async {
+              await _scheduleBoot(session, (_) async {
                 await engine.stop();
                 try {
                   await engine.wipeLocalState();
@@ -2237,7 +2078,7 @@ $kSyncPanelCss
                 onDeleteVault: deleteVaultClosure,
                 maxVaultCount: selfHostActive
                     ? null
-                    : _capabilities?.maxVaultCount,
+                    : session.plans.capabilities?.maxVaultCount,
               ),
             );
             if (picked == null) return;
@@ -2249,6 +2090,7 @@ $kSyncPanelCss
           settingsHandle;
           void refreshSettings() => settingsHandle.refresh();
           settingsHandle = _registerSettings(
+            session: session,
             plugin: plugin,
             configStorage: configStorage,
             config: cfg,
@@ -2261,12 +2103,13 @@ $kSyncPanelCss
             settingsSyncPrefs: () => settingsPrefs,
             onDeleteVault: deleteVaultClosure,
             selfHostEnabled: selfHostActive,
-            selfHostUrl: selfHost.syncUrl,
+            selfHostUrl: booted.selfHostUrl,
             onSettingsSyncChanged: (next) async {
               settingsPrefs = next;
               await configStorage.saveSettingsSync(next.toJson());
               if (cipher != null) {
                 await _launchConfigSync(
+                  session: session,
                   engine: engine,
                   dataClient: dataClient,
                   cipher: cipher!,
@@ -2284,7 +2127,7 @@ $kSyncPanelCss
               // would drop the caret. Obsidian's own widgets hold their state.
               diagnosticsPrefs = next;
               await configStorage.saveDiagnostics(next.toJson());
-              _diagnostics?.apply(next);
+              session.diagnostics?.apply(next);
             },
             fileFilterPrefs: () => fileFilterPrefs,
             onFileFilterChanged: (next) async {
@@ -2358,11 +2201,37 @@ $kSyncPanelCss
               await recover?.call(requireVisible: false);
             },
           );
+          // What is in the local database, written where it can be read.
+          //
+          // The file itself cannot be handed over: it lives in the WebView's
+          // origin storage behind the IndexedDB VFS, cut into blocks no SQLite
+          // tool will open, and it is measured in gigabytes. The question
+          // people actually arrive with is not "give me the file" but "what is
+          // taking up the space", and that is a report, not a copy.
+          // Compaction, as a decision rather than a chore.
+          //
+          // Reclaiming the blob cache returns its pages to a freelist INSIDE
+          // the file; the file itself keeps its size, and the IndexedDB VFS
+          // charges the open for that size. One vault sat at 1462 MB with
+          // 1349 MB of it empty and paid twenty-two seconds on every launch.
+          // Only VACUUM gives those megabytes back, and it rewrites the whole
+          // database to do it — too long, and too greedy with space, to be
+          // anything but asked for.
+          plugin.addCommand(
+            id: 'rhyolite-sync-db-compact',
+            name: S.cmdCompactDatabase,
+            callback: () => _compactDatabase(session),
+          );
+          plugin.addCommand(
+            id: 'rhyolite-sync-db-report',
+            name: S.cmdDatabaseReport,
+            callback: () => _writeDatabaseReport(session, plugin),
+          );
           plugin.addCommand(
             id: 'rhyolite-sync-config-now',
             name: S.cmdSyncSettingsNow,
             callback: () async {
-              final cs = _configSync;
+              final cs = session.configSync;
               if (cs == null) {
                 _log.info('Settings sync is off');
                 return;
@@ -2371,27 +2240,15 @@ $kSyncPanelCss
               _log.info('Manual settings sync triggered');
             },
           );
-          plugin.addCommand(
-            id: 'rhyolite-cleanup-storage',
-            name: S.cmdCleanupStorage,
-            callback: () {
-              showStorageCleanupModal(plugin, engine);
-            },
-          );
-          plugin.addCommand(
-            id: 'rhyolite-manage-devices',
-            name: S.cmdManageDevices,
-            callback: () {
-              showDeviceManagementModal(plugin, engine);
-            },
-          );
           // Dev builds only: it walks every note in the vault and exists to
           // measure the frontmatter recogniser against Obsidian's own parser,
           // which is useless to anyone not working on that recogniser.
           if (kDebug) {
             plugin.addCommand(
               id: 'rhyolite-audit-frontmatter',
-              name: 'Rhyolite (dev): audit frontmatter parsing',
+              // Obsidian prefixes every entry with the plugin's name, so one
+              // here reads as "Rhyolite Sync: Rhyolite (dev): …".
+              name: '(dev) audit frontmatter parsing',
               callback: () => unawaited(() async {
                 showNotice('Auditing frontmatter…');
                 final result = await auditVault(plugin.app);
@@ -2408,17 +2265,22 @@ $kSyncPanelCss
               }()),
             );
           }
+          // Storage overview is a HUB: the orphan sweep, device management,
+          // restore points, the cleanup and both database actions are each one
+          // click inside it. They used to be palette entries as well, which is
+          // how sixteen of them accumulated — the hub and its contents listed
+          // side by side, six of the sixteen reachable two ways.
+          //
+          // The palette keeps verbs you would want without opening anything.
+          // What it costs: someone who does not know device management lives
+          // in the overview will not find it by typing. What it buys back is a
+          // list short enough to read, and the overview names them next to the
+          // numbers that explain why you would go there.
           plugin.addCommand(
             id: 'rhyolite-storage-overview',
             name: S.storageOverviewTitle,
-            callback: () => unawaited(_showStorageOverview(plugin, engine)),
-          );
-          plugin.addCommand(
-            id: 'rhyolite-reclaim-orphans',
-            name: S.cmdReclaimOrphans,
-            callback: () {
-              showOrphanSweepModal(plugin, engine);
-            },
+            callback: () =>
+                unawaited(_showStorageOverview(session, plugin, engine)),
           );
           plugin.addCommand(
             id: 'rhyolite-configure-selfhost',
@@ -2440,15 +2302,8 @@ $kSyncPanelCss
               showFileVersionModal(plugin, engine);
             },
           );
-          plugin.addCommand(
-            id: 'rhyolite-restore-backup',
-            name: S.cmdRestoreBackup,
-            callback: () {
-              showBackupModal(plugin, engine);
-            },
-          );
 
-          if (_syncPaused) {
+          if (session.syncPaused) {
             _log.info(
               'Sync paused by user — skipping start. Resume from the '
               'sync panel.',
@@ -2489,7 +2344,7 @@ $kSyncPanelCss
                     S.syncNotStartedNotice(_startBlockReason(block)),
                     timeoutMs: 12000,
                   );
-                  _syncPanel?.refresh();
+                  session.panel?.refresh();
                   return;
                 }
                 await startSyncSession();
@@ -2526,7 +2381,7 @@ $kSyncPanelCss
             Future<void> recoverConnection({
               required bool requireVisible,
             }) async {
-              if (recoverInFlight || _syncPaused) return;
+              if (recoverInFlight || session.syncPaused) return;
               // Nothing to recover TO. Restarting the engine against a missing
               // session or a locked vault cannot succeed, and each attempt
               // costs a full refresh round-trip (~15s with the retry ladder)
@@ -2540,7 +2395,7 @@ $kSyncPanelCss
                     'visible';
                 if (!visible) return;
               }
-              if (_engine == null) return;
+              if (session.engine == null) return;
               recoverInFlight = true;
               try {
                 // A busy engine gets a longer deadline. Five seconds is
@@ -2551,13 +2406,12 @@ $kSyncPanelCss
                 // waiting longer costs nothing and removes most of the false
                 // negatives that were tearing live engines down.
                 final probeSw = Stopwatch()..start();
-                final ok = await _engine!.healthCheck(
-                  timeout: probeTimeout(busy: _engineBusy),
+                final found = await session.engine!.probe(
+                  timeout: probeTimeout(busy: session.recovery.engineBusy),
                 );
+                final ok = found == EngineProbe.alive;
                 probeSw.stop();
-                final quietFor = _lastEngineEventAt == null
-                    ? const Duration(days: 1)
-                    : DateTime.now().difference(_lastEngineEventAt!);
+                final quietFor = session.recovery.quietFor(DateTime.now());
                 if (!ok) {
                   // Every input to the decision, because the old line said
                   // only that the probe failed — which is the one thing that
@@ -2565,11 +2419,13 @@ $kSyncPanelCss
                   _log.warning(
                     'Health check failed after ${probeSw.elapsedMilliseconds}ms '
                     '(trigger=${requireVisible ? 'visibility' : 'network/heal'}, '
-                    'busy=$_engineBusy, quiet for ${quietFor.inSeconds}s)',
+                    'busy=${session.recovery.engineBusy}, '
+                    'quiet for ${quietFor.inSeconds}s)',
                   );
                   var plan = planConnectionRecovery(
                     sinceLastEvent: quietFor,
-                    busy: _engineBusy,
+                    busy: session.recovery.engineBusy,
+                    engineStopped: found == EngineProbe.stopped,
                   );
                   if (plan == ConnectionRecovery.waitItIsAlive) {
                     // Restarting here would dispose the blob hub and abandon
@@ -2589,22 +2445,23 @@ $kSyncPanelCss
                       'Engine is silent — re-arming before any restart',
                     );
                     try {
-                      await _engine!.reissueNotify();
-                      await _engine!.triggerPull();
-                      _configSync?.handleReconnect();
+                      await session.engine!.reissueNotify();
+                      await session.engine!.triggerPull();
+                      session.configSync?.handleReconnect();
                     } catch (e) {
                       _log.warning('Re-arm failed: $e');
                     }
-                    final again = await _engine!.healthCheck(
-                      timeout: probeTimeout(busy: _engineBusy),
+                    final again = await session.engine!.probe(
+                      timeout: probeTimeout(busy: session.recovery.engineBusy),
                     );
-                    if (again) {
+                    if (again == EngineProbe.alive) {
                       _log.info('Re-arm worked — no restart needed');
                       return;
                     }
                     plan = planConnectionRecovery(
                       sinceLastEvent: quietFor,
-                      busy: _engineBusy,
+                      busy: session.recovery.engineBusy,
+                      engineStopped: again == EngineProbe.stopped,
                       alreadyNudged: true,
                     );
                     if (plan != ConnectionRecovery.restart) return;
@@ -2613,13 +2470,14 @@ $kSyncPanelCss
                     'Still unreachable after re-arming — restarting',
                   );
                   try {
-                    await _scheduleBoot((token) async {
-                      await _engine!.stop();
-                      await _guardedStart(_engine!, token);
+                    await _scheduleBoot(session, (token) async {
+                      await session.engine!.stop();
+                      await _guardedStart(session, session.engine!, token);
                     }, automatic: true);
                     if (cipher != null) {
                       await _launchConfigSync(
-                        engine: _engine!,
+                        session: session,
+                        engine: session.engine!,
                         dataClient: dataClient,
                         cipher: cipher!,
                         vaultId: vaultId,
@@ -2631,10 +2489,10 @@ $kSyncPanelCss
                     _log.error('Engine restart on recover failed: $e');
                   }
                 } else {
-                  await _engine!.reissueNotify();
-                  await _engine!.triggerPull();
-                  _configSync?.handleReconnect();
-                  await _configSync?.sync();
+                  await session.engine!.reissueNotify();
+                  await session.engine!.triggerPull();
+                  session.configSync?.handleReconnect();
+                  await session.configSync?.sync();
                 }
               } finally {
                 recoverInFlight = false;
@@ -2657,74 +2515,57 @@ $kSyncPanelCss
             // instead, capped so a persistently-down server (or the rare
             // healthCheck-passes-without-a-connect-event case) can't spin forever;
             // past the cap the indicator/command/panel button remain.
-            const maxSelfHeal = 10;
-            var selfHealOnline = false;
             void scheduleHeal() {
-              if (_syncPaused || selfHealOnline || _selfHealTimer != null)
+              if (session.syncPaused ||
+                  session.recovery.online ||
+                  session.selfHealTimer != null) {
                 return;
-              if (_selfHealAttempt >= maxSelfHeal) {
+              }
+              if (session.recovery.selfHealExhausted) {
                 _log.warning(
-                  'Self-heal gave up after $maxSelfHeal attempts — '
+                  'Self-heal gave up after '
+                  '${RecoveryState.maxSelfHealAttempts} attempts — '
                   'tap the status dot or run "Reconnect now"',
                 );
                 return;
               }
-              // Backoff 5s,10s,20s,40s,60s(cap). Reset to 5s on any reconnect.
-              final delaySec = [
-                5,
-                10,
-                20,
-                40,
-                60,
-              ][_selfHealAttempt.clamp(0, 4)];
-              _selfHealTimer = Timer(Duration(seconds: delaySec), () async {
-                _selfHealTimer = null;
-                if (_syncPaused || selfHealOnline || _engine == null) return;
-                _selfHealAttempt++;
-                _log.info('Self-heal attempt $_selfHealAttempt — recovering');
-                // requireVisible:false — the point is to recover with no user
-                // action. recoverConnection restarts the engine on failure; on
-                // success the connection watcher emits SyncConnected which cancels
-                // + resets the ladder. Re-arm here to cover the failed-start case.
-                await recoverConnection(requireVisible: false);
-                if (!selfHealOnline && _selfHealTimer == null) scheduleHeal();
-              });
+              session.selfHealTimer = Timer(
+                session.recovery.selfHealDelay,
+                () async {
+                  session.selfHealTimer = null;
+                  if (session.syncPaused ||
+                      session.recovery.online ||
+                      session.engine == null) {
+                    return;
+                  }
+                  final attempt = session.recovery.beginSelfHealAttempt();
+                  _log.info('Self-heal attempt $attempt — recovering');
+                  // requireVisible:false — the point is to recover with no user
+                  // action. recoverConnection restarts the engine on failure;
+                  // on success the connection watcher emits SyncConnected,
+                  // which cancels and resets the ladder. Re-arm here to cover
+                  // the failed-start case.
+                  await recoverConnection(requireVisible: false);
+                  if (!session.recovery.online &&
+                      session.selfHealTimer == null) {
+                    scheduleHeal();
+                  }
+                },
+              );
             }
 
-            _selfHealSub?.cancel();
-            _selfHealSub = engine.events.listen((e) {
-              _lastEngineEventAt = DateTime.now();
-              if (e is SyncStorageRefused) _storageRefused = true;
-              // A file that reached the server is proof the storage takes our
-              // writes — including when the fix happened on the storage's side
-              // and nothing in the plugin was touched. Without this the panel
-              // would name a precondition the user had already met.
-              if (e is SyncFilePushed) _storageRefused = false;
-              if (e is SyncBusy) _engineBusy = e.busy;
-              if (e is SyncConnected) {
-                selfHealOnline = true;
-                _cancelSelfHeal();
-              } else if (e is SyncStartupBlobUploadProgress &&
-                  e.completed > 0) {
-                // An attempt that MOVED is not a wasted attempt.
-                //
-                // The cap exists to stop pointless retrying against a server
-                // that is down, where ten identical failures are enough to
-                // conclude. It was written when a startup that failed banked
-                // nothing, so every attempt really was worth the same as the
-                // last. Now each pass persists the groups it uploads, so a
-                // large first sync can legitimately need more than ten passes
-                // and each one leaves the next with less to do.
-                //
-                // Only the counter is reset, not the pending timer: this pass
-                // may still fail, and if it does the ladder should carry on —
-                // just with a budget that reflects progress rather than
-                // punishing it. "Ten attempts" now means ten in a row that
-                // achieved nothing.
-                _selfHealAttempt = 0;
-              } else if (e is SyncDisconnected) {
-                selfHealOnline = false;
-                scheduleHeal();
+            session.selfHealSub?.cancel();
+            session.selfHealSub = engine.events.listen((e) {
+              // Every update the ladder makes to its own memory happens in
+              // one fold — see [RecoveryState.observe]. What is left here is
+              // the timer, which needs this closure's recoverConnection.
+              switch (session.recovery.observe(e, DateTime.now())) {
+                case RecoveryStep.connected:
+                  _cancelSelfHeal(session);
+                case RecoveryStep.disconnected:
+                  scheduleHeal();
+                case RecoveryStep.none:
+                  break;
               }
             });
 
@@ -2748,13 +2589,13 @@ $kSyncPanelCss
                     // Leaving is the last reliable moment before Android may
                     // kill the process: drain the write queue now, whether or
                     // not sync is paused.
-                    unawaited(_flushDb(immediate: true));
+                    unawaited(_flushDb(session, immediate: true));
                   }
-                  if (!visible && !_syncPaused) {
+                  if (!visible && !session.syncPaused) {
                     // Best-effort, no delay: the WebView can suspend right after
                     // 'hidden' (mobile), so fire immediately. sync() is _busy-safe
                     // and a no-op when nothing changed (signature guard).
-                    final cs = _configSync;
+                    final cs = session.configSync;
                     if (cs != null) unawaited(cs.sync());
                   }
                 }),
@@ -2768,7 +2609,7 @@ $kSyncPanelCss
               jsu.globalThis,
               'pagehide',
               jsu.allowInterop(
-                (JSAny? _) => unawaited(_flushDb(immediate: true)),
+                (JSAny? _) => unawaited(_flushDb(session, immediate: true)),
               ),
             ]);
             // Network restored: reconnect immediately instead of waiting out the
@@ -2801,9 +2642,9 @@ $kSyncPanelCss
                 'close',
                 jsu.allowInterop(() {
                   jsu.callMethod<void>(originalClose, 'call', [setting]);
-                  if (_syncPaused) return;
+                  if (session.syncPaused) return;
                   Timer(const Duration(milliseconds: 400), () {
-                    final cs = _configSync;
+                    final cs = session.configSync;
                     if (cs != null) unawaited(cs.sync());
                   });
                 }),
@@ -2819,8 +2660,8 @@ $kSyncPanelCss
           // Listen for session expiry and prompt re-authentication.
           // `_autoSignInInFlight` dedupes overlapping SessionExpired
           // events while the auto sign-in flow is mid-wait or mid-modal.
-          var _autoSignInInFlight = false;
-          _engineAuthEventsSub = engine.events.listen((event) async {
+          var autoSignInInFlight = false;
+          session.authEventsSub = engine.events.listen((event) async {
             switch (event) {
               case ExternalBlobConfigDiscovered(:final kind):
                 _log.info(
@@ -2856,9 +2697,9 @@ $kSyncPanelCss
                       externalStorageKind: extConfig?.kind ?? kind,
                     ),
                   );
-                  await _scheduleBoot((_) async {
+                  await _scheduleBoot(session, (_) async {
                     await engine.stop();
-                    await _guardedStart(engine);
+                    await _guardedStart(session, engine);
                   });
                   await relaunchConfigSync();
                   _log.info('Restarted with external blob storage');
@@ -2870,9 +2711,8 @@ $kSyncPanelCss
                 refreshSettings();
                 return;
               case SyncConnected():
-                // Authenticated traffic is flowing again — arm the bounded
-                // rebind budget for the next auth incident.
-                _authRebindAttempts = 0;
+                // The rebind budget is re-armed by RecoveryState.observe on
+                // this same event; nothing to do here for it.
                 // And bring settings sync back if it is not running. Every
                 // path that restarts the engine is supposed to relaunch it,
                 // but a restore restarts from INSIDE a pull, which no such
@@ -2884,7 +2724,8 @@ $kSyncPanelCss
                 // reached its own relaunch, so an unguarded re-arm started
                 // settings sync twice in the same second — two store loads and
                 // two pulls for one session.
-                if (_configSync == null && !_configSyncLaunching) {
+                if (session.configSync == null &&
+                    !session.configSyncLaunching) {
                   unawaited(relaunchConfigSync());
                 }
                 return;
@@ -2935,14 +2776,7 @@ $kSyncPanelCss
             // once, or repeated auth.* from a stale token) must not each spawn a
             // refresh+restart. At most one refresh in flight, and no more than
             // once per cooldown.
-            final nowAuth = DateTime.now();
-            if (_authRefreshInFlight ||
-                (_lastAuthRefreshAt != null &&
-                    nowAuth.difference(_lastAuthRefreshAt!) <
-                        const Duration(seconds: 8))) {
-              return;
-            }
-            _lastAuthRefreshAt = nowAuth;
+            if (!session.recovery.claimAuthRefresh(DateTime.now())) return;
 
             final live = accountClient.session;
             final client = auth.client ?? accountClient;
@@ -2952,18 +2786,17 @@ $kSyncPanelCss
               sessionLive: live != null && !live.isExpired,
               sessionPresent: client.session != null,
               providerBound: auth.hasToken && auth.client != null,
-              rebindBudgetLeft: _authRebindAttempts < _kMaxAuthRebinds,
+              rebindBudgetLeft: session.recovery.rebindBudgetLeft,
             );
 
             // A live session with nothing attached to the wire is OUR failure,
             // not an expired token: the provider was unbound, or the socket
             // was opened before the sign-in and still authenticates as nobody.
             if (plan == AuthRecovery.rebind) {
-              _authRebindAttempts++;
+              session.recovery.claimRebind();
               _log.warning('Auth rejected but session is live — rebinding');
               auth.bindAccount(accountClient);
-              _setEngineAuth(engine, auth);
-              engine.config = buildConfig(engine.config);
+              _applyAuth(engine, auth, buildConfig);
               await restartForAuth();
               _log.info('Auth rebound from live session — restarted');
               return;
@@ -2973,13 +2806,12 @@ $kSyncPanelCss
 
             var refreshOutcome = RefreshOutcome.notAttempted;
             if (plan == AuthRecovery.refresh) {
-              _authRefreshInFlight = true;
+              session.recovery.authRefreshInFlight = true;
               try {
                 final session = await client.refreshSession();
                 await configStorage.saveAuthSession(session);
                 auth.bindAccount(client);
-                _setEngineAuth(engine, auth);
-                engine.config = buildConfig(engine.config);
+                _applyAuth(engine, auth, buildConfig);
                 await restartForAuth();
                 _log.info('Token refreshed — restarted');
                 return;
@@ -2990,7 +2822,7 @@ $kSyncPanelCss
                 refreshOutcome = classifyRefreshFailure(e);
                 _log.warning('Refresh failed (${refreshOutcome.name}): $e');
               } finally {
-                _authRefreshInFlight = false;
+                session.recovery.authRefreshInFlight = false;
               }
             }
 
@@ -3000,9 +2832,11 @@ $kSyncPanelCss
             )) {
               await configStorage.clearAuthSession();
               auth.bindAccount(null);
-              _setEngineAuth(engine, auth);
             }
-            engine.config = buildConfig(engine.config);
+            // Outside the branch: the config is rebuilt whether or not the
+            // session was cleared, which is how it was before and is what the
+            // recovery paths below expect to find.
+            _applyAuth(engine, auth, buildConfig);
 
             // No verdict: the session we hold may well be fine. Never prompt
             // on this — prompting is what taught the user to re-login for a
@@ -3014,11 +2848,9 @@ $kSyncPanelCss
               final unbound = !(auth.hasToken && auth.client != null);
               if (stillHaveSession &&
                   unbound &&
-                  _authRebindAttempts < _kMaxAuthRebinds) {
-                _authRebindAttempts++;
+                  session.recovery.claimRebind()) {
                 auth.bindAccount(client);
-                _setEngineAuth(engine, auth);
-                engine.config = buildConfig(engine.config);
+                _applyAuth(engine, auth, buildConfig);
                 await restartForAuth();
                 _log.info(
                   'Refresh inconclusive — session kept, provider '
@@ -3039,8 +2871,8 @@ $kSyncPanelCss
             // quick succession (notify reconnect, pending RPCs all
             // failing). Without this flag every one of them would
             // queue its own awaitModalClose + showSignInModal.
-            if (_autoSignInInFlight) return;
-            _autoSignInInFlight = true;
+            if (autoSignInInFlight) return;
+            autoSignInInFlight = true;
             try {
               if (isModalOpen) {
                 _log.info(
@@ -3056,8 +2888,7 @@ $kSyncPanelCss
                   final session = await accountClient.refreshSession();
                   await configStorage.saveAuthSession(session);
                   auth.bindAccount(accountClient);
-                  _setEngineAuth(engine, auth);
-                  engine.config = buildConfig(engine.config);
+                  _applyAuth(engine, auth, buildConfig);
                   await restartForAuth();
                   _log.info(
                     'Token refreshed after modal closed — no prompt needed',
@@ -3085,7 +2916,7 @@ $kSyncPanelCss
                 jsu.callMethod<void>(setting, 'openTabById', ['rhyolite-sync']);
               }
             } finally {
-              _autoSignInInFlight = false;
+              autoSignInInFlight = false;
             }
           });
         },
@@ -3099,75 +2930,21 @@ $kSyncPanelCss
       );
     },
     onUnload: (_) async {
-      // Everything this plugin owns lives in top-level variables, which in
-      // dart2js are ONE set of slots shared by every instance of the plugin in
-      // the JS realm. Obsidian does not await `onunload`, so a reload can start
-      // the next instance's onLoad while this function is still suspended at an
-      // await — and the globals it reads after resuming then belong to the NEW
-      // instance. Teardown would dispose the live objects and leave this
-      // instance's settings tab and status-bar item attached with no owner.
+      // Take the load's session and clear the slot in one synchronous block,
+      // before the first await. Obsidian does not await `onunload`, so a reload
+      // can start the next load while this function is suspended — and after
+      // resuming, the slot belongs to that one. Teardown would then dispose the
+      // live objects and abandon this load's settings tab and status-bar item.
       //
-      // So: take ownership of this instance's objects and clear the globals
-      // FIRST, in one synchronous block, before the first await. After this
-      // point the function only ever touches its own locals.
-      final indicator = _syncIndicator;
-      _syncIndicator = null;
-      final panel = _syncPanel;
-      _syncPanel = null;
-      final diagnostics = _diagnostics;
-      _diagnostics = null;
-      final engine = _engine;
-      _engine = null;
-      final scheduler = _scheduler;
-      _scheduler = null;
-      final dbConn = _dbConn;
-      _dbConn = null;
-      final configReconnectSub = _configReconnectSub;
-      _configReconnectSub = null;
-      final engineAuthEventsSub = _engineAuthEventsSub;
-      _engineAuthEventsSub = null;
-      final deletedVaultWatchSub = _deletedVaultWatchSub;
-      _deletedVaultWatchSub = null;
-      final stateLostSub = _stateLostSub;
-      _stateLostSub = null;
-      final flushSub = _flushSub;
-      _flushSub = null;
-      final selfHealSub = _selfHealSub;
-      _selfHealSub = null;
+      // One slot is the whole reason this is three lines instead of thirty, and
+      // the reason it cannot fall out of date as things are added.
+      final session = _session;
+      _session = null;
 
-      // Detach the UI synchronously, before anything can yield. This is what
-      // actually stops a racing reload from stacking a second settings tab and
-      // a second sync circle on the user.
-      indicator?.dispose();
-      panel?.closeLeaves();
-      panel?.dispose();
-      // Close the remote log sink's WebSocket, if the user had it on.
-      diagnostics?.dispose();
-      // The local log is one global slot too, and a reload's onLoad installs a
-      // fresh one. Closing it here costs this teardown's own log lines and
-      // buys never having two sinks appending to the same file. The report
-      // facts go with it — they close over THIS instance's boot locals.
-      _disposePersistentLog();
-      _reportFacts = null;
-      _reportSubmitter = null;
-      _reportPathSalt = '';
-      _stopConfigSync();
-      _flushDebounce?.cancel();
-      _flushDebounce = null;
-      _settingsReloadDebounce?.cancel();
-      _settingsReloadDebounce = null;
-      _cancelSelfHeal();
-
-      // Only now the slow half, all of it against locals.
-      await configReconnectSub?.cancel();
-      await engineAuthEventsSub?.cancel();
-      await deletedVaultWatchSub?.cancel();
-      await stateLostSub?.cancel();
-      await flushSub?.cancel();
-      await selfHealSub?.cancel();
-      await engine?.stop();
-      await scheduler?.dispose();
-      await dbConn?.close();
+      // The synchronous half of dispose() — UI detach, timers, the local log —
+      // runs before its first await, which is what stops a racing reload from
+      // stacking a second tab and a second sync circle on the user.
+      await session?.dispose();
     },
   );
 }
@@ -3177,6 +2954,7 @@ $kSyncPanelCss
 // (notably ExternalBlobConfigDiscovered), plus `beginSignIn` so the sync panel
 // can offer the same browser sign-in the tab does.
 ({void Function() refresh, void Function() beginSignIn}) _registerSettings({
+  required PluginSession session,
   required PluginHandle plugin,
   required ObsidianConfigStorage configStorage,
   required VaultConfig config,
@@ -3224,18 +3002,17 @@ $kSyncPanelCss
       engine.config = buildConfig(updated);
       // Route the restart through the lifecycle lane so it can't overlap a
       // queued reconnect / token-refresh boot on the single WebSocket.
-      await _scheduleBoot((_) async {
+      await _scheduleBoot(session, (_) async {
         await engine.stop();
-        await _guardedStart(engine);
+        await _guardedStart(session, engine);
       });
     },
     onAuthChanged: (newAuthConfig, client) async {
       auth.bindAccount(client);
-      _setEngineAuth(engine, auth);
-      // Build on the engine's LIVE config, not the registration-time
-      // snapshot — that one predates the client name/version/kind the
-      // constructor added and any vault edits made since.
-      engine.config = buildConfig(engine.config);
+      // On the engine's LIVE config, not the registration-time snapshot —
+      // that one predates the client name/version/kind the constructor added
+      // and any vault edits made since.
+      _applyAuth(engine, auth, buildConfig);
       // A sign-in that only updates config leaves the running connection
       // authenticating as nobody: the bearer interceptor is bound once per
       // connect. Reconnect, or the user stays "signed in" and unsynced.
@@ -3244,8 +3021,8 @@ $kSyncPanelCss
     },
     onSignOut: () async {
       auth.bindAccount(null);
-      _setEngineAuth(engine, auth);
-      await _scheduleBoot((_) => engine.stop());
+      _applyAuth(engine, auth, buildConfig);
+      await _scheduleBoot(session, (_) => engine.stop());
       _log.info('Signed out');
     },
     onDisconnectVault: () async {
@@ -3256,7 +3033,7 @@ $kSyncPanelCss
       // cleared the on-disk vault config. Runs on the lifecycle lane so a
       // queued boot can't start the engine mid-wipe.
       engine.cipher = null;
-      await _scheduleBoot((_) async {
+      await _scheduleBoot(session, (_) async {
         await engine.stop();
         try {
           await engine.wipeLocalState();
@@ -3287,6 +3064,7 @@ $kSyncPanelCss
     },
     onDeleteVault: onDeleteVault,
     onSubscribed: () => _waitForSubscriptionAndStart(
+      session: session,
       plugin: plugin,
       engine: engine,
       accountClient: accountClient,
@@ -3351,7 +3129,7 @@ $kSyncPanelCss
       // The probe above just proved these work, so whatever refused us before
       // is no longer the state of the world. Without clearing it the panel
       // would keep naming a precondition the user had already met.
-      _storageRefused = false;
+      session.recovery.storageRefused = false;
       _log.info('External blob config saved');
     },
     onClearExternalBlobConfig: () async {
@@ -3379,21 +3157,23 @@ $kSyncPanelCss
     pluginCodeAvailability: () => pluginCodeAvailability(
       selfHost: selfHostEnabled,
       externalStorage: engine.config.externalStorageKind != null,
-      managedStorageQuotaBytes: _capabilities?.managedStorageQuotaBytes,
+      managedStorageQuotaBytes:
+          session.plans.capabilities?.managedStorageQuotaBytes,
     ),
     pluginCodeSize: () {
-      final bytes = _pluginCodeLocalBytes;
+      final bytes = session.pluginCodeLocalBytes;
       return bytes == null || bytes == 0 ? null : formatBytes(bytes);
     },
-    planNotice: () => _planAlert,
+    planNotice: () => session.plans.notice,
     // This tab fetches its own subscription; route it through the host so the
     // lapse comparison, the persisted snapshot and the panel strip all move
     // together instead of the tab holding a private, fresher opinion.
     onSubscriptionFetched: (sub) async {
-      await _rememberPlan(sub, configStorage);
-      _refreshPlanNotice();
+      await _rememberPlan(session, sub, configStorage);
+      _refreshPlanNotice(session);
     },
     onShowStorageOverview: () => _showStorageOverview(
+      session,
       plugin,
       engine,
       fetchUsage: (selfHostEnabled || engine.config.externalStorageKind != null)
@@ -3406,19 +3186,20 @@ $kSyncPanelCss
     // when boot never got far enough to build this tab.
     onCreateBugReport: () => showBugReportModal(
       plugin,
-      buildReport: (description) => _buildBugReport(plugin, description),
+      buildReport: (description) =>
+          _buildBugReport(session, plugin, description),
       openUrl: _openExternalUrl,
       supportUrl: kSupportUrl,
-      submit: _reportSubmitter,
+      submit: session.reportSubmitter,
       log: _logController.scope('report'),
     ),
-    onClearLogs: _clearDiagnosticLogs,
+    onClearLogs: () => _clearDiagnosticLogs(session),
     fileFilterPrefs: fileFilterPrefs,
     onFileFilterChanged: onFileFilterChanged,
     forcedBinaryExtensions: forcedBinaryExtensions,
     onForcedBinaryChanged: onForcedBinaryChanged,
     onResetSettings: () async {
-      final cs = _configSync;
+      final cs = session.configSync;
       if (cs == null) {
         throw StateError('Settings sync is off.');
       }
@@ -3426,7 +3207,7 @@ $kSyncPanelCss
       _log.info('Settings re-upload finished');
     },
     onRestoreSettings: () async {
-      final cs = _configSync;
+      final cs = session.configSync;
       if (cs == null) {
         throw StateError('Settings sync is off.');
       }
@@ -3443,6 +3224,7 @@ $kSyncPanelCss
 /// Polls the account service's getSubscription endpoint every 10 seconds for up to 5 minutes.
 /// Shows a modal with a spinner while waiting. Starts the engine on success.
 Future<void> _waitForSubscriptionAndStart({
+  required PluginSession session,
   required PluginHandle plugin,
   required ISyncEngine engine,
   required RpcAccountClient accountClient,
@@ -3487,7 +3269,7 @@ Future<void> _waitForSubscriptionAndStart({
 
     try {
       final subscription = await accountClient.getSubscription();
-      await _rememberPlan(subscription, configStorage);
+      await _rememberPlan(session, subscription, configStorage);
       if (subscription.isActive) {
         confirmed = true;
         break;
@@ -3525,7 +3307,7 @@ Future<void> _waitForSubscriptionAndStart({
       },
     );
     onDone?.call();
-    await _guardedStart(engine);
+    await _guardedStart(session, engine);
   } else {
     _log.warning('Subscription not activated within 5 minutes');
     spinnerRef?.hide();

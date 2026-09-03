@@ -8,7 +8,9 @@ void main() {
     late LocalVaultRegistryResponder responder;
 
     setUp(() {
-      final client = IDataClient.repository(repository: InMemoryDataRepository());
+      final client = IDataClient.repository(
+        repository: InMemoryDataRepository(),
+      );
       responder = LocalVaultRegistryResponder(client: client);
     });
 
@@ -30,24 +32,34 @@ void main() {
       final second = await responder.createVault(
         const CreateVaultRequest(vaultId: 'v1', vaultName: 'Renamed'),
       );
-      expect(second.vaultName, 'One', reason: 'existing entry is returned as-is');
+      expect(
+        second.vaultName,
+        'One',
+        reason: 'existing entry is returned as-is',
+      );
 
       final list = await responder.listVaults(const ListVaultsRequest());
       expect(list.vaults.where((v) => v.vaultId == 'v1').length, 1);
     });
 
-    test('updateVerificationToken sets the token on an existing vault', () async {
-      await responder.createVault(
-        const CreateVaultRequest(vaultId: 'v1', vaultName: 'One'),
-      );
-      await responder.updateVerificationToken(
-        const UpdateVaultTokenRequest(vaultId: 'v1', verificationToken: 'tok'),
-      );
+    test(
+      'updateVerificationToken sets the token on an existing vault',
+      () async {
+        await responder.createVault(
+          const CreateVaultRequest(vaultId: 'v1', vaultName: 'One'),
+        );
+        await responder.updateVerificationToken(
+          const UpdateVaultTokenRequest(
+            vaultId: 'v1',
+            verificationToken: 'tok',
+          ),
+        );
 
-      final list = await responder.listVaults(const ListVaultsRequest());
-      final v1 = list.vaults.firstWhere((v) => v.vaultId == 'v1');
-      expect(v1.verificationToken, 'tok');
-    });
+        final list = await responder.listVaults(const ListVaultsRequest());
+        final v1 = list.vaults.firstWhere((v) => v.vaultId == 'v1');
+        expect(v1.verificationToken, 'tok');
+      },
+    );
 
     test('updateVerificationToken creates the vault when missing', () async {
       await responder.updateVerificationToken(
@@ -59,22 +71,25 @@ void main() {
     });
 
     test('vault meta round-trips and updates', () async {
-      final before =
-          await responder.getVaultMeta(const VaultMetaRequest(vaultId: 'v1'));
+      final before = await responder.getVaultMeta(
+        const VaultMetaRequest(vaultId: 'v1'),
+      );
       expect(before.encryptedMeta, isNull);
 
       await responder.setVaultMeta(
         const SetVaultMetaRequest(vaultId: 'v1', encryptedMeta: 'ENC'),
       );
-      final after =
-          await responder.getVaultMeta(const VaultMetaRequest(vaultId: 'v1'));
+      final after = await responder.getVaultMeta(
+        const VaultMetaRequest(vaultId: 'v1'),
+      );
       expect(after.encryptedMeta, 'ENC');
 
       await responder.setVaultMeta(
         const SetVaultMetaRequest(vaultId: 'v1', encryptedMeta: 'ENC2'),
       );
-      final updated =
-          await responder.getVaultMeta(const VaultMetaRequest(vaultId: 'v1'));
+      final updated = await responder.getVaultMeta(
+        const VaultMetaRequest(vaultId: 'v1'),
+      );
       expect(updated.encryptedMeta, 'ENC2');
     });
   });

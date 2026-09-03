@@ -44,8 +44,7 @@ void main() {
       expect(stringsFor('ru'), isA<RuStrings>());
     });
 
-    test('an unshipped language falls back to English rather than failing',
-        () {
+    test('an unshipped language falls back to English rather than failing', () {
       expect(stringsFor('de'), isA<AppStrings>());
       expect(stringsFor('de'), isNot(isA<RuStrings>()));
       expect(stringsFor(''), isNot(isA<RuStrings>()));

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dotenv/dotenv.dart';
@@ -14,7 +15,44 @@ import 'package:rpc_data/rpc_data.dart';
 /// One process owns everything: sync + blobs + single-tenant auth.
 /// No account service, no billing, no per-vault ownership. State lives
 /// in Postgres + MinIO, so the process itself stays stateless.
+/// Entry point, with the one thing standing between a stray async error and
+/// a dead replica.
+///
+/// There was no zone handler here, so ANY error that escaped an async gap
+/// took the process with it — and one did: both replicas exited 255 within
+/// hours of each other on
+/// `RpcCancelledException: last subscriber left`, a reason string that
+/// originates in a CLIENT abandoning a coalesced blob download and travels
+/// back in the cancellation. A peer hanging up must not be able to end a
+/// server, and the fanout it took down with it (the Redis notify bus dies
+/// with the process) is how it became visible at all.
+///
+/// It logs the STACK, which the bare crash did not: the exception line alone
+/// named the reason and not the raiser, and that is why the path was still
+/// unidentified after the incident.
+///
+/// Deliberately not a catch-all over startup: errors from the awaited run
+/// still propagate to the await below. This handler sees only what would
+/// otherwise have gone unhandled.
 Future<void> main() async {
+  final done = Completer<void>();
+  runZonedGuarded(
+    () async {
+      try {
+        await _run();
+      } finally {
+        if (!done.isCompleted) done.complete();
+      }
+    },
+    (Object error, StackTrace stack) {
+      stderr.writeln('[sync] UNHANDLED async error (process kept alive): '
+          '$error\n$stack');
+    },
+  );
+  await done.future;
+}
+
+Future<void> _run() async {
   // ignore: invalid_use_of_visible_for_testing_member
   final env = (DotEnv(includePlatformEnvironment: true)..load(['.env'])).map;
 

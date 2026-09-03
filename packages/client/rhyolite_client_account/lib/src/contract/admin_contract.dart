@@ -35,25 +35,25 @@ class AdminUserRow implements IRpcSerializable {
   final int? activeSubEndsAtMs;
 
   factory AdminUserRow.fromJson(Map<String, dynamic> json) => AdminUserRow(
-        userId: json['userId'] as String,
-        email: json['email'] as String,
-        role: json['role'] as String,
-        emailVerified: json['emailVerified'] as bool,
-        createdAtMs: (json['createdAtMs'] as num).toInt(),
-        activePlanId: json['activePlanId'] as String?,
-        activeSubEndsAtMs: (json['activeSubEndsAtMs'] as num?)?.toInt(),
-      );
+    userId: json['userId'] as String,
+    email: json['email'] as String,
+    role: json['role'] as String,
+    emailVerified: json['emailVerified'] as bool,
+    createdAtMs: (json['createdAtMs'] as num).toInt(),
+    activePlanId: json['activePlanId'] as String?,
+    activeSubEndsAtMs: (json['activeSubEndsAtMs'] as num?)?.toInt(),
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'userId': userId,
-        'email': email,
-        'role': role,
-        'emailVerified': emailVerified,
-        'createdAtMs': createdAtMs,
-        if (activePlanId != null) 'activePlanId': activePlanId,
-        if (activeSubEndsAtMs != null) 'activeSubEndsAtMs': activeSubEndsAtMs,
-      };
+    'userId': userId,
+    'email': email,
+    'role': role,
+    'emailVerified': emailVerified,
+    'createdAtMs': createdAtMs,
+    if (activePlanId != null) 'activePlanId': activePlanId,
+    if (activeSubEndsAtMs != null) 'activeSubEndsAtMs': activeSubEndsAtMs,
+  };
 }
 
 class ListUsersRequest implements IRpcSerializable {
@@ -74,10 +74,10 @@ class ListUsersRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        if (emailQuery != null) 'emailQuery': emailQuery,
-        'limit': limit,
-        'offset': offset,
-      };
+    if (emailQuery != null) 'emailQuery': emailQuery,
+    'limit': limit,
+    'offset': offset,
+  };
 }
 
 class ListUsersResponse implements IRpcSerializable {
@@ -89,38 +89,40 @@ class ListUsersResponse implements IRpcSerializable {
   factory ListUsersResponse.fromJson(Map<String, dynamic> json) =>
       ListUsersResponse(
         users: (json['users'] as List)
-            .map((e) => AdminUserRow.fromJson(
-                  (e as Map).cast<String, dynamic>(),
-                ))
+            .map(
+              (e) => AdminUserRow.fromJson((e as Map).cast<String, dynamic>()),
+            )
             .toList(),
         totalCount: (json['totalCount'] as num).toInt(),
       );
 
   @override
   Map<String, dynamic> toJson() => {
-        'users': users.map((u) => u.toJson()).toList(),
-        'totalCount': totalCount,
-      };
+    'users': users.map((u) => u.toJson()).toList(),
+    'totalCount': totalCount,
+  };
 }
 
 class GetUserRequest implements IRpcSerializable {
   const GetUserRequest({this.userId, this.email})
-      : assert(userId != null || email != null,
-            'Either userId or email must be provided');
+    : assert(
+        userId != null || email != null,
+        'Either userId or email must be provided',
+      );
 
   final String? userId;
   final String? email;
 
   factory GetUserRequest.fromJson(Map<String, dynamic> json) => GetUserRequest(
-        userId: json['userId'] as String?,
-        email: json['email'] as String?,
-      );
+    userId: json['userId'] as String?,
+    email: json['email'] as String?,
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        if (userId != null) 'userId': userId,
-        if (email != null) 'email': email,
-      };
+    if (userId != null) 'userId': userId,
+    if (email != null) 'email': email,
+  };
 }
 
 class AdminSubscription implements IRpcSerializable {
@@ -149,12 +151,12 @@ class AdminSubscription implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'subscriptionId': subscriptionId,
-        'planId': planId,
-        'status': status,
-        'currentPeriodEndMs': currentPeriodEndMs,
-        if (source != null) 'source': source,
-      };
+    'subscriptionId': subscriptionId,
+    'planId': planId,
+    'status': status,
+    'currentPeriodEndMs': currentPeriodEndMs,
+    if (source != null) 'source': source,
+  };
 }
 
 class GetUserResponse implements IRpcSerializable {
@@ -168,24 +170,24 @@ class GetUserResponse implements IRpcSerializable {
   final List<AdminSubscription> subscriptions;
   final int vaultCount;
 
-  factory GetUserResponse.fromJson(Map<String, dynamic> json) => GetUserResponse(
-        user: AdminUserRow.fromJson(
-          (json['user'] as Map).cast<String, dynamic>(),
-        ),
-        subscriptions: (json['subscriptions'] as List)
-            .map((e) => AdminSubscription.fromJson(
-                  (e as Map).cast<String, dynamic>(),
-                ))
-            .toList(),
-        vaultCount: (json['vaultCount'] as num).toInt(),
-      );
+  factory GetUserResponse.fromJson(
+    Map<String, dynamic> json,
+  ) => GetUserResponse(
+    user: AdminUserRow.fromJson((json['user'] as Map).cast<String, dynamic>()),
+    subscriptions: (json['subscriptions'] as List)
+        .map(
+          (e) => AdminSubscription.fromJson((e as Map).cast<String, dynamic>()),
+        )
+        .toList(),
+    vaultCount: (json['vaultCount'] as num).toInt(),
+  );
 
   @override
   Map<String, dynamic> toJson() => {
-        'user': user.toJson(),
-        'subscriptions': subscriptions.map((s) => s.toJson()).toList(),
-        'vaultCount': vaultCount,
-      };
+    'user': user.toJson(),
+    'subscriptions': subscriptions.map((s) => s.toJson()).toList(),
+    'vaultCount': vaultCount,
+  };
 }
 
 class GrantSubscriptionRequest implements IRpcSerializable {
@@ -216,11 +218,11 @@ class GrantSubscriptionRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'userId': userId,
-        'planId': planId,
-        if (days != null) 'days': days,
-        if (reason != null) 'reason': reason,
-      };
+    'userId': userId,
+    'planId': planId,
+    if (days != null) 'days': days,
+    if (reason != null) 'reason': reason,
+  };
 }
 
 class GrantSubscriptionResponse implements IRpcSerializable {
@@ -240,9 +242,9 @@ class GrantSubscriptionResponse implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'subscriptionId': subscriptionId,
-        'currentPeriodEndMs': currentPeriodEndMs,
-      };
+    'subscriptionId': subscriptionId,
+    'currentPeriodEndMs': currentPeriodEndMs,
+  };
 }
 
 class RevokeSubscriptionRequest implements IRpcSerializable {
@@ -297,17 +299,16 @@ class RefundInvoiceRequest implements IRpcSerializable {
   factory RefundInvoiceRequest.fromJson(Map<String, dynamic> json) =>
       RefundInvoiceRequest(
         invoiceRef: json['invoiceRef'] as String,
-        refundedAmountKopecks:
-            (json['refundedAmountKopecks'] as num).toInt(),
+        refundedAmountKopecks: (json['refundedAmountKopecks'] as num).toInt(),
         reason: json['reason'] as String?,
       );
 
   @override
   Map<String, dynamic> toJson() => {
-        'invoiceRef': invoiceRef,
-        'refundedAmountKopecks': refundedAmountKopecks,
-        if (reason != null) 'reason': reason,
-      };
+    'invoiceRef': invoiceRef,
+    'refundedAmountKopecks': refundedAmountKopecks,
+    if (reason != null) 'reason': reason,
+  };
 }
 
 class RefundInvoiceResponse implements IRpcSerializable {
@@ -328,16 +329,15 @@ class RefundInvoiceResponse implements IRpcSerializable {
       RefundInvoiceResponse(
         invoiceId: json['invoiceId'] as String,
         status: json['status'] as String,
-        refundedAmountKopecks:
-            (json['refundedAmountKopecks'] as num).toInt(),
+        refundedAmountKopecks: (json['refundedAmountKopecks'] as num).toInt(),
       );
 
   @override
   Map<String, dynamic> toJson() => {
-        'invoiceId': invoiceId,
-        'status': status,
-        'refundedAmountKopecks': refundedAmountKopecks,
-      };
+    'invoiceId': invoiceId,
+    'status': status,
+    'refundedAmountKopecks': refundedAmountKopecks,
+  };
 }
 
 class ChangeUserRoleRequest implements IRpcSerializable {
@@ -357,9 +357,9 @@ class ChangeUserRoleRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'targetUserId': targetUserId,
-        'newRole': newRole,
-      };
+    'targetUserId': targetUserId,
+    'newRole': newRole,
+  };
 }
 
 class ChangeUserRoleResponse implements IRpcSerializable {

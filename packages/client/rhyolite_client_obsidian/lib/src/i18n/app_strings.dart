@@ -515,6 +515,10 @@ abstract class AppStrings {
   String vanishedDeleted(int n);
   String needsNewerClient(int n);
   String get needsNewerClientHint;
+  String databaseFull(String size, String limit);
+  String get databaseFullHint;
+  String tooLargeToFetch(int n);
+  String get tooLargeToFetchHint;
   String andMore(int n);
   String conflictsLostContent(int n);
   String storageMeterTitle(String plan);
@@ -593,13 +597,22 @@ abstract class AppStrings {
   // ── Commands ─────────────────────────────────────────────────────────────
   String get cmdSyncNow;
   String get cmdReconnect;
+  String get cmdDatabaseReport;
+  String get cmdCompactDatabase;
+  String categoriesCount(int n);
+  String get featureOff;
+  String get databaseSection;
+  String get databaseFileSize;
+  String get databaseEmptySpace;
+  String get databaseCompactHint;
+  String get databaseReportAction;
+  String get databaseCompactAction;
+  String compactOffer(String free);
+  String get compactRunning;
+  String compactDone(String before, String after);
   String get cmdSyncSettingsNow;
-  String get cmdCleanupStorage;
-  String get cmdManageDevices;
-  String get cmdReclaimOrphans;
   String get cmdConfigureSelfHost;
   String get cmdShowHistory;
-  String get cmdRestoreBackup;
 
   // ── Payment activation ───────────────────────────────────────────────────
   String get activatingSubscription;

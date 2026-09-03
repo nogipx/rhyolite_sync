@@ -7,6 +7,7 @@ import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_dart/rpc_dart.dart' show RpcContext;
 import 'package:test/test.dart';
 import 'package:uuid/uuid.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _v = '12345678-1234-4abc-8def-1234567890ab';
 
@@ -192,6 +193,7 @@ void main() {
       vaultId: _v,
     );
     viewer = FileVersionViewer(
+      detector: FileTypeDetector.builtInsOnly,
       browser: browser,
       chunkedIOBuilder: () => cio,
       io: io,
@@ -279,6 +281,7 @@ void main() {
       // even though the rows existed.
       final key = Uint8List.fromList(List.generate(32, (i) => i + 1));
       final keyedViewer = FileVersionViewer(
+        detector: FileTypeDetector.builtInsOnly,
         browser: browser,
         chunkedIOBuilder: () => cio,
         io: io,

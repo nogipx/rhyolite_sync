@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Per-file version viewer. Lists every historical write for one file,
 /// fetches and decrypts the bytes of any past version, and can restore
@@ -18,8 +19,10 @@ class FileVersionViewer {
     required this.changeProvider,
     required this.vaultPath,
     required this.vaultId,
+    required FileTypeDetector Function() detector,
     this.recordIdKey,
-  }) : _chunkedIOBuilder = chunkedIOBuilder;
+  }) : _chunkedIOBuilder = chunkedIOBuilder,
+       _detector = detector;
 
   final HistoryBrowser browser;
 
@@ -28,6 +31,12 @@ class FileVersionViewer {
   /// assembled through this — reading the manifest blob directly hands back its
   /// JSON, not the file. Null when there's no connection (no content then).
   final ChunkedBlobIO? Function() _chunkedIOBuilder;
+
+  /// Read per call, not captured: the vault's force-binary policy arrives
+  /// after start() and can be changed by the user mid-session, and a viewer
+  /// holding the set from construction time would classify by a policy that
+  /// no longer applies.
+  final FileTypeDetector Function() _detector;
   final IPlatformIO io;
   final IChangeProvider changeProvider;
   final String vaultPath;
@@ -64,7 +73,11 @@ class FileVersionViewer {
     if (bytes == null) return null;
     // Text is stored as the Fugue serialization; a legacy Sequence blob decodes
     // to null (unavailable). Shared with backup restore/diff via one helper.
-    return materializeFileContent(bytes, entry.path);
+    return materializeFileContent(
+      bytes,
+      entry.path,
+      isTextPath: _detector().isText(entry.path),
+    );
   }
 
   /// Current on-disk bytes for [relPath], or null when the file no longer

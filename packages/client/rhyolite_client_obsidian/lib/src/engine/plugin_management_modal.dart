@@ -66,9 +66,11 @@ Future<void> _render(
           if (!confirmed) return;
           try {
             final ok = await onRemove(p.resourceId);
-            showNotice(ok
-                ? S.pluginRemovedFromVault(p.pluginId)
-                : S.pluginRemoveUnavailable);
+            showNotice(
+              ok
+                  ? S.pluginRemovedFromVault(p.pluginId)
+                  : S.pluginRemoveUnavailable,
+            );
           } catch (e) {
             showNotice(S.pluginRemoveFailed(p.pluginId, e));
           }
@@ -129,8 +131,12 @@ void _pluginRow(
   final info = _el(doc, row, 'div');
   _css(info, {'flex': '1 1 auto', 'minWidth': '0'});
 
-  final title = _el(doc, info, 'div',
-      text: '${p.pluginId}  ${p.vaultVersion ?? ''}'.trimRight());
+  final title = _el(
+    doc,
+    info,
+    'div',
+    text: '${p.pluginId}  ${p.vaultVersion ?? ''}'.trimRight(),
+  );
   _css(title, {'fontWeight': '600', 'whiteSpace': 'nowrap'});
 
   final metaBits = <String>[

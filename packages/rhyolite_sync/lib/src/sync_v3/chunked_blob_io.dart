@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Stores file content as a content-defined-chunked manifest.
 ///
@@ -37,6 +37,7 @@ class ChunkedBlobIO {
     Uint8List? blobIdKey,
     ContentDefinedChunker? chunker,
     this.maxDownloadBytes,
+    this.staging,
   }) : _hasher = hasherFor(blobIdKey),
        _chunker =
            chunker ?? ContentDefinedChunker(blobIdHasher: hasherFor(blobIdKey));
@@ -52,6 +53,45 @@ class ChunkedBlobIO {
   /// and OOM the (small-heap, dart2js) client. The upload path is already
   /// size-gated; this mirrors that on download. Null = no cap (offline/tests).
   final int? maxDownloadBytes;
+
+  /// Where a pull's in-transit chunks live instead of the database.
+  ///
+  /// When present it REPLACES the local blob cache for writes: nothing this
+  /// instance fetches is persisted. Reads still fall back to the cache, so a
+  /// chunk an older build left there is used rather than refetched.
+  ///
+  /// Null everywhere except the pull — the upload path stopped mirroring long
+  /// ago, and a caller that genuinely wants a durable copy (settings sync,
+  /// version viewer) still gets one.
+  final BlobStaging? staging;
+
+  /// The cached bytes for [hash], from staging first and the database after.
+  Future<Uint8List?> _readCached(String hash) async {
+    final staged = staging?.read(hash);
+    if (staged != null) return staged;
+    return blobStore.read(hash, vaultId: vaultId);
+  }
+
+  /// Keeps [bytes] where this instance's reads will find them again.
+  ///
+  /// The whole point of the staging path: during a pull this is a map
+  /// assignment rather than a database write, and the database write was the
+  /// gigabyte that stopped the queue from ever draining.
+  Future<void> _writeCached(Uint8List bytes, String hash) async {
+    final stage = staging;
+    if (stage != null) {
+      stage.write(hash, bytes);
+      return;
+    }
+    await blobStore.write(bytes, hash, vaultId: vaultId);
+  }
+
+  /// Evicts a corrupt entry. Staging is written only from verified bytes, so
+  /// this only ever concerns the durable cache.
+  Future<void> _evictCached(String hash) async {
+    if (staging != null) return;
+    await blobStore.deleteBlobs([hash], vaultId: vaultId);
+  }
 
   /// Content-address function for the manifest blob; the chunker uses an
   /// equivalent one for chunk ids. Keyed HMAC when a vault subkey is present.
@@ -79,15 +119,6 @@ class ChunkedBlobIO {
     RpcContext? context,
     void Function(int sent, int total)? onProgress,
 
-    /// Whether to mirror the produced chunks into the local cache.
-    ///
-    /// False for content the vault can rebuild on its own — a note's blob is
-    /// its Fugue tree, which the FugueStore already holds. Caching that would
-    /// keep a second copy until the next sweep, and the sweep runs once a
-    /// session. Nothing reads it in between: upload dedup comes from the
-    /// FileStateStore, not from here, and a chunk the server loses is
-    /// regenerated from the tree.
-    bool cacheLocally = true,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
@@ -104,16 +135,8 @@ class ChunkedBlobIO {
     final manifestHash = built.manifestHash;
 
     token?.throwIfCancelled();
-    // Local cache mirrors everything in plain — same as the legacy
-    // single-blob path. Future reads of the same file (own device)
-    // never need a remote roundtrip.
-    if (cacheLocally) {
-      for (final entry in chunkBytes.entries) {
-        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
-      }
-      await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
-    }
-
+    // NOTHING is mirrored into the local cache any more — see the class doc.
+    //
     // Upload only chunks the server hasn't already got. The manifest is
     // uploaded LAST (after every chunk it references is on the server) so a
     // partial upload can never leave a manifest pointing at absent chunks.
@@ -192,11 +215,6 @@ class ChunkedBlobIO {
     Set<String> knownChunks, {
     RpcContext? context,
     void Function(int fileIndex, int sent, int total)? onFileProgress,
-
-    /// As on [upload]: false for content the vault can rebuild on its own.
-    /// A note's blob IS its Fugue tree, which the FugueStore already holds,
-    /// so mirroring it here would keep a second copy in the same database.
-    bool cacheLocally = true,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
@@ -216,20 +234,6 @@ class ChunkedBlobIO {
     for (final bytes in files) {
       token?.throwIfCancelled();
       built.add(await _build(bytes));
-    }
-
-    // Mirror everything into the local cache, as the per-file path does.
-    if (cacheLocally) {
-      for (final b in built) {
-        for (final entry in b.chunkBytes.entries) {
-          await blobStore.write(entry.value, entry.key, vaultId: vaultId);
-        }
-        await blobStore.write(
-          b.manifestPlain,
-          b.manifestHash,
-          vaultId: vaultId,
-        );
-      }
     }
 
     // --- phase 1: every chunk of every file ------------------------------
@@ -352,12 +356,12 @@ class ChunkedBlobIO {
     final manifests = <String, Uint8List>{};
     final needManifest = <String>[];
     for (final hash in unique) {
-      var plain = await blobStore.read(hash, vaultId: vaultId);
+      var plain = await _readCached(hash);
       // Same bit-rot guard [download] applies: the plain-byte cache carries no
       // MAC, so a cached blob that no longer content-addresses to its id is
       // corrupt and must be refetched, not parsed.
       if (plain != null && _hasher(plain) != hash) {
-        await blobStore.deleteBlobs([hash], vaultId: vaultId);
+        await _evictCached(hash);
         plain = null;
       }
       if (plain == null) {
@@ -379,7 +383,7 @@ class ChunkedBlobIO {
       final got = await remoteBlobStorage.download(slice, context: context);
       for (final entry in got.entries) {
         if (_hasher(entry.value) != entry.key) continue;
-        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+        await _writeCached(entry.value, entry.key);
         manifests[entry.key] = entry.value;
       }
     }
@@ -417,7 +421,7 @@ class ChunkedBlobIO {
           (wantedBy[ref.hash] ??= <String>{}).add(hash);
           continue;
         }
-        final bytes = await blobStore.read(ref.hash, vaultId: vaultId);
+        final bytes = await _readCached(ref.hash);
         if (bytes != null && _hasher(bytes) == ref.hash) {
           // Already cached: counts instantly, exactly as the upload path
           // credits chunks the server already holds.
@@ -425,7 +429,7 @@ class ChunkedBlobIO {
           continue;
         }
         if (bytes != null) {
-          await blobStore.deleteBlobs([ref.hash], vaultId: vaultId);
+          await _evictCached(ref.hash);
         }
         missing.add(ref.hash);
         (wantedBy[ref.hash] ??= <String>{}).add(hash);
@@ -452,7 +456,11 @@ class ChunkedBlobIO {
         // corrupt or hostile: drop it, leaving the chunk absent so the
         // applier's assemble fails loudly instead of caching corruption.
         if (_hasher(entry.value) != entry.key) continue;
-        await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+        // Warming is optional; the apply refetches whatever is missing. So a
+        // full staging area stops the warm-up rather than the pull, and the
+        // memory ceiling holds without anyone having to predict sizes.
+        if (staging?.isFull ?? false) continue;
+        await _writeCached(entry.value, entry.key);
         for (final owner in wantedBy[entry.key] ?? const <String>{}) {
           doneOf[owner] = (doneOf[owner] ?? 0) + (sizeOf[entry.key] ?? 0);
           onFileProgress?.call(owner, doneOf[owner]!, totalOf[owner] ?? 0);
@@ -556,18 +564,28 @@ class ChunkedBlobIO {
   /// Fetch manifest by hash, fetch any chunks not in the local cache, and
   /// concatenate them in order. Returns null if anything cannot be
   /// retrieved or the result fails the size check.
+  /// [onTooLarge] is called instead of nothing when the refusal below is a
+  /// SIZE refusal, with the size that exceeded and the ceiling it exceeded.
+  ///
+  /// Reported out of band rather than through the return type or a throw. Null
+  /// already means "these bytes are not available" at eight other call sites
+  /// that handle it gracefully, and both alternatives would change what those
+  /// see; this adds the reason without moving anything. What it fixes is a
+  /// caller that could not tell a refusal from a loss and so reported the
+  /// wrong one — see the callback's only user, in DiskReconciler.
   Future<Uint8List?> download(
     String manifestHash, {
     RpcContext? context,
     void Function(int sent, int total)? onProgress,
+    void Function(int sizeBytes, int limitBytes)? onTooLarge,
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
-    var manifestPlain = await blobStore.read(manifestHash, vaultId: vaultId);
+    var manifestPlain = await _readCached(manifestHash);
     // A cached manifest that no longer content-addresses to its id is corrupt
     // (bit-rot; the plain-byte cache has no MAC). Evict it and re-fetch.
     if (manifestPlain != null && _hasher(manifestPlain) != manifestHash) {
-      await blobStore.deleteBlobs([manifestHash], vaultId: vaultId);
+      await _evictCached(manifestHash);
       manifestPlain = null;
     }
     if (manifestPlain == null) {
@@ -579,7 +597,7 @@ class ChunkedBlobIO {
       // A backend that returns the wrong bytes for a content-addressed id is
       // corrupt or hostile — reject rather than parse garbage as a manifest.
       if (_hasher(manifestPlain) != manifestHash) return null;
-      await blobStore.write(manifestPlain, manifestHash, vaultId: vaultId);
+      await _writeCached(manifestPlain, manifestHash);
     }
 
     final parsed = _parseManifest(manifestPlain);
@@ -598,7 +616,10 @@ class ChunkedBlobIO {
         0,
         (a, r) => a + (r.size < 0 ? 0 : r.size),
       );
-      if (size > max || declaredChunkTotal > max) return null;
+      if (size > max || declaredChunkTotal > max) {
+        onTooLarge?.call(size > max ? size : declaredChunkTotal, max);
+        return null;
+      }
     }
 
     final cached = <String, Uint8List>{};
@@ -606,7 +627,7 @@ class ChunkedBlobIO {
     var localBytes = 0;
     final verifyYielder = TimeBudgetYielder();
     for (final ref in chunkRefs) {
-      final bytes = await blobStore.read(ref.hash, vaultId: vaultId);
+      final bytes = await _readCached(ref.hash);
       // Verify every cached chunk against its content-address. The local cache
       // holds PLAIN bytes, so the E2EE MAC never covers it — a bit-rotted entry
       // would otherwise be assembled into the file silently. A mismatch is
@@ -616,7 +637,7 @@ class ChunkedBlobIO {
         localBytes += ref.size;
       } else {
         if (bytes != null) {
-          await blobStore.deleteBlobs([ref.hash], vaultId: vaultId);
+          await _evictCached(ref.hash);
         }
         missing.add(ref.hash);
       }
@@ -652,10 +673,13 @@ class ChunkedBlobIO {
           // assembling corruption.
           if (_hasher(entry.value) != entry.key) continue;
           cached[entry.key] = entry.value;
-          await blobStore.write(entry.value, entry.key, vaultId: vaultId);
+          await _writeCached(entry.value, entry.key);
           localBytes += sizeOf[entry.key] ?? entry.value.length;
           fetchedBytes += entry.value.length;
           if (max != null && max > 0 && fetchedBytes > max) {
+            // The manifest understated itself and the real bytes crossed the
+            // line. Report what we actually saw, not what it claimed.
+            onTooLarge?.call(fetchedBytes, max);
             oversize = true;
             return;
           }

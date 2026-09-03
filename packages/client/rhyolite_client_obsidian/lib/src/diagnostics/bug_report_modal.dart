@@ -29,9 +29,11 @@ Future<void> showBugReportModal(
   PluginHandle plugin, {
   required Future<(BugReport, List<(String, String)>)> Function(
     String description,
-  ) buildReport,
+  )
+  buildReport,
   required void Function(String url) openUrl,
   required String supportUrl,
+
   /// Uploads the archive and returns the id the user can quote. Null when
   /// there is nobody to upload to — a self-hosted server has no account
   /// service — in which case the archive stays a file to attach by hand.
@@ -129,48 +131,47 @@ Future<void> showBugReportModal(
 /// Asked rather than glossed over: the report is sent as part of pressing the
 /// button, and finding that out afterwards, on the result screen, is exactly
 /// the kind of surprise this product does not get to have.
-Future<String?> _askWhatHappened(PluginHandle plugin, {bool canSubmit = false}) =>
-    showModalWith<String>(plugin, build: (ctx) {
-      ctx.h3(S.bugReportTitle);
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: S.bugReportIntro,
-      );
+Future<String?> _askWhatHappened(
+  PluginHandle plugin, {
+  bool canSubmit = false,
+}) => showModalWith<String>(
+  plugin,
+  build: (ctx) {
+    ctx.h3(S.bugReportTitle);
+    ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.bugReportIntro);
 
-      final input = ctx.createEl('textarea', cls: 'rhyolite-bug-report-input');
-      jsu.setProperty(input, 'placeholder', S.bugReportPlaceholder);
-      jsu.setProperty(input, 'rows', 5);
+    final input = ctx.createEl('textarea', cls: 'rhyolite-bug-report-input');
+    jsu.setProperty(input, 'placeholder', S.bugReportPlaceholder);
+    jsu.setProperty(input, 'rows', 5);
 
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: S.bugReportContents,
-      );
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: canSubmit ? S.bugReportWillSend : S.bugReportWillSaveOnly,
-      );
-      ctx.spaceVertical(px: 8);
+    ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.bugReportContents);
+    ctx.createEl(
+      'p',
+      cls: 'rhyolite-setting-desc',
+      text: canSubmit ? S.bugReportWillSend : S.bugReportWillSaveOnly,
+    );
+    ctx.spaceVertical(px: 8);
 
-      ctx.buttonRow([
-        ButtonSpec(
-          S.bugReportCreate,
-          () => ctx.close(jsu.getProperty<String?>(input, 'value') ?? ''),
-          variant: ButtonVariant.primary,
-        ),
-        ButtonSpec(S.cancel, () => ctx.close(null)),
-      ]);
-      ctx.onEscape(() => ctx.close(null));
+    ctx.buttonRow([
+      ButtonSpec(
+        S.bugReportCreate,
+        () => ctx.close(jsu.getProperty<String?>(input, 'value') ?? ''),
+        variant: ButtonVariant.primary,
+      ),
+      ButtonSpec(S.cancel, () => ctx.close(null)),
+    ]);
+    ctx.onEscape(() => ctx.close(null));
 
-      jsu.callMethod<void>(input, 'focus', []);
-    });
+    jsu.callMethod<void>(input, 'focus', []);
+  },
+);
 
 Future<void> _showResult(
   PluginHandle plugin, {
+
   /// `report.md` — the archive's summary, without the logs.
   required String summary,
+
   /// Set when the archive reached the server; the user quotes this instead of
   /// attaching anything.
   required String? reportId,
@@ -179,62 +180,59 @@ Future<void> _showResult(
   required Object? saveError,
   required void Function(String url) openUrl,
   required String supportUrl,
-}) =>
-    showModalWith<void>(plugin, build: (ctx) {
-      ctx.h3(S.bugReportReadyTitle);
+}) => showModalWith<void>(
+  plugin,
+  build: (ctx) {
+    ctx.h3(S.bugReportReadyTitle);
 
-      if (reportId != null) {
-        // Sent: there is nothing left for the user to do but say which report.
-        ctx.createEl('p', text: S.bugReportSent);
-        ctx.createEl('p', cls: 'rhyolite-vault-label', text: reportId);
+    if (reportId != null) {
+      // Sent: there is nothing left for the user to do but say which report.
+      ctx.createEl('p', text: S.bugReportSent);
+      ctx.createEl('p', cls: 'rhyolite-vault-label', text: reportId);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.bugReportSentHint,
+      );
+    } else if (savedPath != null) {
+      if (uploadError != null) {
+        // Say why it is still a file to attach. Silence here would read as
+        // "this is how it always works" and cost the upload path its bug.
         ctx.createEl(
           'p',
           cls: 'rhyolite-setting-desc',
-          text: S.bugReportSentHint,
+          text: S.bugReportNotSent(uploadError),
         );
-      } else if (savedPath != null) {
-        if (uploadError != null) {
-          // Say why it is still a file to attach. Silence here would read as
-          // "this is how it always works" and cost the upload path its bug.
-          ctx.createEl(
-            'p',
-            cls: 'rhyolite-setting-desc',
-            text: S.bugReportNotSent(uploadError),
-          );
-        }
-        ctx.createEl('p', text: S.bugReportSavedTo);
-        ctx.createEl('p', cls: 'rhyolite-vault-label', text: savedPath);
-        ctx.createEl(
-          'p',
-          cls: 'rhyolite-setting-desc',
-          text: S.bugReportSendHint,
-        );
-      } else {
-        // The file is the thing the user was promised, so a failure to write
-        // it is stated plainly rather than left for them to discover. There is
-        // nothing to offer instead: the archive cannot go on the clipboard,
-        // and a summary without logs would not be a report.
-        ctx.showError(S.bugReportSaveFailed(saveError ?? ''));
       }
+      ctx.createEl('p', text: S.bugReportSavedTo);
+      ctx.createEl('p', cls: 'rhyolite-vault-label', text: savedPath);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.bugReportSendHint,
+      );
+    } else {
+      // The file is the thing the user was promised, so a failure to write
+      // it is stated plainly rather than left for them to discover. There is
+      // nothing to offer instead: the archive cannot go on the clipboard,
+      // and a summary without logs would not be a report.
+      ctx.showError(S.bugReportSaveFailed(saveError ?? ''));
+    }
 
-      ctx.spaceVertical(px: 8);
-      _addSummary(ctx, summary);
-      ctx.spaceVertical(px: 8);
+    ctx.spaceVertical(px: 8);
+    _addSummary(ctx, summary);
+    ctx.spaceVertical(px: 8);
 
-      ctx.buttonRow([
-        ButtonSpec(
-          S.bugReportOpenTelegram,
-          () {
-            ctx.close(null);
-            openUrl(supportUrl);
-          },
-          variant: ButtonVariant.primary,
-        ),
-        ButtonSpec(S.close, () => ctx.close(null)),
-      ]);
-      ctx.onEscape(() => ctx.close(null));
-    });
-
+    ctx.buttonRow([
+      ButtonSpec(S.bugReportOpenTelegram, () {
+        ctx.close(null);
+        openUrl(supportUrl);
+      }, variant: ButtonVariant.primary),
+      ButtonSpec(S.close, () => ctx.close(null)),
+    ]);
+    ctx.onEscape(() => ctx.close(null));
+  },
+);
 
 /// Shows what the report says about the vault, collapsed.
 ///
@@ -268,5 +266,3 @@ Future<String> _saveBytesToVault(
   await plugin.app.vault.adapter.writeBinary(name, bytes);
   return name;
 }
-
-

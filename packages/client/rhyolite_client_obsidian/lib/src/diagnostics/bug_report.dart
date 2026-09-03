@@ -23,11 +23,10 @@ class BugReportSection {
   factory BugReportSection.compact(
     String title,
     List<(String, String?)> fields,
-  ) =>
-      BugReportSection(title, [
-        for (final (label, value) in fields)
-          if (value != null && value.trim().isNotEmpty) (label, value.trim()),
-      ]);
+  ) => BugReportSection(title, [
+    for (final (label, value) in fields)
+      if (value != null && value.trim().isNotEmpty) (label, value.trim()),
+  ]);
 }
 
 class BugReport {
@@ -126,8 +125,10 @@ class BugReport {
       b
         ..writeln('## Problems')
         ..writeln()
-        ..writeln('Every warning and error still on this device. Each line '
-            'names its session and the `#n` to find it under in the log below.')
+        ..writeln(
+          'Every warning and error still on this device. Each line '
+          'names its session and the `#n` to find it under in the log below.',
+        )
         ..writeln()
         ..writeln('```')
         ..writeln(_fenceSafe(redactSecrets(problemText)))
@@ -147,15 +148,16 @@ class BugReport {
     b
       ..writeln('## Log')
       ..writeln()
-      ..writeln('The raw log files are in `logs/` beside this document, one '
-          'file per segment, copied verbatim. A segment is a plugin session or '
-          'a UTC day, whichever ended first; `head` holds its opening context '
-          'and `tail<n>` the rest, in order. `problems.log` collects every '
-          'warning and error across segments, each citing the `#n` to find it '
-          'under in its segment.');
+      ..writeln(
+        'The raw log files are in `logs/` beside this document, one '
+        'file per segment, copied verbatim. A segment is a plugin session or '
+        'a UTC day, whichever ended first; `head` holds its opening context '
+        'and `tail<n>` the rest, in order. `problems.log` collects every '
+        'warning and error across segments, each citing the `#n` to find it '
+        'under in its segment.',
+      );
     return b.toString();
   }
-
 
   /// A log line containing ``` would close the fence early and spill the rest
   /// of the log into the document body.

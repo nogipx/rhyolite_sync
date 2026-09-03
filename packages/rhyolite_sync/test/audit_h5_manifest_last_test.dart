@@ -8,7 +8,6 @@
 //   2. Cancel AFTER the manifest -> the blob is complete; another device can
 //      assemble it.
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_blob/rpc_blob.dart';

@@ -9,6 +9,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 import '../i18n/i18n.dart';
 import 'diff_view.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Inspects one restore point against the current vault as an interactive file
 /// explorer: collapsible folders + a per-file status (identical / changed /
@@ -32,7 +33,9 @@ Future<void> showBackupInspectModal(
     return;
   }
 
-  final when = DateTime.fromMillisecondsSinceEpoch(snapshot.createdAtMs).toLocal();
+  final when = DateTime.fromMillisecondsSinceEpoch(
+    snapshot.createdAtMs,
+  ).toLocal();
   // The tree shows only files that differ from the current vault — an identical
   // file is noise here. The summary line still reports the identical count.
   final changedEntries = inspection.entries
@@ -47,8 +50,12 @@ Future<void> showBackupInspectModal(
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
-        text: S.inspectSummary(inspection!.changed, inspection.restoresDeleted,
-                inspection.identical) +
+        text:
+            S.inspectSummary(
+              inspection!.changed,
+              inspection.restoresDeleted,
+              inspection.identical,
+            ) +
             (inspection.deletedInBackup > 0
                 ? S.deletionSuffix(inspection.deletedInBackup)
                 : ''),
@@ -56,8 +63,11 @@ Future<void> showBackupInspectModal(
       ctx.spaceVertical(px: 8);
 
       if (changedEntries.isEmpty) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc', text: S.noChangesVsCurrent);
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.noChangesVsCurrent,
+        );
       } else {
         final treeRoot = ctx.createEl('div', cls: 'rhyolite-backup-tree');
         _renderNode(
@@ -111,15 +121,23 @@ void _renderNode(
   for (final name in dirNames) {
     final child = node.dirs[name]!;
     final item = _child(parent, 'div', cls: 'tree-item nav-folder');
-    final self = _child(item, 'div',
-        cls: 'tree-item-self nav-folder-title is-clickable mod-collapsible');
+    final self = _child(
+      item,
+      'div',
+      cls: 'tree-item-self nav-folder-title is-clickable mod-collapsible',
+    );
     final icon = _child(self, 'div', cls: 'tree-item-icon collapse-icon');
     _setIcon(icon, 'right-triangle');
-    _text(_child(self, 'div', cls: 'tree-item-inner nav-folder-title-content'),
-        name);
+    _text(
+      _child(self, 'div', cls: 'tree-item-inner nav-folder-title-content'),
+      name,
+    );
 
-    final children =
-        _child(item, 'div', cls: 'tree-item-children nav-folder-children');
+    final children = _child(
+      item,
+      'div',
+      cls: 'tree-item-children nav-folder-children',
+    );
     _renderNode(child, children, onFile: onFile);
 
     var collapsed = false;
@@ -136,15 +154,19 @@ void _renderNode(
   }
 
   final files = node.files.toList()
-    ..sort((a, b) =>
-        a.path.split('/').last.compareTo(b.path.split('/').last));
+    ..sort((a, b) => a.path.split('/').last.compareTo(b.path.split('/').last));
   for (final e in files) {
     final name = e.path.split('/').last;
     final item = _child(parent, 'div', cls: 'tree-item nav-file');
-    final self = _child(item, 'div',
-        cls: 'tree-item-self nav-file-title is-clickable');
-    _text(_child(self, 'div', cls: 'tree-item-inner nav-file-title-content'),
-        name);
+    final self = _child(
+      item,
+      'div',
+      cls: 'tree-item-self nav-file-title is-clickable',
+    );
+    _text(
+      _child(self, 'div', cls: 'tree-item-inner nav-file-title-content'),
+      name,
+    );
     final flair = _flair(e.status);
     if (flair.isNotEmpty) {
       final outer = _child(self, 'div', cls: 'tree-item-flair-outer');
@@ -155,11 +177,11 @@ void _renderNode(
 }
 
 String _flair(BackupEntryStatus s) => switch (s) {
-      BackupEntryStatus.identical => '',
-      BackupEntryStatus.changed => S.flairChanged,
-      BackupEntryStatus.restoresDeleted => S.flairDeletedNow,
-      BackupEntryStatus.deletedInBackup => S.flairTombstone,
-    };
+  BackupEntryStatus.identical => '',
+  BackupEntryStatus.changed => S.flairChanged,
+  BackupEntryStatus.restoresDeleted => S.flairDeletedNow,
+  BackupEntryStatus.deletedInBackup => S.flairTombstone,
+};
 
 // ---------------------------------------------------------------------------
 // Per-file detail / diff
@@ -187,14 +209,16 @@ Future<void> _showEntryDetail(
   // Text vs binary is decided by extension (the same call the engine uses to
   // pick Fugue vs LWW) — NOT by whether utf8 happens to decode, so a note with
   // an odd byte still shows a diff instead of a false "binary".
-  final isText = FileTypeDetector().isText(entry.path);
+  final isText = FileTypeDetector.builtInsOnly().isText(entry.path);
   if (!isText) {
     await showModalWith<void>(
       plugin,
       build: (ctx) {
-        ctx.h3(restoresDeleted
-            ? S.restoresTitle(entry.path)
-            : S.diffTitle(entry.path));
+        ctx.h3(
+          restoresDeleted
+              ? S.restoresTitle(entry.path)
+              : S.diffTitle(entry.path),
+        );
         ctx.createEl(
           'p',
           cls: 'rhyolite-setting-desc',
@@ -223,15 +247,20 @@ Future<void> _showEntryDetail(
   final String backupText;
   var currentText = ''; // empty for restoresDeleted (no current file)
   try {
-    final backupBytes = await engine.backupFileContent(entry.blobRef, entry.path);
+    final backupBytes = await engine.backupFileContent(
+      entry.blobRef,
+      entry.path,
+    );
     if (backupBytes == null) {
       showNotice(S.backupContentUnavailable(entry.path));
       return;
     }
     backupText = utf8.decode(backupBytes, allowMalformed: true);
     if (!restoresDeleted) {
-      currentText =
-          utf8.decode(await engine.io.readFile(entry.path), allowMalformed: true);
+      currentText = utf8.decode(
+        await engine.io.readFile(entry.path),
+        allowMalformed: true,
+      );
     }
   } catch (e) {
     showNotice(S.couldNotLoadPath(entry.path, e));
@@ -245,20 +274,26 @@ Future<void> _showEntryDetail(
   await showModalWith<void>(
     plugin,
     build: (ctx) {
-      ctx.h3(restoresDeleted
-          ? S.restoresTitle(entry.path)
-          : S.diffTitle(entry.path));
+      ctx.h3(
+        restoresDeleted ? S.restoresTitle(entry.path) : S.diffTitle(entry.path),
+      );
       ctx.createEl(
         'p',
         cls: 'rhyolite-setting-desc',
         text: restoresDeleted ? S.restoringAddsContent : S.restoringWouldApply,
       );
       if (diff == null) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc', text: S.tooManyChangesToDiff);
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.tooManyChangesToDiff,
+        );
       } else if (diff.every((l) => l.op == TextDiffOp.equal)) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc', text: S.noDifferencesOnDisk);
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.noDifferencesOnDisk,
+        );
       } else {
         renderUnifiedDiff(ctx.createEl('div'), diff);
       }
@@ -290,7 +325,8 @@ Future<void> _restoreOne(
   try {
     final ok = await engine.restoreBackupFile(entry.blobRef, entry.path);
     showNotice(
-        ok ? S.fileRestored(entry.path) : S.couldNotRestorePath(entry.path));
+      ok ? S.fileRestored(entry.path) : S.couldNotRestorePath(entry.path),
+    );
   } catch (e) {
     showNotice(S.restoreFailed(e));
   }
@@ -333,7 +369,6 @@ void _onClick(JSObject el, void Function() cb) {
     jsu.allowInterop((JSAny? _) => cb()),
   ]);
 }
-
 
 String _fmt(DateTime d) =>
     '${d.year}-${_pad(d.month)}-${_pad(d.day)} ${_pad(d.hour)}:${_pad(d.minute)}';

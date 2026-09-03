@@ -5,8 +5,8 @@ import 'package:convergent/fugue.dart' show Dot, LamportClock;
 import 'package:rpc_data/rpc_data.dart';
 import 'package:uuid/uuid.dart';
 
-import 'file_state.dart';
-import 'file_state_codec.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
+import 'package:rhyolite_core/rhyolite_core.dart' as core;
 
 /// Persistent + in-memory file-state cache for Δ-state CRDT sync (doc §4.4).
 ///
@@ -130,6 +130,17 @@ class FileStateStore {
   /// OUTSIDE this database (see [VaultConfig.deviceId]). The engine does that
   /// comparison and emits [SyncLocalStateLost].
   bool get loadedEmpty => _loadedEmpty;
+
+  /// Rows the last [load] READ, against [count] rows it could use.
+  ///
+  /// The two differ when a row is present but undecodable, which [load] skips
+  /// without a word. That silence hides the difference between "the writes
+  /// never landed" and "they landed and we cannot read them back" — two
+  /// problems with nothing in common except how they look from here.
+  int get loadedRowCount => _loadedRowCount;
+  int get loadSkipped => _loadSkipped;
+  int _loadedRowCount = 0;
+  int _loadSkipped = 0;
 
   /// Persistent per-install identifier. Also used as the HLC nodeId so
   /// every TaggedValue this device produces is unambiguously attributable.
@@ -277,8 +288,7 @@ class FileStateStore {
   /// monotonicity even if wall clock goes backward.
   Hlc nextHlc({int? wallMs}) {
     final ms = wallMs ?? DateTime.now().millisecondsSinceEpoch;
-    final base = _ownLatestHlc ?? Hlc(ms, 0, deviceId);
-    final next = base.increment(ms);
+    final next = advanceOwnClock(_ownLatestHlc, ms, deviceId);
     _ownLatestHlc = next;
     return next;
   }
@@ -301,8 +311,13 @@ class FileStateStore {
   /// exactly as an out-of-window register write would be.
   void witness(Hlc observed, {int? maxClockSkewMs = defaultMaxClockSkewMs}) {
     final wall = DateTime.now().millisecondsSinceEpoch;
-    final base = _ownLatestHlc ?? Hlc(wall, 0, deviceId);
-    _ownLatestHlc = base.receive(observed, wall, maxSkewMs: maxClockSkewMs);
+    _ownLatestHlc = witnessRemoteClock(
+      _ownLatestHlc,
+      observed,
+      wall,
+      deviceId,
+      maxSkewMs: maxClockSkewMs,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -351,14 +366,15 @@ class FileStateStore {
     return updated;
   }
 
-  /// Self-stabilization bound (paper §4): TaggedValues whose hlc.millis
-  /// is more than this far in the future relative to the local wall
-  /// clock are refused — they would otherwise poison the local clock
-  /// and dominate every subsequent LWW comparison until physical time
-  /// catches up. Five minutes is generous enough for normal NTP drift
-  /// and timezone-related local-clock mistakes, but tight enough that a
-  /// year-2099 bad write cannot pollute the vault.
-  static const int defaultMaxClockSkewMs = 5 * 60 * 1000;
+  /// Self-stabilization bound (paper §4): TaggedValues whose hlc.millis is
+  /// more than this far in the future relative to the local wall clock are
+  /// refused.
+  ///
+  /// An alias, not a value. The number decides which writes are trusted, so
+  /// two devices holding different ones disagree about which edit is newer —
+  /// which is divergence, and therefore the domain's business. Kept here only
+  /// because callers name it through the store.
+  static const int defaultMaxClockSkewMs = core.defaultMaxClockSkewMs;
 
   /// Apply TaggedValues received from the server for a fileId. Performs
   /// `localRegister.join(remoteRegister)` and folds every incoming hlc +
@@ -381,7 +397,7 @@ class FileStateStore {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final remoteSet = <TaggedValue<FileState>>{};
     for (final tv in incoming) {
-      if (maxClockSkewMs != null && tv.hlc.millis > nowMs + maxClockSkewMs) {
+      if (!isWithinSkewBound(tv.hlc.millis, nowMs, maxSkewMs: maxClockSkewMs)) {
         onSkip?.call(tv, nowMs);
         continue;
       }
@@ -452,6 +468,8 @@ class FileStateStore {
     _registers.clear();
     _owed.clear();
     _ownLatestHlc = null;
+    _loadSkipped = 0;
+    _loadedRowCount = 0;
     for (final r in records) {
       try {
         final reg = _decodeRegister(r.payload);
@@ -474,8 +492,10 @@ class FileStateStore {
         }
       } catch (_) {
         // Skip corrupt rows; they get rewritten on next put for that file.
+        _loadSkipped++;
       }
     }
+    _loadedRowCount = records.length;
 
     final meta = await _client.get(collection: _metaCol, id: _metaId);
     // Captured BEFORE the branches below mint a deviceId and write meta back:

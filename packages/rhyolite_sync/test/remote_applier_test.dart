@@ -10,6 +10,7 @@ import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
 import 'package:uuid/uuid.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _vaultPath = '/vault';
 const _vaultId = '00000000-0000-4000-8000-000000000001';
@@ -770,6 +771,106 @@ void main() {
         reason:
             'the user must be told to update, not left waiting for a '
             'record that will never decode',
+      );
+    });
+
+    test(
+      'a record from the future holds the cursor instead of vanishing',
+      () async {
+        // The store refuses a record whose hlc is more than the skew bound ahead
+        // of the LOCAL clock — a real defence: a year-2099 write would otherwise
+        // dominate every LWW comparison forever.
+        //
+        // But the cost lands on whoever's clock is wrong, and it used to be
+        // permanent. apply() returned normally, so the puller struck the file
+        // off `unapplied` and moved the cursor past it, and getStates never
+        // offered that seq again. A laptop ten minutes behind silently lost
+        // every edit its peers made in that window.
+        //
+        // Refusing to APPLY is right; refusing and reporting success is not.
+        final f = await _newApplier();
+        final fileId = f.fileIdFor('note.md');
+        // Built through the codec like any real record — a hand-rolled one with
+        // an empty payload never reaches the store, it dies in the decode above.
+        final fromTheFuture = await _record(
+          f.codec,
+          FileState(
+            fileId: fileId,
+            path: 'note.md',
+            blobRef: '',
+            sizeBytes: 0,
+            hlc: Hlc(
+              DateTime.now().millisecondsSinceEpoch +
+                  FileStateStore.defaultMaxClockSkewMs * 4,
+              0,
+              'device-ahead',
+            ),
+          ),
+          7,
+        );
+
+        await expectLater(
+          f.applier.apply(fileId, [fromTheFuture], _UnusedResolver()),
+          throwsA(isA<RemoteRecordsUnapplied>()),
+          reason:
+              'the puller holds the cursor below a file whose apply threw; a '
+              'clean return is what let this record be skipped forever',
+        );
+
+        expect(
+          f.events.whereType<SyncRecordSkipped>().any(
+            (e) => e.reason.contains('skew'),
+          ),
+          isTrue,
+          reason: 'the refusal itself still has to be observable',
+        );
+        expect(
+          f.store.get(fileId),
+          isNull,
+          reason: 'and it must not have entered the register',
+        );
+      },
+    );
+
+    test('a newer state schema reads as "update", not as corruption', () async {
+      // The cipher case above has always been typed. The schema case was a
+      // bare FormatException — which vault_cipher also throws for an empty or
+      // unreadable envelope — so it could not be told from a corrupt row and
+      // was reported as one. schemaVersion is already 2, so this is what the
+      // next bump does to every client that has not updated yet.
+      final f = await _newApplier();
+      final fileId = f.fileIdFor('note.md');
+      await f.store.load();
+      f.store.applyLocal(
+        FileState(
+          fileId: fileId,
+          path: 'note.md',
+          blobRef: 'local',
+          sizeBytes: 1,
+          hlc: Hlc(500, 0, 'device-B'),
+        ),
+      );
+
+      final fromTheFuture = StateRecord(
+        fileId: fileId,
+        encryptedState: base64Encode(
+          utf8.encode(jsonEncode({'v': FileState.schemaVersion + 1})),
+        ),
+        blobRef: 'newer',
+        hlcPacked: Hlc(1000, 0, 'device-A').pack(),
+        contextPacked: '',
+        serverSeq: 1,
+        tombstone: false,
+      );
+
+      await f.applier.apply(fileId, [fromTheFuture], _UnusedResolver());
+
+      expect(
+        f.events.whereType<SyncFileFormatUnsupported>().map((e) => e.path),
+        contains('note.md'),
+        reason:
+            'the user must be told to update; waiting cannot help, every '
+            'device on this version skips the record identically',
       );
     });
 

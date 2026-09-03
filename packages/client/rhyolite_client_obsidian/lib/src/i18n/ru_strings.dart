@@ -803,7 +803,7 @@ class RuStrings extends AppStrings {
       'поддержку и оставит копию в хранилище. Названия заметок заменяются на '
       'псевдонимы, содержимого в отчёте нет.';
   @override
-  String get bugReportCommand => 'Rhyolite: создать отчёт об ошибке';
+  String get bugReportCommand => 'Создать отчёт об ошибке';
   @override
   String get bugReportTitle => 'Создать отчёт об ошибке';
   @override
@@ -845,8 +845,7 @@ class RuStrings extends AppStrings {
   String bugReportNotSent(String reason) =>
       'Отправить в поддержку не удалось ($reason) — приложите файл вручную.';
   @override
-  String get bugReportTooLargeToSend =>
-      'отчёт больше, чем принимает сервер';
+  String get bugReportTooLargeToSend => 'отчёт больше, чем принимает сервер';
   @override
   String get bugReportSavedTo => 'Сохранён в хранилище как:';
   @override
@@ -1170,9 +1169,9 @@ class RuStrings extends AppStrings {
   @override
   String get panelStorageLabel => 'Хранение';
   @override
-  String get vaultSizeLabel => 'Размер хранилища';
+  String get vaultSizeLabel => 'Хранилище';
   @override
-  String get settingsSizeLabel => 'Размер настроек';
+  String get settingsSizeLabel => 'Настройки';
   @override
   String get storageDetails => 'Подробнее о хранилище →';
   @override
@@ -1225,6 +1224,21 @@ class RuStrings extends AppStrings {
       'Сохранены устройством с более новым Rhyolite. Обновите плагин до '
       'последней версии — и они синхронизируются. До этого файлы не трогаются '
       'ни на диске, ни на сервере, а правки здесь не синхронизируются.';
+  @override
+  String databaseFull(String size, String limit) =>
+      'Локальная база заполнена ($size из $limit)';
+  @override
+  String get databaseFullHint =>
+      'Кеш очищен, но место не вернулось — значит, занято рабочими данными. '
+      'Синхронизация продолжается, но база, которой некуда расти, рано или '
+      'поздно перестанет принимать запись. Место возвращает сжатие.';
+  @override
+  String tooLargeToFetch(int n) => 'Слишком большие для загрузки сюда ($n)';
+  @override
+  String get tooLargeToFetchHint =>
+      'Больше лимита на файл для этого устройства, поэтому на диск они не '
+      'записаны. Ничего не потеряно: файлы целы на сервере и на устройствах, '
+      'которым они по силам.';
   @override
   String andMore(int n) => '…и ещё $n';
   @override
@@ -1380,20 +1394,63 @@ class RuStrings extends AppStrings {
   String get cmdSyncNow => 'Синхронизировать сейчас';
   @override
   String get cmdReconnect => 'Переподключиться сейчас';
+
+  @override
+  String get cmdDatabaseReport => 'Сохранить отчёт о локальной базе';
+
+  @override
+  String get cmdCompactDatabase => 'Сжать локальную базу';
+
+  @override
+  String categoriesCount(int n) {
+    final t = n % 10, h = n % 100;
+    if (t == 1 && h != 11) return '$n категория';
+    if (t >= 2 && t <= 4 && (h < 12 || h > 14)) return '$n категории';
+    return '$n категорий';
+  }
+
+  @override
+  String get featureOff => 'Выкл';
+
+  @override
+  String get databaseSection => 'Локальная база';
+
+  @override
+  String get databaseFileSize => 'Размер файла';
+
+  @override
+  String get databaseEmptySpace => 'Пустого места';
+
+  @override
+  String get databaseCompactHint =>
+      'Файл в основном пуст. Сжатие перепишет его и вернёт место; '
+      'это надолго, поэтому сначала поставьте синхронизацию на паузу.';
+
+  @override
+  String get databaseReportAction => 'Отчёт';
+
+  @override
+  String get databaseCompactAction => 'Сжать';
+
+
+  @override
+  String compactOffer(String free) =>
+      'В локальной базе $free пустого места — сжать';
+
+  @override
+  String get compactRunning =>
+      'Сжимаю — база переписывается целиком, это может занять время. '
+      'Не закрывайте Obsidian.';
+
+  @override
+  String compactDone(String before, String after) =>
+      'База сжата: $before -> $after.';
   @override
   String get cmdSyncSettingsNow => 'Синхронизировать настройки (.obsidian)';
-  @override
-  String get cmdCleanupStorage => 'Очистить хранилище (история + блобы)';
-  @override
-  String get cmdManageDevices => 'Управление устройствами синхронизации';
-  @override
-  String get cmdReclaimOrphans => 'Освободить осиротевшие блобы';
   @override
   String get cmdConfigureSelfHost => 'Настроить свой сервер';
   @override
   String get cmdShowHistory => 'История версий текущего файла';
-  @override
-  String get cmdRestoreBackup => 'Восстановить из бэкапа';
 
   // ── Payment activation ──
   @override

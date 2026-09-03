@@ -1,17 +1,11 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:convergent/convergent.dart';
 import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_tail.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_render.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_split.dart';
-import 'package:rhyolite_sync/src/sync_v3/fugue_store.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_state.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_store.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_document.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
+import 'package:rhyolite_sync/src/storage/fm_store.dart';
 import 'package:rhyolite_sync/src/sync_v3/disk_reconciler.dart';
 import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_data/rpc_data.dart';
@@ -151,6 +145,7 @@ typedef _Fixture = ({
   LocalBlobStore localBlobs,
   _MemRemote remote,
   List<SyncEngineEvent> events,
+  StatSigStore? sigStore,
   String Function(String) fileIdFor,
 });
 
@@ -170,6 +165,11 @@ Future<_Fixture> _newFixture({
   PathScope? pathScope,
   bool frontmatter = true,
   int? fmGcBarrier,
+
+  /// Off by default: a signature store turns on the short-circuits that skip
+  /// work, and most tests here exist to observe that work happening. Tests
+  /// about the signature itself opt in.
+  bool withSigStore = false,
 }) async {
   final env = await DataServiceFactory.inMemory();
   addTearDown(env.dispose);
@@ -180,6 +180,12 @@ Future<_Fixture> _newFixture({
   await fugueStore.load();
   final fmStore = FmStore(client: env.client, vaultId: _vaultId);
   await fmStore.load();
+
+  StatSigStore? sigStore;
+  if (withSigStore) {
+    sigStore = StatSigStore(client: env.client, vaultId: _vaultId);
+    await sigStore.load();
+  }
 
   final io = _MemIo();
   final changes = _NoopChangeProvider();
@@ -212,6 +218,7 @@ Future<_Fixture> _newFixture({
     pathScope: pathScope == null ? null : () => pathScope,
     fmStore: frontmatter ? fmStore : null,
     fmGcBarrier: () => fmGcBarrier,
+    sigStore: sigStore,
   );
 
   return (
@@ -224,6 +231,7 @@ Future<_Fixture> _newFixture({
     localBlobs: localBlobs,
     remote: remote,
     events: events,
+    sigStore: sigStore,
     fileIdFor: fileIdFor,
   );
 }
@@ -508,6 +516,48 @@ void main() {
       expect(f.events.whereType<SyncFilePulled>(), isEmpty);
     });
 
+    test('bytes-identical records the signature it just proved', () async {
+      // Comparing every byte is the strongest form of the claim the signature
+      // makes, and throwing that proof away was expensive in a way that hid
+      // for a long time. Without a signature `_diskAlreadyHolds` cannot
+      // answer, so the NEXT pull's pre-join reconcile treats the file as
+      // locally edited, seeds a tree from disk under this device's clock, and
+      // that seed is concurrent with the remote by construction. Every note
+      // then goes through the text resolver — two uploads and a merge, 2.3 to
+      // 4.8 seconds each, for files whose bytes were identical.
+      //
+      // It stayed hidden while the local database was losing its state rows:
+      // the pre-reconcile is gated on the file having a local state at all, so
+      // an empty store skipped it entirely. Making state durable switched the
+      // path on and the missing signature turned it into an upload storm.
+      final src = await _newFixture();
+      src.io.files['$_vaultPath/note.md'] = _bytes('hello world');
+      await src.reconciler.reconcileWithDisk('note.md');
+      final state = src.store.get(src.fileIdFor('note.md'))!;
+
+      // A device that already holds the identical bytes but knows nothing
+      // about them — the shape a vault has after its database was lost.
+      final dst = await _newFixture(withSigStore: true);
+      dst.remote.store.addAll(src.remote.store);
+      dst.io.files['$_vaultPath/note.md'] = _bytes('hello world');
+
+      await dst.reconciler.writeFileToDisk(state);
+
+      final sig = dst.sigStore!.get(dst.fileIdFor('note.md'));
+      expect(
+        sig,
+        isNotNull,
+        reason: 'the comparison proved the disk holds this blobRef; not '
+            'recording it makes the next pull re-derive it the expensive way',
+      );
+      expect(
+        sig!.blobRef,
+        state.blobRef,
+        reason: 'the signature has to name the ref it was proved against — '
+            'without it the next pull cannot tell which version disk holds',
+      );
+    });
+
     test(
       'projects Fugue blob to plain text on disk, caches Sequence',
       () async {
@@ -748,7 +798,7 @@ void main() {
       // And an OLD client decodes it to the whole note, frontmatter included,
       // exactly as it does today. This is the property the design rests on.
       expect(
-        utf8.decode(materializeFileContent(blob, 'note.md')!),
+        utf8.decode(materializeFileContent(blob, 'note.md', isTextPath: true)!),
         '---\ntitle: Note\ntags:\n  - work\n---\n\nbody\n',
       );
 
@@ -935,7 +985,7 @@ void main() {
         ).download(after.blobRef);
         expect(hasFmTail(blob!), isFalse, reason: 'the tail is gone');
         expect(
-          utf8.decode(materializeFileContent(blob, 'n.md')!),
+          utf8.decode(materializeFileContent(blob, 'n.md', isTextPath: true)!),
           '---\nx: 2\n---\nbody\n',
           reason: 'the note itself is untouched',
         );

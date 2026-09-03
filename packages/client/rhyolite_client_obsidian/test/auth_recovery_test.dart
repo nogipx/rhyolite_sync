@@ -213,8 +213,10 @@ void main() {
 
     test('a policy refusal is not, whatever it says', () {
       expect(rejectionWarrantsRefresh('app_policy.quota.storage'), isFalse);
-      expect(rejectionWarrantsRefresh('app_policy.subscription_required'),
-          isFalse);
+      expect(
+        rejectionWarrantsRefresh('app_policy.subscription_required'),
+        isFalse,
+      );
     });
   });
 }

@@ -4,12 +4,8 @@ import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
-import '../frontmatter/fm_tail.dart';
-import '../frontmatter/fm_state.dart';
-import '../frontmatter/fm_store.dart';
-import '../frontmatter/frontmatter_document.dart';
-import '../frontmatter/frontmatter_parser.dart';
-import '../frontmatter/frontmatter_split.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
+import '../storage/fm_store.dart';
 
 /// Everything a text reconcile worked out before it needed the network.
 ///
@@ -431,12 +427,17 @@ class DiskReconciler {
     final chunkedIO = _chunkedIOBuilder();
     final swDownload = Stopwatch();
     final monitor = state.sizeBytes >= _transferMonitorMinBytes;
+    // Set when the download refused on size, so the report below can tell a
+    // refusal from a loss. Both arrive here as a null.
+    ({int sizeBytes, int limitBytes})? tooLarge;
     if (chunkedIO != null) {
       swDownload.start();
       try {
         bytes = await chunkedIO.download(
           state.blobRef,
           context: context,
+          onTooLarge: (sizeBytes, limitBytes) =>
+              tooLarge = (sizeBytes: sizeBytes, limitBytes: limitBytes),
           onProgress: monitor
               ? (sent, total) => _emit(
                   SyncBlobTransfer(
@@ -485,6 +486,25 @@ class DiskReconciler {
       swDownload.stop();
     }
     if (bytes == null) {
+      // A refusal and a loss both arrive as null and must not read alike. The
+      // second is "your data may be gone"; the first is "this device will not
+      // carry a file this big", which loses nothing and is not a repair.
+      final refused = tooLarge;
+      if (refused != null) {
+        _log.warning(
+          'File too large to fetch: ${refused.sizeBytes} B of '
+          '${refused.limitBytes} B',
+          data: {'path': LogPath(state.path)},
+        );
+        _emit(
+          SyncFileTooLargeToFetch(
+            path: state.path,
+            sizeBytes: refused.sizeBytes,
+            limitBytes: refused.limitBytes,
+          ),
+        );
+        return false;
+      }
       final tag = state.blobRef.length < 8
           ? state.blobRef
           : state.blobRef.substring(0, 8);
@@ -580,6 +600,33 @@ class DiskReconciler {
         swCompare.stop();
         if (eq) {
           skippedIdentical = true;
+          // Record the signature, exactly as the write path below does.
+          //
+          // We have just PROVEN the disk holds this blobRef — by comparing
+          // every byte, which is the strongest form of the claim the
+          // signature makes. Not recording it threw that proof away, and the
+          // cost of throwing it away is not one wasted comparison:
+          //
+          // Without a signature `_diskAlreadyHolds` cannot answer, so the next
+          // pull's pre-join reconcile treats the file as locally edited, seeds
+          // a Fugue tree from disk under this device's clock, and that seed is
+          // concurrent with the remote by construction. Every note then goes
+          // through the text resolver — two uploads and a merge, measured at
+          // 2.3 to 4.8 seconds each, for files whose bytes were identical.
+          //
+          // It stayed hidden while the database was losing its state rows: the
+          // pre-reconcile is gated on `store.get(fileId) != null`, so an empty
+          // store skipped it. Durable state switched the path on, and the
+          // missing signature turned it into an upload storm.
+          final stat = await io.statFile(fullPath);
+          if (stat != null) {
+            _setStat(
+              state.path,
+              stat.mtimeMs,
+              stat.sizeBytes,
+              blobRef: state.blobRef,
+            );
+          }
           swWriteTotal.stop();
           if (_sampleWriteLine(swWriteTotal.elapsedMilliseconds)) {
             _log.info(
@@ -991,9 +1038,6 @@ class DiskReconciler {
       plan.blobBytes,
       _knownChunks(),
       context: context,
-      // See [commitTextReconcile]: these bytes ARE the tree, which the commit
-      // writes before the FileState that names them.
-      cacheLocally: false,
     );
     swUpload.stop();
     _log.info(
@@ -1101,6 +1145,7 @@ class DiskReconciler {
 
     final swDiff = Stopwatch()..start();
     final newSequence = await FugueTextSync.applyTextSnapshot(
+      deadlineSeconds: FugueTextSync.interactiveDiffBudget,
       oldFugue: oldSequence,
       newText: newText,
       clock: store.fugueClock,
@@ -1368,11 +1413,6 @@ class DiskReconciler {
       // state ever references a blobRef whose tree is missing, which is what
       // makes regeneration a complete substitute for caching them here.
       //
-      // Mirroring them would store the tree twice until the next sweep, and
-      // the sweep runs once a session: a day of editing accumulates a second
-      // copy of everything touched. Note the copy would live in the SAME
-      // database as the tree, so it was never independent redundancy either.
-      cacheLocally: false,
     );
     return (
       manifestHash: result.manifestHash,

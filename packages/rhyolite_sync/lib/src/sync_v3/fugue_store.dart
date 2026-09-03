@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:convergent/fugue.dart';
-import 'package:rpc_dart/rpc_dart.dart' show CborCodec;
+import 'package:rhyolite_core/rhyolite_core.dart' as core;
 import 'package:rpc_data/rpc_data.dart';
 
 /// Persistent + lazily-cached per-file [Fugue] text states.
@@ -325,72 +325,22 @@ class FugueStore {
   // convergent codec types directly.
   // ---------------------------------------------------------------------------
 
-  /// JSON (Map) round-trip helper — same format as local persistence. Kept
-  /// for tests and any caller that needs a JSON-compatible view of a tree.
-  static Fugue<String> decodeFromBlob(Object? json) => _codec.decode(json);
-
-  /// JSON (Map) encode — inverse of [decodeFromBlob].
-  static Object encodeForBlob(Fugue<String> state) => _codec.encode(state)!;
-
-  /// Magic prefix that makes a new-format Fugue blob self-identifying. The
-  /// leading `0x00` guarantees the bytes are never mistaken for a UTF-8 text
-  /// blob (real notes never start with NUL), and the `fg1` tag distinguishes
-  /// it from the pre-Fugue Sequence blobs (CBOR/JSON maps) still on the
-  /// server during a rollout. See [tryDecodeBlob] / [isLegacySequenceBlob].
-  static const List<int> _magic = <int>[0x00, 0x66, 0x67, 0x31]; // \0fg1
-
-  /// Encode a tree for the WIRE blob: [_magic] + compact binary codec.
-  static Uint8List encodeBlob(Fugue<String> state) {
-    final body = _binary.encode(state);
-    final out = Uint8List(_magic.length + body.length);
-    out.setRange(0, _magic.length, _magic);
-    out.setRange(_magic.length, out.length, body);
-    return out;
-  }
-
-  /// Decode a WIRE blob back into a [Fugue], or null when [bytes] are NOT a
-  /// new-format (magic-prefixed) Fugue blob — a pre-Fugue plain-text blob, a
-  /// legacy Sequence blob, or a binary file. Callers pair a null with
-  /// [isLegacySequenceBlob] to decide between "genuine plain text" (write /
-  /// seed as-is) and "old-format, awaiting reseed" (skip). Pure — no store
-  /// side effects — so the history viewer can project a past version without
-  /// touching the live tree.
-  static Fugue<String>? tryDecodeBlob(Uint8List bytes) {
-    if (bytes.length < _magic.length) return null;
-    for (var i = 0; i < _magic.length; i++) {
-      if (bytes[i] != _magic[i]) return null;
-    }
-    try {
-      return _binary.decode(Uint8List.sublistView(bytes, _magic.length));
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// True when [bytes] are a PRE-Fugue [Sequence] blob (the format shipped
-  /// before this migration: a CBOR or JSON map with `v` + `chars`/`c`).
-  ///
-  /// Such a blob is NOT valid document text — writing its raw bytes to disk,
-  /// or seeding a tree from them, would corrupt the note. Callers use this to
-  /// tell an old-format blob apart from a genuine plain-text blob so they can
-  /// skip it and let a reseed-from-disk (from this device or an upgraded
-  /// peer) replace it. Read-only; no `Sequence` decode is performed, so the
-  /// old CRDT type is not resurrected.
-  static bool isLegacySequenceBlob(Uint8List bytes) {
-    bool looksLikeSequence(Object? obj) =>
-        obj is Map &&
-        obj['v'] is int &&
-        (obj['chars'] is List || obj['c'] is List);
-    try {
-      if (looksLikeSequence(CborCodec.decode(bytes))) return true;
-    } catch (_) {
-      // Not CBOR — fall through to the JSON probe.
-    }
-    try {
-      if (looksLikeSequence(jsonDecode(utf8.decode(bytes)))) return true;
-    } catch (_) {
-      // Not JSON text either.
-    }
-    return false;
-  }
+  // The blob FORMAT moved to rhyolite_core (`codec/fugue_blob_codec.dart`).
+  // It never belonged to a store: bytes in, tree out, no persistence — and the
+  // blob id is a hash of exactly those bytes, so the format is part of what
+  // makes two devices agree. These delegates stay because call sites name them
+  // through the store; they carry no logic.
+  static Fugue<String> decodeFromBlob(Object? json) =>
+      core.decodeFugueFromJson(json);
+  static Object encodeForBlob(Fugue<String> state) =>
+      core.encodeFugueToJson(state);
+  static Uint8List encodeBlob(Fugue<String> state) =>
+      core.encodeFugueBlob(state);
+  static Fugue<String>? tryDecodeBlob(Uint8List bytes) =>
+      core.tryDecodeFugueBlob(bytes);
+  // Named apart from the core function on purpose: a static and a top-level
+  // sharing a name resolve to the static inside the class, so the delegate
+  // would call itself forever. The prefix says which one you are getting.
+  static bool isLegacySequenceBlob(Uint8List bytes) =>
+      core.isLegacySequenceBlob(bytes);
 }

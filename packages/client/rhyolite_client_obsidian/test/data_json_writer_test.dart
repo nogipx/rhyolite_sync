@@ -5,8 +5,7 @@ import 'package:test/test.dart';
 /// interleaving is observable — an unserialized read-modify-write would
 /// lose an update against this.
 class _FakeRawStore implements RawDataStore {
-  _FakeRawStore([Map<String, dynamic>? initial])
-      : data = {...?initial};
+  _FakeRawStore([Map<String, dynamic>? initial]) : data = {...?initial};
 
   Map<String, dynamic> data;
   int saves = 0;
@@ -27,24 +26,32 @@ class _FakeRawStore implements RawDataStore {
 
 void main() {
   group('DataJsonWriter', () {
-    test('concurrent updates to different keys do not clobber each other',
-        () async {
-      final store = _FakeRawStore({'existing': 1});
-      final w = DataJsonWriter(store);
+    test(
+      'concurrent updates to different keys do not clobber each other',
+      () async {
+        final store = _FakeRawStore({'existing': 1});
+        final w = DataJsonWriter(store);
 
-      // Fire both without awaiting between — they must serialize so the
-      // second re-reads AFTER the first has persisted.
-      final f1 = w.update((m) => m['a'] = 'A');
-      final f2 = w.update((m) => m['b'] = 'B');
-      await Future.wait([f1, f2]);
+        // Fire both without awaiting between — they must serialize so the
+        // second re-reads AFTER the first has persisted.
+        final f1 = w.update((m) => m['a'] = 'A');
+        final f2 = w.update((m) => m['b'] = 'B');
+        await Future.wait([f1, f2]);
 
-      expect(store.data['a'], 'A');
-      expect(store.data['b'], 'B',
-          reason: 'the second update must not clobber the first');
-      expect(store.data['existing'], 1,
-          reason: 'untouched keys are preserved');
-      expect(store.saves, 2);
-    });
+        expect(store.data['a'], 'A');
+        expect(
+          store.data['b'],
+          'B',
+          reason: 'the second update must not clobber the first',
+        );
+        expect(
+          store.data['existing'],
+          1,
+          reason: 'untouched keys are preserved',
+        );
+        expect(store.saves, 2);
+      },
+    );
 
     test('a failing update does not poison later updates', () async {
       final store = _FakeRawStore();
@@ -87,8 +94,11 @@ void main() {
       expect(store.data['syncPaused'], isTrue);
       final vc = store.data['vaultConfig'] as Map;
       expect(vc['vaultId'], 'v1');
-      expect((vc['externalBlobConfig'] as Map)['kind'], 's3',
-          reason: 'sibling nested config must round-trip intact');
+      expect(
+        (vc['externalBlobConfig'] as Map)['kind'],
+        's3',
+        reason: 'sibling nested config must round-trip intact',
+      );
     });
   });
 }

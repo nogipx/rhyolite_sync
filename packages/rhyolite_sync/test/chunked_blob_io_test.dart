@@ -1,9 +1,8 @@
-import 'dart:typed_data';
-
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_blob/rpc_blob.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _v = 'vault-test';
 
@@ -303,6 +302,60 @@ void main() {
       final got = await io.download(up.manifestHash); // io has no cap
       expect(got, isNotNull);
       expect(got!.length, content.length);
+    });
+
+    // A refusal and a loss both come back as null, and a caller that cannot
+    // separate them reports one as the other — which is how "too large for
+    // this device" reached users as "your data may be gone".
+    test('a size refusal says so, on the DECLARED size', () async {
+      final content = _bytes('x' * 4000);
+      final up = await io.upload(content, {});
+      int? sawSize;
+      int? sawLimit;
+      final got = await _capped(500).download(
+        up.manifestHash,
+        onTooLarge: (size, limit) {
+          sawSize = size;
+          sawLimit = limit;
+        },
+      );
+
+      expect(got, isNull);
+      expect(sawLimit, 500, reason: 'the ceiling it crossed');
+      expect(
+        sawSize,
+        greaterThan(500),
+        reason: 'the size that crossed it, so the report can name both',
+      );
+    });
+
+    test('a blob within the cap reports nothing', () async {
+      final up = await io.upload(_bytes('small enough'), {});
+      var called = false;
+      final got = await _capped(1 << 20).download(
+        up.manifestHash,
+        onTooLarge: (_, _) => called = true,
+      );
+
+      expect(got, isNotNull);
+      expect(
+        called,
+        isFalse,
+        reason: 'a file that fits must not be announced as one that does not',
+      );
+    });
+
+    test('a blob the store does not have is a loss, not a refusal', () async {
+      // The other half of the distinction: null with no report means the bytes
+      // are absent, which is the case that IS worth alarming about.
+      var called = false;
+      final got = await _capped(1 << 20).download(
+        'deadbeef' * 8,
+        onTooLarge: (_, _) => called = true,
+      );
+
+      expect(got, isNull);
+      expect(called, isFalse);
     });
   });
 

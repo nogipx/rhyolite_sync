@@ -5,14 +5,13 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 
-import '../frontmatter/fm_store.dart';
-import '../frontmatter/fm_tail.dart';
+import '../storage/fm_store.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'causal_stability_gc.dart';
 import 'disk_reconciler.dart';
 import 'remote_applier.dart';
 import 'state_puller.dart';
 import 'state_pusher.dart';
-import 'path_normalize.dart';
 import 'state_record_codec.dart';
 import 'text_debounce_coordinator.dart';
 
@@ -60,7 +59,31 @@ class StateSyncEngine implements ISyncEngine {
     int? Function()? maxFileSizeBytes,
     Set<String> Function()? excludedExtensions,
     PathScope Function()? pathScope,
+
+    /// The local database's size in bytes, asked of the host.
+    ///
+    /// The engine owns stores, not the file they live in, so it cannot measure
+    /// this itself — see [_relieveDatabasePressure] for what it does with it.
+    Future<int?> Function()? databaseBytes,
+
+    /// Waits until writes have actually reached durable storage.
+    ///
+    /// On the IndexedDB VFS a write is acknowledged before it is performed, so
+    /// pages freed a moment ago are not yet pages the file can reuse. Without
+    /// this the sweep and the measurement that follows it are both reading a
+    /// state that has not happened.
+    Future<void> Function()? flushDatabase,
+    this.databaseLimitBytes = 950 * 1024 * 1024,
+
+    /// Bytes of a pull batch held in memory at once — see [BlobStaging].
+    ///
+    /// The default is the phone-safe one, because a host that does not say is
+    /// more likely to be constrained than not, and being wrong in that
+    /// direction costs throughput rather than the host process.
+    this.pullBatchBudgetBytes = 24 * 1024 * 1024,
   }) : _scheduler = scheduler,
+       _databaseBytes = databaseBytes,
+       _flushDatabase = flushDatabase,
        _maxFileSizeBytes = maxFileSizeBytes ?? (() => null),
        _excludedExtensions = excludedExtensions ?? (() => const <String>{}),
        _pathScope = pathScope ?? (() => PathScope.everything),
@@ -103,6 +126,18 @@ class StateSyncEngine implements ISyncEngine {
   /// read/chunked/uploaded. The host provides it from the subscription's
   /// PlanCapabilities (managed) or leaves it null (self-host / BYO storage).
   final int? Function() _maxFileSizeBytes;
+  final Future<int?> Function()? _databaseBytes;
+  final Future<void> Function()? _flushDatabase;
+
+  /// Above this the pull stops staging more blobs until room is made.
+  ///
+  /// A database that cannot allocate a page cannot allocate one for ANYTHING,
+  /// so the first thing to fail is not the cache that filled it but the sync
+  /// state beside it — which is how one vault went silently unsyncable for
+  /// hours. This is the line drawn short of that, not at it.
+  final int databaseLimitBytes;
+
+  final int pullBatchBudgetBytes;
 
   /// Live per-device denylist of lowercase extensions (no dot) the user chose
   /// not to sync on THIS device (data.json, not synced). Threaded into the
@@ -161,7 +196,13 @@ class StateSyncEngine implements ISyncEngine {
   /// can reuse the same authenticated WebSocket connection instead of opening
   /// a second one. Null before connect / after dispose.
   RpcCallerEndpoint? get endpoint => _conn?.endpoint;
-  BlobTransferHub? _blobHub;
+
+  /// Owns the backend, its hub and the blob-id key for this run — the three
+  /// share a lifetime, which was not visible while they were separate fields.
+  late final BlobStorageProvider _blobs = BlobStorageProvider(
+    buildInner: _buildInnerBlobStorage,
+    cipher: () => cipher,
+  );
   NotifyCoordinator? _notifyCoordinator;
 
   /// Watches the reconnecting connection's state. The notify subscription is an
@@ -283,6 +324,23 @@ class StateSyncEngine implements ISyncEngine {
   // Lifecycle
   // ---------------------------------------------------------------------------
 
+  /// Runs one named startup phase and records how long it took.
+  ///
+  /// The seams already had names — they were in the log lines — but each cost
+  /// four lines of Stopwatch around one line of work, and a phase that threw
+  /// logged nothing at all. The `finally` is the point: the duration you most
+  /// want is the one belonging to whatever just failed, and that was precisely
+  /// the case with no number.
+  Future<T> _phase<T>(String name, Future<T> Function() body) async {
+    final sw = Stopwatch()..start();
+    try {
+      return await body();
+    } finally {
+      sw.stop();
+      _log.info('startup phase: $name ${sw.elapsedMilliseconds}ms');
+    }
+  }
+
   @override
   Future<void> start({TaskCancelToken? token}) async {
     if (config.vaultId.isEmpty || cipher == null) {
@@ -340,63 +398,7 @@ class StateSyncEngine implements ISyncEngine {
         (startToken?.isCancelled ?? false) || generation != _startGeneration;
 
     try {
-      _store = FileStateStore(
-        client: dataClient,
-        vaultId: config.vaultId,
-        deviceId: config.deviceId,
-      );
-      // Timed like every other phase. These are reads of the LOCAL database,
-      // and the local database is shared with settings sync — a long write
-      // batch there has held them until the data client's own 60s call
-      // timeout, which looks from outside exactly like a dead network.
-      final swStores = Stopwatch()..start();
-      await _store!.load();
-      // deviceId doubles as the HLC nodeId — every TaggedValue this device
-      // emits is unambiguously attributable.
-      final nodeId = _store!.deviceId;
-
-      // The database came up empty while the HOST still remembers a deviceId
-      // for this vault: this install has synced before, so "empty" means the
-      // database is gone, not new. The engine recovers by itself (cursor 0 →
-      // full pull), but silently — and a full re-download of the vault plus
-      // the undo of any delete whose tombstone never reached the server is far
-      // too visible to leave unexplained. Say it out loud, once, at the only
-      // point where the distinction is still observable.
-      final hostDeviceId = config.deviceId;
-      if (_store!.loadedEmpty &&
-          hostDeviceId != null &&
-          hostDeviceId.isNotEmpty) {
-        _log.error(
-          'Local sync database is EMPTY but host remembers deviceId '
-          '$hostDeviceId for this vault — the database was lost (evicted '
-          'browser storage / failed open / manual reset). Restoring from the '
-          'server: pulling from cursor 0, every blob will be re-downloaded.',
-        );
-        _emit(SyncLocalStateLost(deviceId: hostDeviceId));
-      }
-
-      // Per-file Fugue sequences (text path). Binary files keep using the
-      // state-based blob path; the store stays small in vaults without
-      // any text edits.
-      _fugueStore = FugueStore(client: dataClient, vaultId: config.vaultId);
-      _fmStore = FmStore(client: dataClient, vaultId: config.vaultId);
-      // Persistent per-file disk signatures — lets startup skip unchanged text
-      // files and the reconciler short-circuit across plugin restarts.
-      _sigStore = StatSigStore(client: dataClient, vaultId: config.vaultId);
-      await _sigStore!.load();
-      final swFugueLoad = Stopwatch()..start();
-      await _fugueStore!.load();
-      await _fmStore!.load();
-      swFugueLoad.stop();
-      swStores.stop();
-      _log.info('startup phase: stores_load ${swStores.elapsedMilliseconds}ms');
-      final fugueStats = _fugueStore!.stats;
-      _log.info(
-        'FugueStore load: files=${fugueStats.files} '
-        'cached=${fugueStats.cached} '
-        'took=${swFugueLoad.elapsedMilliseconds}ms',
-      );
-
+      await _phase('stores_load', _loadStores);
       final conn = _connectionFactory(
         serverUrl: serverUrl,
         tokenProvider: config.tokenProvider,
@@ -452,75 +454,7 @@ class StateSyncEngine implements ISyncEngine {
       );
 
       _recordCodec = StateRecordCodec(cipher: cipher!);
-      final applier = RemoteApplier(
-        store: _store!,
-        fugueStore: _fugueStore!,
-        fmStore: _fmStore,
-        reconciler: _reconciler!,
-        codec: _recordCodec!,
-        blobStore: blobStore,
-        io: io,
-        changeProvider: changeProvider,
-        vaultId: config.vaultId,
-        vaultPath: vaultPath,
-        newChunkedIO: _newChunkedIO,
-        collectKnownChunks: _collectKnownChunks,
-        emit: _emit,
-        isFatalRejection: _rejections.isFatal,
-        log: _log,
-        excludedExtensions: _excludedExtensions,
-        pathScope: _pathScope,
-        forcedBinaryExtensions: () => _forcedBinaryExtensions,
-      );
-      _puller = StatePuller(
-        stateCaller: conn.stateCaller,
-        historyCaller: conn.historyCaller,
-        store: _store!,
-        blobStore: blobStore,
-        vaultId: config.vaultId,
-        rpcTimeout: _rpcTimeout,
-        getRemoteBlobStorage: _getRemoteBlobStorage,
-        newResolver: _newResolver,
-        applyFile: applier.apply,
-        handleEpochMismatch: _handleEpochMismatch,
-        emit: _emit,
-        isFatalRejection: _rejections.isFatal,
-        log: _log,
-        prefetchFiles: _prefetchFiles,
-        downloadConcurrency: startupUploadConcurrency,
-        shouldPrefetch: _recordWantedOnThisDevice,
-        pathOfRecord: _pathOfRecord,
-        clientName: () => config.clientName ?? '',
-        clientVersion: config.clientVersion ?? '',
-        clientKind: config.clientKind ?? '',
-      );
-      _pusher = StatePusher(
-        stateCaller: conn.stateCaller,
-        historyCaller: conn.historyCaller,
-        store: _store!,
-        codec: _recordCodec!,
-        vaultId: config.vaultId,
-        clientName: config.clientName,
-        clientVersion: config.clientVersion,
-        clientKind: config.clientKind,
-        rpcTimeout: _rpcTimeout,
-        emit: _emit,
-        handleEpochMismatch: _handleEpochMismatch,
-        clearPending: _clearPending,
-        pendingFileIds: () => _pendingFileIds,
-        log: _log,
-      );
-      // Attach the file-change listener BEFORE the (potentially slow)
-      // pull / StartupDiff / verify pipeline below, so a note edited DURING
-      // startup isn't lost. The host change provider attaches its vault
-      // listeners lazily on this first subscription (e.g.
-      // ObsidianChangeProvider.onListen), so until now nothing was watching
-      // the vault at all. Events are QUEUED while [_startupInProgress] (see
-      // [_onFileEvent]) and processed by [_drainStartupQueue] once the
-      // pipeline finishes — so they can't race with the pull / StartupDiff
-      // that mutate the store, yet none are dropped. Engine's own writes
-      // during the pull are still suppressed by the change provider, so the
-      // queue only collects real user edits.
+      _buildPipeline(conn);
       _startupInProgress = true;
       _fileEventsSub = changeProvider.changes.listen(_onFileEvent);
 
@@ -538,13 +472,53 @@ class StateSyncEngine implements ISyncEngine {
       // The account-server RPC behind this check is independent of the
       // sync server's blob policy, so it works even when the user has
       // no managed-storage access at all.
-      final swExt = Stopwatch()..start();
-      await _checkExternalBlobConfig(timeout: _kStartupMetaTimeout);
-      swExt.stop();
-      _log.info(
-        'startup phase: external_blob_config '
-        '${swExt.elapsedMilliseconds}ms',
+      await _phase(
+        'external_blob_config',
+        () => _checkExternalBlobConfig(timeout: _kStartupMetaTimeout),
       );
+      if (!_running || cancelled()) return;
+
+      // Reclaim the local blob cache BEFORE the pull, because the pull is the
+      // first thing that needs room to write.
+      //
+      // This sweep already existed and already knew what to drop. It ran in
+      // the housekeeping tier — after the startup pipeline, deliberately off
+      // the critical path. That ordering held a circular dependency nobody had
+      // reason to look at: the cleanup that keeps the database from filling up
+      // ran only after a startup that a full database makes fail. One vault
+      // reached 1.5 GB, could no longer allocate a page, and died in
+      // `initial_pull` on every attempt — so the sweep that would have freed
+      // the space never got to run, on any of them. It stayed that way for
+      // hours, and would have stayed that way forever.
+      //
+      // Reclaiming rows returns their pages to the freelist. The file does not
+      // shrink, but it stops being full, and that is the part that unsticks
+      // it.
+      //
+      // The sweep, and not `wipeAll`: it holds on to what the vault cannot
+      // rebuild — the versions of a file in conflict, whose bytes a
+      // conflict-copy has no other source for. Emptying the cache outright
+      // would take those with it, which is the silent conflict-copy loss this
+      // engine has already shipped once.
+
+      await _phase('blob_cache_reclaim', () async {
+        final gc = await runLocalBlobGc();
+        // Said out loud, and separately from the sweep's own line, because on
+        // one boot this is a MIGRATION and not housekeeping: a database
+        // carrying the old behaviour holds a second copy of every binary in
+        // the vault, and this is the pass that gives the space back. It
+        // happens once, silently, on an upgrade nobody watches — and the
+        // absence of exactly this line is why 1.5 GB accumulated with no one
+        // able to see it. Afterwards there is nothing to collect and nothing
+        // to say.
+        if (gc.deleted > 0) {
+          _log.warning(
+            'Reclaimed ${gc.deleted} cached blob(s) of ${gc.scanned} from the '
+            'local database — the vault and the server hold this content, so '
+            'the cache does not need to',
+          );
+        }
+      });
       if (!_running || cancelled()) return;
 
       // Load the vault-global force-binary policy BEFORE the initial pull and
@@ -555,150 +529,26 @@ class StateSyncEngine implements ISyncEngine {
       if (!_running || cancelled()) return;
 
       // Initial pull: brings local in line with whatever the server knows.
-      final swPull = Stopwatch()..start();
-      await _pull(context: startContext);
-      swPull.stop();
-      _log.info(
-        'startup phase: initial_pull '
-        '${swPull.elapsedMilliseconds}ms',
-      );
+      await _phase('initial_pull', () => _pull(context: startContext));
       if (!_running || cancelled()) return;
 
       // Disk reconciliation: detect new/modified files, upload their blobs.
-      final uploadStart = Stopwatch();
-      var lastTotal = 0;
-      final diff = await StateStartupDiff(
-        store: _store!,
-        blobStore: blobStore,
-        remoteBlobStorage: _getRemoteBlobStorage(),
-        io: io,
-        vaultPath: vaultPath,
-        vaultId: config.vaultId,
-        nodeId: nodeId,
-        readClock: () => _store!.nextHlc(),
-        writeClock: (_) {},
-        logger: _log,
-        sigStore: _sigStore,
-        maxFileSizeBytes: _maxFileSizeBytes,
-        uploadConcurrency: startupUploadConcurrency,
-        // Same keyed scheme for BOTH the binary upload and its change
-        // detection; otherwise stored (HMAC) chunk ids never match the
-        // recomputed ones and every binary re-uploads (or never persists).
-        blobIdKey: _resolveBlobIdKey(),
-        // Same keyed fileId scheme the reconciler/push path uses. Without it,
-        // startup's store lookups miss and binaries split-brain under a second
-        // (unkeyed) fileId.
-        recordIdKey: _resolveRecordIdKey(),
-        excludedExtensions: _excludedExtensions,
-        pathScope: _pathScope,
-        forcedBinaryExtensions: () => _forcedBinaryExtensions,
-        // Route text files through the Fugue reconciler so startup uses the
-        // same blob format as the runtime path. Without this, text was
-        // re-uploaded as raw bytes every startup (disk sha never matches the
-        // Fugue blob hash), bumping every text file's HLC and flooding
-        // putStates — which starved the server's per-vault seq allocator.
-        reconcileText: (relPath) => _reconciler!.reconcileWithDisk(relPath),
-        // The same work, split either side of the network, so the startup pass
-        // can upload a group of notes in one pair of requests. Text used to
-        // pay two requests per FILE while binaries paid two per eight.
-        planTextReconcile: (relPath) => _reconciler!.planTextReconcile(relPath),
-        commitTextReconcile: (plan, manifestHash, chunkHashes) =>
-            _reconciler!.commitTextReconcile(
-              plan,
-              manifestHash: manifestHash,
-              chunkHashes: chunkHashes,
-            ),
-        // A heartbeat through the scan. Without it the engine goes silent for
-        // as long as the walk takes — a minute on a large vault — and silence
-        // is exactly what the host's recovery reads as death.
-        onScanProgress: (scanned, total) =>
-            _emit(SyncStartupScanProgress(scanned: scanned, total: total)),
-        // Publish what has landed, every so often, instead of holding it all
-        // until the diff ends. Counted in files rather than time so the
-        // cadence follows the work.
-        onProgressPublished: _pushStartupProgress,
-        publishInterval: startupPublishInterval,
-        onUploadProgress: (completed, total) {
-          lastTotal = total;
-          if (completed == 0) uploadStart.start();
-          _emit(
-            SyncStartupBlobUploadProgress(completed: completed, total: total),
-          );
-        },
-        // The counter above says "40 of 251" and nothing about the 27 MB file
-        // that has held position 41 for a minute. This names it.
-        onFileTransfer: (relPath, sent, total, done) => _emit(
-          SyncBlobTransfer(
-            path: relPath,
-            upload: true,
-            sentBytes: sent,
-            totalBytes: total,
-            done: done,
-          ),
-        ),
-      ).call();
-      if (lastTotal > 0) {
-        uploadStart.stop();
-        _emit(
-          SyncStartupBlobUploadDone(
-            totalUploaded: lastTotal,
-            elapsed: uploadStart.elapsed,
-          ),
-        );
-      }
-      _log.info(
-        'Startup diff: ${diff.newFiles} new, ${diff.modifiedFiles} modified, ${diff.missingFileIds.length} missing',
+      final diff = await _phase(
+        'startup_diff',
+        () => _runStartupDiff(cancelled),
       );
+      await _publishStartupDiff(diff);
 
-      // A backend that refuses this device is a missing precondition, not an
-      // error to report and move past: the engine below will go on pulling on
-      // schedule and looking perfectly well while every upload is refused. Say
-      // so before any of that starts, and keep starting — the host needs a live
-      // engine to accept the corrected credentials.
-      if (diff.storageRefused != null) {
-        _emit(SyncStorageRefused(diff.storageRefused!));
-      }
-
-      // Surface files skipped for exceeding the size limit and seed the shared
-      // blocked-set so the reconciler can later emit SyncFileSizeUnblocked when
-      // one is deleted or shrinks. Re-emitted every startup → the UI's list is
-      // rebuilt from truth rather than lost across restarts.
-      for (final b in diff.blocked) {
-        _sizeBlockedPaths.add(b.path);
-        _emit(
-          SyncFileSizeBlocked(
-            path: b.path,
-            sizeBytes: b.sizeBytes,
-            limitBytes: b.limitBytes,
-          ),
-        );
-      }
-      // Surface files skipped by the per-device type-exclusion filter so the UI
-      // can show the count. Re-emitted every startup → rebuilt from truth.
-      for (final e in diff.excluded) {
-        _emit(SyncFileTypeExcluded(path: e.path, extension: e.extension));
-      }
-      // Same for the per-device folder filter.
-      for (final path in diff.outOfScope) {
-        _emit(SyncFileOutOfScope(path: path));
-      }
-      await _backfillNewlyInScope(diff.missingFileIds);
-      _reportVanishedFiles(diff);
-
-      final swStartupPush = Stopwatch()..start();
-      await _push();
-      await _store!.persistMeta();
-      swStartupPush.stop();
-      _log.info(
-        'startup phase: push+persist '
-        '${swStartupPush.elapsedMilliseconds}ms',
-      );
+      await _phase('push+persist', () async {
+        await _push();
+        await _store!.persistMeta();
+      });
 
       // Startup pipeline complete — process the file edits captured while it
       // ran. The change listener was attached before the pipeline; typing is
       // only subscribed now so the debounce coordinator doesn't schedule a
       // reconcile mid-startup.
-      await _drainStartupQueue();
+      await _phase('drain', _drainStartupQueue);
 
       // Housekeeping (local-blob GC + server blob-integrity verify) now runs
       // as low-priority BACKGROUND tasks rather than inline — off the startup
@@ -774,8 +624,7 @@ class StateSyncEngine implements ISyncEngine {
     _fileEventsSub = null;
     await _typingSub?.cancel();
     _typingSub = null;
-    _blobHub?.dispose();
-    _blobHub = null;
+    _blobs.reset();
     await _conn?.dispose();
     _conn = null;
     _store = null;
@@ -788,8 +637,6 @@ class StateSyncEngine implements ISyncEngine {
     // from the current cipher. Without this, swapping the cipher (vault
     // switch / passphrase change) and restarting reuses the OLD vault's
     // blob-id key, so recomputed blob ids diverge from what is stored.
-    _blobIdKey = null;
-    _blobIdKeyResolved = false;
     _recordIdKey = null;
     _recordIdKeyResolved = false;
     _textDebounce.cancelAll();
@@ -800,6 +647,18 @@ class StateSyncEngine implements ISyncEngine {
     // us. Never dispose it — the host does, on its own teardown.
     _scheduler.cancelGroup(_schedulerGroup);
     _scheduler.clearMinPriority();
+    // Cancelling only asks. Wait for the asking to take effect, because the
+    // host closes the database next and a task still inside an RPC would be
+    // aborted against a closed one — see [_backgroundTasks].
+    //
+    // Bounded: a task that will not come back must not hold a teardown open.
+    // Two seconds is long enough for a call to unwind and short enough that a
+    // wedged one is a delay rather than a hang.
+    if (_ownTasks.isNotEmpty) {
+      await Future.wait(_ownTasks.toList())
+          .timeout(const Duration(seconds: 2))
+          .catchError((_) => <void>[]);
+    }
     _emit(SyncStopped());
   }
 
@@ -807,10 +666,20 @@ class StateSyncEngine implements ISyncEngine {
   Future<bool> healthCheck({
     Duration timeout = const Duration(seconds: 5),
   }) async {
-    if (!_running) return false;
+    return await probe(timeout: timeout) == EngineProbe.alive;
+  }
+
+  @override
+  Future<EngineProbe> probe({
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    // Not running and running-but-unreachable are opposite facts, and the
+    // caller acts on them oppositely. Collapsed into one `false`, the host
+    // read a stopped engine as a slow one and waited.
+    if (!_running) return EngineProbe.stopped;
     final caller = _conn?.stateCaller;
     final store = _store;
-    if (caller == null || store == null) return false;
+    if (caller == null || store == null) return EngineProbe.stopped;
     try {
       // sinceCursor = current cursor — the server returns an empty record
       // batch when there is nothing new, so this is the cheapest unary
@@ -825,10 +694,10 @@ class StateSyncEngine implements ISyncEngine {
             ),
           )
           .timeout(timeout);
-      return true;
+      return EngineProbe.alive;
     } catch (e) {
-      _log.warning('healthCheck failed: $e');
-      return false;
+      _log.warning('probe failed: $e');
+      return EngineProbe.unreachable;
     }
   }
 
@@ -867,61 +736,82 @@ class StateSyncEngine implements ISyncEngine {
     // and we re-schedule it to finish once interactive work clears — mirroring
     // [_scheduleBackground]. Re-scheduling is fire-and-forget: awaiting it here
     // would hold the lane and deadlock the very push we yielded for.
-    await _scheduler.schedule(
-      key: 'pull',
-      group: _schedulerGroup,
-      priority: _pForeground,
-      preemptible: true,
-      run: (token) async {
-        if (!_running) return;
-        final rpcToken = RpcCancellationToken();
-        unawaited(
-          token.onCancel.then((_) {
-            if (!rpcToken.isCancelled) {
-              rpcToken.cancel('pull preempted by interactive work');
-            }
-          }),
-        );
-        final context = RpcContext.withCancellation(rpcToken);
-        try {
-          await _whileBusy(() async {
-            _stagedByPull.addAll(await _pull(context: context));
-            // Publish anything the pull produced locally: a value the pre-join
-            // reconcile captured (an edit made inside the pull window), a sealed
-            // conflict merge, or this device's own value kept in a divergent
-            // union. Without this, such a contribution is never pushed and the
-            // peer never receives it (the "edit right after an incoming change
-            // doesn't sync" bug). No context: it's a quick putStates (blobs are
-            // already uploaded) and must complete even if a fresh edit preempts,
-            // else the captured value is stranded again. No-op when nothing is
-            // dirty (see StatePusher._collectDirty).
-            await _push();
-            await _store?.persistMeta();
-            // Causal-stability GC piggybacks on pull cadence; it self-throttles.
-            await _causalGc.run();
-            // A pull that applied anything staged every downloaded chunk in the
-            // local cache — that is how prefetch hands bytes to apply — and the
-            // moment apply wrote the file, the vault holds those bytes itself.
-            // The sweep used to be scheduled once, at start, so an attachment
-            // pulled today sat in the database as a second copy of a file on
-            // disk until tomorrow. On a first full sync that is the whole vault:
-            // ~1.3 GB duplicated into sqlite for the rest of the session.
-            //
-            // Scoped to exactly those ids, not a full sweep: the full one walks
-            // every state and stats every attachment, which is affordable once
-            // at startup and not after every pull. Its own key, so a burst of
-            // pulls coalesces into one scoped sweep without displacing (or being
-            // displaced by) the startup sweep, and [_stagedByPull] accumulates
-            // across the pulls that coalesced.
-            _scheduleStagedBlobGc();
-          });
-        } on RpcCancelledException catch (_) {
-          _log.info('Pull preempted by interactive work — re-scheduling');
-          if (_running) unawaited(triggerPull());
-        } catch (e) {
-          _log.warning('Pull error: $e');
-        }
-      },
+    await _track(
+      _scheduler.schedule(
+        key: 'pull',
+        group: _schedulerGroup,
+        priority: _pForeground,
+        preemptible: true,
+        run: (token) async {
+          if (!_running) return;
+          final rpcToken = RpcCancellationToken();
+          unawaited(
+            token.onCancel.then((_) {
+              if (!rpcToken.isCancelled) {
+                rpcToken.cancel('pull preempted by interactive work');
+              }
+            }),
+          );
+          final context = RpcContext.withCancellation(rpcToken);
+          try {
+            await _whileBusy(() async {
+              // Blobs held ONLY because a file was in conflict, captured before
+              // the pull that may end the conflict.
+              //
+              // The pin releases itself — it is `hasConflict`, read live, not a
+              // flag anyone has to clear — so a resolved conflict's blobs are
+              // collectable from the moment the register collapses. What they
+              // are not is REACHABLE: the collapsed register no longer lists the
+              // loser's values, so after the fact there is nothing left to name
+              // them by. Hence the snapshot, taken while they can still be
+              // enumerated and handed to the same sweep the pull already runs.
+              //
+              // Costs a walk of the conflicted files only, which on any healthy
+              // vault is none.
+              final pinnedByConflict = _blobIdsOfConflictedFiles();
+              _stagedByPull.addAll(await _pull(context: context));
+              for (final entry in pinnedByConflict.entries) {
+                if (!(_store?.hasConflict(entry.key) ?? true)) {
+                  _stagedByPull.addAll(entry.value);
+                }
+              }
+              // Publish anything the pull produced locally: a value the pre-join
+              // reconcile captured (an edit made inside the pull window), a sealed
+              // conflict merge, or this device's own value kept in a divergent
+              // union. Without this, such a contribution is never pushed and the
+              // peer never receives it (the "edit right after an incoming change
+              // doesn't sync" bug). No context: it's a quick putStates (blobs are
+              // already uploaded) and must complete even if a fresh edit preempts,
+              // else the captured value is stranded again. No-op when nothing is
+              // dirty (see StatePusher._collectDirty).
+              await _push();
+              await _store?.persistMeta();
+              // Causal-stability GC piggybacks on pull cadence; it self-throttles.
+              await _causalGc.run();
+              // A pull that applied anything staged every downloaded chunk in the
+              // local cache — that is how prefetch hands bytes to apply — and the
+              // moment apply wrote the file, the vault holds those bytes itself.
+              // The sweep used to be scheduled once, at start, so an attachment
+              // pulled today sat in the database as a second copy of a file on
+              // disk until tomorrow. On a first full sync that is the whole vault:
+              // ~1.3 GB duplicated into sqlite for the rest of the session.
+              //
+              // Scoped to exactly those ids, not a full sweep: the full one walks
+              // every state and stats every attachment, which is affordable once
+              // at startup and not after every pull. Its own key, so a burst of
+              // pulls coalesces into one scoped sweep without displacing (or being
+              // displaced by) the startup sweep, and [_stagedByPull] accumulates
+              // across the pulls that coalesced.
+              _scheduleStagedBlobGc();
+            });
+          } on RpcCancelledException catch (_) {
+            _log.info('Pull preempted by interactive work — re-scheduling');
+            if (_running) unawaited(triggerPull());
+          } catch (e) {
+            _log.warning('Pull error: $e');
+          }
+        },
+      ),
     );
   }
 
@@ -1225,6 +1115,182 @@ class StateSyncEngine implements ISyncEngine {
   /// nothing, and above all does not tear down the start that replaced it.
   int _startGeneration = 0;
 
+  /// Assembles this run's pipeline: applier, puller, pusher and the notify
+  /// coordinator, all over the connection [conn] just opened.
+  ///
+  /// One place, one time. They were built inline in the middle of start(),
+  /// which made it impossible to see that they form a set — every one of them
+  /// closes over the stores this run loaded, and a start that replaced some
+  /// but not others is the shape of several past bugs.
+  void _buildPipeline(SyncConnection conn) {
+    final applier = RemoteApplier(
+      store: _store!,
+      fugueStore: _fugueStore!,
+      fmStore: _fmStore,
+      reconciler: _reconciler!,
+      codec: _recordCodec!,
+      blobStore: blobStore,
+      io: io,
+      changeProvider: changeProvider,
+      vaultId: config.vaultId,
+      vaultPath: vaultPath,
+      newChunkedIO: _newChunkedIO,
+      collectKnownChunks: _collectKnownChunks,
+      emit: _emit,
+      isFatalRejection: _rejections.isFatal,
+      log: _log,
+      excludedExtensions: _excludedExtensions,
+      pathScope: _pathScope,
+      forcedBinaryExtensions: () => _forcedBinaryExtensions,
+    );
+    _puller = StatePuller(
+      stateCaller: conn.stateCaller,
+      historyCaller: conn.historyCaller,
+      store: _store!,
+      blobStore: blobStore,
+      vaultId: config.vaultId,
+      rpcTimeout: _rpcTimeout,
+      getRemoteBlobStorage: _getRemoteBlobStorage,
+      newResolver: _newResolver,
+      applyFile: applier.apply,
+      handleEpochMismatch: _handleEpochMismatch,
+      emit: _emit,
+      isFatalRejection: _rejections.isFatal,
+      log: _log,
+      prefetchFiles: _prefetchFiles,
+      downloadConcurrency: startupUploadConcurrency,
+      relievePressure: _relieveDatabasePressure,
+      shouldPrefetch: _recordWantedOnThisDevice,
+      pathOfRecord: _pathOfRecord,
+      checkpoint: _flushDatabase == null ? null : _checkpointDatabase,
+      openStaging: _openPullStaging,
+      closeStaging: _closePullStaging,
+      clientName: () => config.clientName ?? '',
+      clientVersion: config.clientVersion ?? '',
+      clientKind: config.clientKind ?? '',
+    );
+    _pusher = StatePusher(
+      stateCaller: conn.stateCaller,
+      historyCaller: conn.historyCaller,
+      store: _store!,
+      codec: _recordCodec!,
+      vaultId: config.vaultId,
+      clientName: config.clientName,
+      clientVersion: config.clientVersion,
+      clientKind: config.clientKind,
+      rpcTimeout: _rpcTimeout,
+      emit: _emit,
+      handleEpochMismatch: _handleEpochMismatch,
+      clearPending: _clearPending,
+      pendingFileIds: () => _pendingFileIds,
+      log: _log,
+    );
+    // Attach the file-change listener BEFORE the (potentially slow)
+    // pull / StartupDiff / verify pipeline below, so a note edited DURING
+    // startup isn't lost. The host change provider attaches its vault
+    // listeners lazily on this first subscription (e.g.
+    // ObsidianChangeProvider.onListen), so until now nothing was watching
+    // the vault at all. Events are QUEUED while [_startupInProgress] (see
+    // [_onFileEvent]) and processed by [_drainStartupQueue] once the
+    // pipeline finishes — so they can't race with the pull / StartupDiff
+    // that mutate the store, yet none are dropped. Engine's own writes
+    // during the pull are still suppressed by the change provider, so the
+    // queue only collects real user edits.
+  }
+
+  /// Opens this run's stores and reads them into memory.
+  ///
+  /// First phase of [start], named after the `startup phase: stores_load` line
+  /// its caller logs. Split out because start()'s phases were already named in
+  /// its own log output — the seams were documented long before they were
+  /// code.
+  ///
+  /// Carries one judgement worth keeping visible: a local database that loads
+  /// EMPTY while the host still remembers a deviceId for this vault has been
+  /// lost, not started fresh. Saying so is the difference between a silent
+  /// re-download of the whole vault and a user being told why.
+  Future<void> _loadStores() async {
+    _store = FileStateStore(
+      client: dataClient,
+      vaultId: config.vaultId,
+      deviceId: config.deviceId,
+    );
+    // Timed by the caller like every other phase. These are reads of the LOCAL
+    // database, and the local database is shared with settings sync — a long
+    // write batch there has held them until the data client's own 60s call
+    // timeout, which looks from outside exactly like a dead network.
+    await _store!.load();
+    // The database came up empty while the HOST still remembers a deviceId
+    // for this vault: this install has synced before, so "empty" means the
+    // database is gone, not new. The engine recovers by itself (cursor 0 →
+    // full pull), but silently — and a full re-download of the vault plus
+    // the undo of any delete whose tombstone never reached the server is far
+    // too visible to leave unexplained. Say it out loud, once, at the only
+    // point where the distinction is still observable.
+    // How much of the vault this database came back with.
+    //
+    // "Empty" below is the loud case; the quiet one is coming back with FAR
+    // less than was applied last run, which is what an undrained write queue
+    // looks like and which nothing here said. A pull's cost is decided by this
+    // number — every file it does NOT hold is a record re-fetched and a blob
+    // re-considered — so it belongs beside the phase timing that precedes it.
+    _log.info(
+      'stores_load: ${_store!.count} file state(s) '
+      'from ${_store!.loadedRowCount} row(s)'
+      '${_store!.loadSkipped > 0 ? ', ${_store!.loadSkipped} unreadable' : ''}',
+    );
+
+    final hostDeviceId = config.deviceId;
+    if (_store!.loadedEmpty &&
+        hostDeviceId != null &&
+        hostDeviceId.isNotEmpty) {
+      _log.error(
+        'Local sync database is EMPTY but host remembers deviceId '
+        '$hostDeviceId for this vault — the database was lost (evicted '
+        'browser storage / failed open / manual reset). Restoring from the '
+        'server: pulling from cursor 0, every blob will be re-downloaded.',
+      );
+      _emit(SyncLocalStateLost(deviceId: hostDeviceId));
+    }
+
+    // Per-file Fugue sequences (text path). Binary files keep using the
+    // state-based blob path; the store stays small in vaults without
+    // any text edits.
+    _fugueStore = FugueStore(client: dataClient, vaultId: config.vaultId);
+    _fmStore = FmStore(client: dataClient, vaultId: config.vaultId);
+    // Persistent per-file disk signatures — lets startup skip unchanged text
+    // files and the reconciler short-circuit across plugin restarts.
+    _sigStore = StatSigStore(client: dataClient, vaultId: config.vaultId);
+    await _sigStore!.load();
+    final swFugueLoad = Stopwatch()..start();
+    await _fugueStore!.load();
+    await _fmStore!.load();
+    swFugueLoad.stop();
+    // Kept separate from the phase total: the Fugue and frontmatter stores are
+    // the part that grows with the vault, so the two numbers together say
+    // whether a slow load is size or contention.
+    final fugueStats = _fugueStore!.stats;
+    _log.info(
+      'FugueStore load: files=${fugueStats.files} '
+      'cached=${fugueStats.cached} '
+      'took=${swFugueLoad.elapsedMilliseconds}ms',
+    );
+  }
+
+  /// Whether the run identified by [generation] is still the current one.
+  ///
+  /// `!_running` asks whether SOME run is going, which is not the same
+  /// question. A loop that captured its collaborators at entry and then
+  /// iterates will, after a stop-and-start, see `_running == true` again and
+  /// carry on — writing into the store its own run had, which the engine has
+  /// since replaced. Those writes reach the database and never reach the live
+  /// registers, and the divergence surfaces on the next load.
+  ///
+  /// Capture the generation where the collaborators are captured, and ask this
+  /// instead of the flag.
+  bool _stillMyRun(int generation) =>
+      _running && generation == _startGeneration;
+
   /// Depth of nested "the user must not interrupt this" work.
   ///
   /// A counter, not a flag: the startup pipeline contains a pull, and a pull
@@ -1393,11 +1459,13 @@ class StateSyncEngine implements ISyncEngine {
   Future<void> _scheduleReconcile(String relPath) {
     if (!_running) return Future<void>.value();
     final fileId = _deterministicFileId(relPath);
-    return _scheduler.schedule(
-      key: fileId,
-      group: _schedulerGroup,
-      priority: _pInteractive,
-      run: (token) => _runReconcilePush(relPath, fileId, token),
+    return _track(
+      _scheduler.schedule(
+        key: fileId,
+        group: _schedulerGroup,
+        priority: _pInteractive,
+        run: (token) => _runReconcilePush(relPath, fileId, token),
+      ),
     );
   }
 
@@ -1479,6 +1547,32 @@ class StateSyncEngine implements ISyncEngine {
   /// interruptions is the task's own responsibility (see the blob verify's
   /// `confirmedPresent`), because a task that restarts from zero cannot be
   /// rescued by any delay.
+  /// Every task this engine has in flight, of any priority.
+  ///
+  /// Tracked so [stop] can WAIT for them, not merely signal them. Cancelling a
+  /// task sets its token; the task returns at its next check, which may be
+  /// after an RPC it has already issued. Until rpc_dart 5.0.0 a call left in
+  /// flight against a store the host then closed failed silently; closing the
+  /// transport now aborts in-flight handlers, so the same call fails loudly and
+  /// the error lands wherever the host happens to be — in tests, on whichever
+  /// one runs next; in the plugin, on unload, where nobody is listening.
+  ///
+  /// The host closes the database immediately after stopping us. That order is
+  /// only safe if stopping actually means stopped.
+  ///
+  /// ALL of them, including the interactive reconciles: those are the busiest
+  /// path here and they went to the scheduler directly, so a register that
+  /// covered only background work missed exactly the task most likely to be
+  /// running when someone quits.
+  final Set<Future<void>> _ownTasks = {};
+
+  /// Registers [task] until it finishes, and hands it straight back.
+  Future<void> _track(Future<void> task) {
+    _ownTasks.add(task);
+    unawaited(task.whenComplete(() => _ownTasks.remove(task)));
+    return task;
+  }
+
   void _scheduleBackground(
     Object key,
     Future<void> Function(RpcContext) run, {
@@ -1486,7 +1580,8 @@ class StateSyncEngine implements ISyncEngine {
     Duration delay = Duration.zero,
   }) {
     if (!_running) return;
-    _scheduler.schedule(
+    late final Future<void> task;
+    task = _scheduler.schedule(
       key: key,
       group: _schedulerGroup,
       priority: _pMaintenance,
@@ -1525,6 +1620,7 @@ class StateSyncEngine implements ISyncEngine {
         }
       },
     );
+    _track(task);
   }
 
   /// Runs [task] as a low-priority background unit on the engine's sync
@@ -1550,18 +1646,103 @@ class StateSyncEngine implements ISyncEngine {
     // sibling task directly so callers (e.g. settings sync) still proceed.
     // Nothing can cancel it then, so hand it a token nobody signals.
     if (!_running) return task(TaskCancelController().token);
-    return _scheduler.schedule(
-      key: key,
-      group: _schedulerGroup,
-      priority: _pBackground,
-      // The scheduler runs ONE task at a time, so this is not a lane that
-      // yields on its own: without this flag a settings pull kept the slot
-      // while the user's Resume queued behind it, and only the RPC layer's
-      // 60s timeout broke the tie.
-      preemptible: true,
-      run: task,
+    // Tracked like our own: it runs in our group and on our stores, so a
+    // sibling's task in flight is one more thing stop() must not leave behind.
+    return _track(
+      _scheduler.schedule(
+        key: key,
+        group: _schedulerGroup,
+        priority: _pBackground,
+        // The scheduler runs ONE task at a time, so this is not a lane that
+        // yields on its own: without this flag a settings pull kept the slot
+        // while the user's Resume queued behind it, and only the RPC layer's
+        // 60s timeout broke the tie.
+        preemptible: true,
+        run: task,
+      ),
     );
   }
+
+  /// Makes room before the pull stages more blobs, and says so when it cannot.
+  ///
+  /// The pull is the only thing that grows this database now: uploads stopped
+  /// mirroring into the cache, so what remains is `prefetchAll` staging chunks
+  /// for the apply that follows. That staging is transient by design and swept
+  /// after each pull — but a large enough pull can outrun the sweep, and the
+  /// consequence is not a slow cache. It is a database that cannot allocate a
+  /// page, which fails the sync state beside the cache first.
+  ///
+  /// Three steps, in this order for a reason:
+  ///   1. FLUSH, because the IndexedDB VFS acknowledges a write before
+  ///      performing it — measuring first would measure a state that has not
+  ///      happened yet;
+  ///   2. SWEEP, which is what actually returns pages;
+  ///   3. MEASURE AGAIN, because whether it worked is the only thing worth
+  ///      reporting.
+  ///
+  /// Returns whether there is room. False does NOT stop the pull: at that
+  /// point the space is live data, not staging, and sweeping cannot help —
+  /// refusing to sync would trade a full database for a stale vault, which is
+  /// the worse of the two. It is said loudly instead, once per pull.
+  Future<bool> _relieveDatabasePressure() async {
+    final measure = _databaseBytes;
+    if (measure == null) return true;
+    int? bytes;
+    try {
+      bytes = await measure();
+    } catch (_) {
+      // A measurement that fails is not a reason to stop syncing.
+      return true;
+    }
+    if (bytes == null || bytes < databaseLimitBytes) return true;
+
+    _log.warning(
+      'Local database at ${_mb(bytes)} of ${_mb(databaseLimitBytes)} — '
+      'flushing and reclaiming before staging more',
+    );
+    try {
+      await _flushDatabase?.call();
+    } catch (_) {
+      // Best-effort: the sweep below is still worth running.
+    }
+    await runLocalBlobGc();
+    try {
+      await _flushDatabase?.call();
+      bytes = await measure() ?? bytes;
+    } catch (_) {
+      return true;
+    }
+    if (bytes < databaseLimitBytes) {
+      _log.info('Local database back to ${_mb(bytes)} after reclaim');
+      return true;
+    }
+    _log.error(
+      'Local database still at ${_mb(bytes)} after reclaim — the space is live '
+      'data, not cache. Syncing continues; compacting is what returns it.',
+    );
+    _emit(SyncDatabaseFull(bytes: bytes, limitBytes: databaseLimitBytes));
+    return false;
+  }
+
+  /// Makes the batch just banked durable, and says what that cost.
+  ///
+  /// Timed and logged because the wait is deliberate and someone will
+  /// reasonably ask what the pull is doing standing still. A drain that takes
+  /// seconds per batch is the mechanism working; one that takes minutes is a
+  /// host problem worth seeing rather than absorbing silently.
+  Future<void> _checkpointDatabase() async {
+    final flush = _flushDatabase;
+    if (flush == null) return;
+    final sw = Stopwatch()..start();
+    await flush();
+    sw.stop();
+    if (sw.elapsedMilliseconds > 250) {
+      _log.info('Pull: checkpoint drained in ${sw.elapsedMilliseconds}ms');
+    }
+  }
+
+  static String _mb(int bytes) =>
+      '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
 
   /// Re-runs the local blob GC now that a sibling sync can report its live
   /// blobs.
@@ -1581,6 +1762,28 @@ class StateSyncEngine implements ISyncEngine {
   /// Drained by [_scheduleStagedBlobGc]; accumulates across pulls that
   /// coalesced onto one pending sweep.
   final Set<String> _stagedByPull = {};
+
+  /// Blob ids of every file currently in conflict, by fileId.
+  ///
+  /// Only conflicts pin anything in the cache now, so this is the whole of
+  /// what a resolution can release — and it has to be read before the
+  /// resolution, because collapsing the register discards the losing values
+  /// and the ids with them.
+  Map<String, Set<String>> _blobIdsOfConflictedFiles() {
+    final store = _store;
+    if (store == null) return const {};
+    final out = <String, Set<String>>{};
+    for (final fileId in store.fileIds) {
+      if (!store.hasConflict(fileId)) continue;
+      final refs = <String>{};
+      for (final value in store.currentValues(fileId)) {
+        if (value.blobRef.isNotEmpty) refs.add(value.blobRef);
+        refs.addAll(value.chunks);
+      }
+      if (refs.isNotEmpty) out[fileId] = refs;
+    }
+    return out;
+  }
 
   void _scheduleStagedBlobGc() {
     if (_stagedByPull.isEmpty) return;
@@ -1683,10 +1886,18 @@ class StateSyncEngine implements ISyncEngine {
       externalLiveIds: siblingLiveBlobIds,
       isRegenerable: _blobsRebuildable,
     )(context: context, candidates: candidates);
-    if (gc.skipped) {
-      _log.info('Local blob GC skipped: sibling live set unavailable');
-    } else if (gc.deleted > 0) {
-      _log.info('Local blob GC: scanned=${gc.scanned} deleted=${gc.deleted}');
+    // `skipped` stopped meaning "did nothing" when the sweep learned to
+    // narrow itself instead of forfeiting the pass: with the sibling silent it
+    // still collects what our own states claim, and only leaves the unknown
+    // ids alone. Reporting that as "skipped" tells the next person reading
+    // these logs the opposite of what happened.
+    if (gc.deleted > 0 || gc.scanned > 0) {
+      _log.info(
+        'Local blob GC: scanned=${gc.scanned} deleted=${gc.deleted}'
+        '${gc.skipped ? ' (narrowed to our own — sibling not ready)' : ''}',
+      );
+    } else if (gc.skipped) {
+      _log.info('Local blob GC: nothing to scan');
     }
     return gc;
   }
@@ -1807,39 +2018,36 @@ class StateSyncEngine implements ISyncEngine {
   /// path refetches from the server, and blob verify re-derives. Costs one
   /// stat per binary file, on the maintenance tier.
   Future<bool> _blobsRebuildable(FileState state) async {
-    if (state.tombstone || state.path.isEmpty) return false;
-    // A file in conflict has SEVERAL live values under one fileId and one
-    // path, and the checks below cannot tell them apart: they ask whether a
-    // file exists at that path with a matching signature, which is true for
-    // every value in the register though only ONE of them is the content on
-    // disk. Say yes and the losing version's chunks are evicted as
-    // "regenerable" from bytes that would only ever reproduce the winner —
-    // and the conflict copy that should preserve it then has nowhere to read
-    // it from but the network. Conflicts are rare and short-lived; keeping
-    // every blob of a contested file until the resolver collapses it costs
-    // almost nothing.
-    if (_store?.hasConflict(state.fileId) ?? true) return false;
-    // A note's blob IS its Fugue tree, and the tree is in the FugueStore — so
-    // caching the blob keeps a second copy of something [_regenerateBlobs]
-    // re-encodes byte for byte. Asked without decoding: this runs over every
-    // file in the vault, and decoding each tree to answer yes/no would cost
-    // more than the sweep saves.
+    // Everything here is rebuildable now, and the one exception is the reason
+    // this still takes a state at all.
     //
-    // Being wrong here is bounded. Regeneration is id-checked, so a tree that
-    // has since moved on heals nothing rather than healing wrongly, and the
-    // note's own content is on disk and in the store either way — what a
-    // failed heal loses is a stale blobRef the next push replaces anyway.
-    if (_detector.isText(state.path)) {
-      return _fugueStore?.has(state.fileId) ?? false;
-    }
-    // A signature means a reconcile once read this file and derived
-    // state.blobRef from what it found.
-    final sig = _sigStore?.get(state.fileId);
-    if (sig == null) return false;
-    final stat = await io.statFile('$vaultPath/${state.path}');
-    if (stat == null) return false;
-    return stat.mtimeMs == sig.mtimeMs && stat.sizeBytes == sig.sizeBytes;
+    // The old answer asked whether the vault could reproduce these exact bytes
+    // — a matching signature for a binary, a tree in the FugueStore for a note
+    // — and kept the cached copy whenever it could not be sure. That was right
+    // while UPLOADS filled this cache and the local copy could be the last one
+    // anywhere. It no longer is: uploads do not cache, so the only thing that
+    // puts bytes here is `prefetchAll` staging a pull, and every one of those
+    // came FROM the server and is still there.
+    //
+    // Under the old rule the pins were most of a vault, which is how one grew
+    // to 1.5 GB. A tombstone was "not rebuildable", so the blobs of deleted
+    // files were kept. A file with no recorded signature was "not
+    // rebuildable", and a file that arrived by pull has no signature until
+    // some later reconcile reads it — so every downloaded attachment pinned
+    // its own chunks, permanently. Neither is a last copy. Both are on the
+    // server, and the binaries are on disk as well.
+    //
+    // A file in conflict keeps its blobs. Several live values share one
+    // fileId and one path, only one of them is what is on disk, and the losing
+    // version's bytes are what a conflict-copy has to write. `download` does
+    // try the server first and this is belt-and-braces for a device that is
+    // offline when it resolves — but conflicts are rare and short-lived, and
+    // the alternative is the silent conflict-copy loss this engine has already
+    // shipped once.
+    if (_store?.hasConflict(state.fileId) ?? true) return false;
+    return true;
   }
+
 
   /// Reproduces blobs for [relPath] from the copy the vault already holds, for
   /// a caller that has lost them (a chunk the server dropped, a cache we
@@ -1934,6 +2142,159 @@ class StateSyncEngine implements ISyncEngine {
     }
   }
 
+  /// Walks the vault, uploads what changed, and reports as it goes.
+  ///
+  /// [cancelled] is the run's own supersede check, passed rather than reached
+  /// for: this pass belongs to ONE start, and the engine used to test `_running`
+  /// before calling in and never again — so the pass could outlive the session
+  /// that started it, and what it banked afterwards was written on behalf of
+  /// nobody.
+  ///
+  /// The upload counters are locals here because that is their whole lifetime.
+  /// While they lived in [start] alongside everything else, this phase could
+  /// not be moved without deciding, one by one, which of a dozen variables it
+  /// was entitled to touch.
+  Future<StateStartupDiffResult> _runStartupDiff(
+    bool Function() cancelled,
+  ) async {
+    final uploadStart = Stopwatch();
+    var lastTotal = 0;
+    final diff = await StateStartupDiff(
+      // The pass belongs to THIS run. Previously the engine tested _running
+      // before calling in and never again, so the pass could outlive the
+      // session that started it — and what it banked afterwards was written
+      // on behalf of nobody.
+      isCancelled: () => !_running || cancelled(),
+      store: _store!,
+      blobStore: blobStore,
+      remoteBlobStorage: _getRemoteBlobStorage(),
+      io: io,
+      vaultPath: vaultPath,
+      vaultId: config.vaultId,
+      // Read from the store rather than carried down from the stores phase:
+      // deviceId doubles as the HLC nodeId and the store is its owner.
+      nodeId: _store!.deviceId,
+      readClock: () => _store!.nextHlc(),
+      writeClock: (_) {},
+      logger: _log,
+      sigStore: _sigStore,
+      maxFileSizeBytes: _maxFileSizeBytes,
+      uploadConcurrency: startupUploadConcurrency,
+      // Same keyed scheme for BOTH the binary upload and its change
+      // detection; otherwise stored (HMAC) chunk ids never match the
+      // recomputed ones and every binary re-uploads (or never persists).
+      blobIdKey: _resolveBlobIdKey(),
+      // Same keyed fileId scheme the reconciler/push path uses. Without it,
+      // startup's store lookups miss and binaries split-brain under a second
+      // (unkeyed) fileId.
+      recordIdKey: _resolveRecordIdKey(),
+      excludedExtensions: _excludedExtensions,
+      pathScope: _pathScope,
+      forcedBinaryExtensions: () => _forcedBinaryExtensions,
+      // Route text files through the Fugue reconciler so startup uses the
+      // same blob format as the runtime path. Without this, text was
+      // re-uploaded as raw bytes every startup (disk sha never matches the
+      // Fugue blob hash), bumping every text file's HLC and flooding
+      // putStates — which starved the server's per-vault seq allocator.
+      reconcileText: (relPath) => _reconciler!.reconcileWithDisk(relPath),
+      // The same work, split either side of the network, so the startup pass
+      // can upload a group of notes in one pair of requests. Text used to
+      // pay two requests per FILE while binaries paid two per eight.
+      planTextReconcile: (relPath) => _reconciler!.planTextReconcile(relPath),
+      commitTextReconcile: (plan, manifestHash, chunkHashes) =>
+          _reconciler!.commitTextReconcile(
+            plan,
+            manifestHash: manifestHash,
+            chunkHashes: chunkHashes,
+          ),
+      // A heartbeat through the scan. Without it the engine goes silent for
+      // as long as the walk takes — a minute on a large vault — and silence
+      // is exactly what the host's recovery reads as death.
+      onScanProgress: (scanned, total) =>
+          _emit(SyncStartupScanProgress(scanned: scanned, total: total)),
+      // Publish what has landed, every so often, instead of holding it all
+      // until the diff ends. Counted in files rather than time so the
+      // cadence follows the work.
+      onProgressPublished: _pushStartupProgress,
+      publishInterval: startupPublishInterval,
+      onUploadProgress: (completed, total) {
+        lastTotal = total;
+        if (completed == 0) uploadStart.start();
+        _emit(
+          SyncStartupBlobUploadProgress(completed: completed, total: total),
+        );
+      },
+      // The counter above says "40 of 251" and nothing about the 27 MB file
+      // that has held position 41 for a minute. This names it.
+      onFileTransfer: (relPath, sent, total, done) => _emit(
+        SyncBlobTransfer(
+          path: relPath,
+          upload: true,
+          sentBytes: sent,
+          totalBytes: total,
+          done: done,
+        ),
+      ),
+    ).call();
+    if (lastTotal > 0) {
+      uploadStart.stop();
+      _emit(
+        SyncStartupBlobUploadDone(
+          totalUploaded: lastTotal,
+          elapsed: uploadStart.elapsed,
+        ),
+      );
+    }
+    return diff;
+  }
+
+  /// Says what the startup pass found, and repairs what it can.
+  ///
+  /// Split out of [start] because none of it decides anything about the run —
+  /// it reads one result and turns it into events. What is left in [start] is
+  /// the part that has to know whether the run is still ours.
+  ///
+  /// Every list here is re-emitted on every startup, deliberately: the host
+  /// rebuilds its view from truth rather than accumulating it across restarts,
+  /// so a file that stopped being blocked simply stops appearing.
+  Future<void> _publishStartupDiff(StateStartupDiffResult diff) async {
+    _log.info(
+      'Startup diff: ${diff.newFiles} new, ${diff.modifiedFiles} modified, '
+      '${diff.missingFileIds.length} missing',
+    );
+
+    // A backend that refuses this device is a missing precondition, not an
+    // error to report and move past: the engine will go on pulling on schedule
+    // and looking perfectly well while every upload is refused. Say so before
+    // any of that starts, and keep starting — the host needs a live engine to
+    // accept the corrected credentials.
+    if (diff.storageRefused != null) {
+      _emit(SyncStorageRefused(diff.storageRefused!));
+    }
+
+    // Seed the shared blocked-set as well as reporting, so the reconciler can
+    // later emit SyncFileSizeUnblocked when one is deleted or shrinks.
+    for (final b in diff.blocked) {
+      _sizeBlockedPaths.add(b.path);
+      _emit(
+        SyncFileSizeBlocked(
+          path: b.path,
+          sizeBytes: b.sizeBytes,
+          limitBytes: b.limitBytes,
+        ),
+      );
+    }
+    for (final e in diff.excluded) {
+      _emit(SyncFileTypeExcluded(path: e.path, extension: e.extension));
+    }
+    for (final path in diff.outOfScope) {
+      _emit(SyncFileOutOfScope(path: path));
+    }
+
+    await _backfillNewlyInScope(diff.missingFileIds);
+    _reportVanishedFiles(diff);
+  }
+
   /// Reports files this device demonstrably HAD and no longer has, so the
   /// host can ask whether they were deleted. Deletes nothing.
   ///
@@ -1992,9 +2353,11 @@ class StateSyncEngine implements ISyncEngine {
   Future<int> confirmVanishedDeletes(Iterable<String> fileIds) async {
     final store = _store;
     if (store == null) return 0;
+    // Captured together: the store and the run it belongs to.
+    final generation = _startGeneration;
     var tombstoned = 0;
     for (final fileId in fileIds) {
-      if (!_running) break;
+      if (!_stillMyRun(generation)) break;
       final state = store.get(fileId);
       if (state == null || state.tombstone || state.path.isEmpty) continue;
       if (await io.fileExists('$vaultPath/${state.path}')) continue;
@@ -2049,9 +2412,13 @@ class StateSyncEngine implements ISyncEngine {
 
     final denylist = _excludedExtensions();
     final scope = _pathScope();
+    // Same reason as confirmVanishedDeletes: `store` above belongs to a
+    // particular run, and the flag alone cannot tell whether it is still that
+    // one.
+    final generation = _startGeneration;
     var restored = 0;
     for (final fileId in missingFileIds) {
-      if (!_running) return;
+      if (!_stillMyRun(generation)) return;
       final state = store.get(fileId);
       if (state == null || state.tombstone) continue;
       if (state.path.isEmpty || state.blobRef.isEmpty) continue;
@@ -2119,17 +2486,19 @@ class StateSyncEngine implements ISyncEngine {
   }
 
   void _setupNotify() {
-    final endpoint = _conn?.endpoint;
-    if (endpoint == null) return;
+    if (_conn?.endpoint == null) return;
     unawaited(_notifyCoordinator?.stop());
     _notifyCoordinator = NotifyCoordinator(
-      endpoint: endpoint,
+      // Read live, not captured: `_conn` is replaced on every reconnect, and a
+      // coordinator holding the old one retries a dead connection forever.
+      resolveEndpoint: () => _conn?.endpoint,
       topic: 'vault:${config.vaultId}',
       onNotify: (_) {
         _log.info('Notify received — triggering pull');
         triggerPull();
       },
       onWarning: _log.warning,
+      onInfo: _log.info,
     )..start();
   }
 
@@ -2179,8 +2548,10 @@ class StateSyncEngine implements ISyncEngine {
   static const int _kStorageResolveAttempts = 3;
 
   /// How far behind the server may fall during a startup pass. Overridable so
-  /// a test can drive the publishing without waiting on a wall clock.
-  Duration startupPublishInterval = const Duration(seconds: 10);
+  /// a test can drive the publishing without waiting on a wall clock. See
+  /// [StateStartupDiff.publishInterval] for what the number does and does not
+  /// bound.
+  Duration startupPublishInterval = const Duration(seconds: 5);
 
   Future<void> _checkExternalBlobConfig({Duration? timeout}) async {
     // Secret already in memory (session fallback from migration, or applied on
@@ -2328,7 +2699,19 @@ class StateSyncEngine implements ISyncEngine {
         'forced-binary policy: ${_forcedBinaryExtensions.length} extension(s)',
       );
     } catch (e) {
-      _log.warning('forced-binary policy load failed: $e');
+      // NOT swallowed into an empty set. "The vault forces nothing extra" and
+      // "we never found out what it forces" are opposite facts, and this used
+      // to report both as {}. A device that classified without the policy sends
+      // a file down the Fugue path while a device that has it sends the same
+      // file down LWW — the two do not converge, and nothing surfaces it.
+      //
+      // Same call the storage backend already makes one phase earlier: a vault
+      // whose configuration cannot be read is refused, not guessed at. A
+      // refusal costs a retry; a guess costs convergence.
+      throw StateError(
+        'could not load the force-binary policy ($e) — refusing to classify '
+        'this vault by built-in rules alone',
+      );
     }
   }
 
@@ -2375,6 +2758,7 @@ class StateSyncEngine implements ISyncEngine {
     final remote = _getRemoteBlobStorage();
     if (browser == null || remote == null) return null;
     return FileVersionViewer(
+      detector: () => _detector,
       browser: browser,
       // Assemble past versions through the chunk manifest (and, for text,
       // project the Fugue tree) — same path the runtime write uses.
@@ -2517,7 +2901,13 @@ class StateSyncEngine implements ISyncEngine {
       decodeRecord: (r) async => (await codec.decode(r)).value,
       downloadContent: (ref, path) async {
         final bytes = await chunkedIO.download(ref);
-        return bytes == null ? null : materializeFileContent(bytes, path);
+        return bytes == null
+            ? null
+            : materializeFileContent(
+                bytes,
+                path,
+                isTextPath: _detector.isText(path),
+              );
       },
       targetIO: io,
       targetRoot: vaultPath,
@@ -2585,7 +2975,13 @@ class StateSyncEngine implements ISyncEngine {
     final chunkedIO = _newChunkedIO();
     if (chunkedIO == null) return null;
     final bytes = await chunkedIO.download(blobRef);
-    return bytes == null ? null : materializeFileContent(bytes, path);
+    return bytes == null
+        ? null
+        : materializeFileContent(
+            bytes,
+            path,
+            isTextPath: _detector.isText(path),
+          );
   }
 
   /// path -> effective (max-HLC, LWW) blobRef of every live file now — the same
@@ -2643,23 +3039,7 @@ class StateSyncEngine implements ISyncEngine {
     );
   }
 
-  /// Per-vault HMAC subkey for content-addressing blob ids. Derived once from
-  /// the vault cipher; null when the cipher is a non-[VaultCipher] fake (tests)
-  /// or absent, in which case blob ids fall back to a raw sha256.
-  Uint8List? _blobIdKey;
-  bool _blobIdKeyResolved = false;
-
-  /// Resolves (and memoizes) the blob-id subkey from the vault cipher. Every
-  /// blob-id producer (ChunkedBlobIO, StateStartupDiff change detection) must
-  /// share this so stored and recomputed ids agree.
-  Uint8List? _resolveBlobIdKey() {
-    if (!_blobIdKeyResolved) {
-      final c = cipher;
-      _blobIdKey = c is VaultCipher ? c.deriveBlobIdKey() : null;
-      _blobIdKeyResolved = true;
-    }
-    return _blobIdKey;
-  }
+  Uint8List? _resolveBlobIdKey() => _blobs.idKey;
 
   /// Subkey that KEYS record ids (closes the path-enumeration oracle). Null for
   /// a non-[VaultCipher] fake (tests) — then ids fall back to the legacy unkeyed
@@ -2688,7 +3068,29 @@ class StateSyncEngine implements ISyncEngine {
       // Cap downloads at the same per-file ceiling the upload path enforces, so
       // a peer can't push a many-chunk multi-GiB blob that OOMs this client.
       maxDownloadBytes: maxDownloadBytes ?? _maxFileSizeBytes(),
+      staging: _pullStaging,
+      // Non-null only while a pull batch is in flight, and then EVERY instance
+      // built here shares it — the applier and the reconciler each build their
+      // own, and bytes staged by the prefetch have to be visible to both.
     );
+  }
+
+  /// The pull's in-memory transit area, or null outside a batch.
+  ///
+  /// See [BlobStaging]. Held on the engine rather than passed down because the
+  /// path from the prefetch to the read is not a call chain: the prefetch
+  /// stages, then the applier and the disk reconciler each ask
+  /// [_newChunkedIO] for their own instance and expect to find the bytes.
+  BlobStaging? _pullStaging;
+
+  /// Opens the transit area for one batch. The pull owns the lifetime; nothing
+  /// else may, because the clear below throws the bytes away.
+  void _openPullStaging() =>
+      _pullStaging ??= BlobStaging(budgetBytes: pullBatchBudgetBytes);
+
+  void _closePullStaging() {
+    _pullStaging?.clear();
+    _pullStaging = null;
   }
 
   /// Blob ids the server has confirmed holding during this session, shared
@@ -2809,21 +3211,14 @@ class StateSyncEngine implements ISyncEngine {
   /// Returns null only when neither external blob config nor an active
   /// endpoint is available — i.e. the engine cannot reach any blob
   /// backend yet.
-  IBlobStorage? _getRemoteBlobStorage() {
-    final cached = _blobHub;
-    if (cached != null) return cached;
-    final inner = _buildInnerBlobStorage();
-    if (inner == null) return null;
-    final hub = BlobTransferHub(inner: inner);
-    _blobHub = hub;
-    return hub;
-  }
+  IBlobStorage? _getRemoteBlobStorage() => _blobs.remote;
 
   IBlobStorage? _buildInnerBlobStorage() => _blobStorageBuilder(
     config: config,
     cipher: cipher,
     httpClient: httpClient,
     endpoint: _conn?.endpoint,
+    logger: _log,
   );
 
   // Keyed id so the server cannot enumerate paths. The unkeyed uuid.v5

@@ -2,6 +2,64 @@ import 'package:rhyolite_client_obsidian/src/engine/connection_recovery.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('a stopped engine is not a slow one', () {
+    test('restart, however recently it spoke', () {
+      // The trap this closes: every other branch reasons about how recently
+      // the engine spoke, and a stopped engine spoke right up to the moment it
+      // stopped. So the strongest evidence of death — an instant `stopped`,
+      // answered in zero milliseconds — is also the freshest, and it landed in
+      // "alive, do not disturb". In the report that produced this it did so
+      // four times running while the vault sat broken.
+      expect(
+        planConnectionRecovery(
+          sinceLastEvent: Duration.zero,
+          engineStopped: true,
+        ),
+        ConnectionRecovery.restart,
+      );
+      expect(
+        planConnectionRecovery(
+          sinceLastEvent: const Duration(seconds: 1),
+          busy: true,
+          engineStopped: true,
+        ),
+        ConnectionRecovery.restart,
+        reason: 'busy is an excuse for a working engine, not a stopped one',
+      );
+    });
+
+    test('nudging a stopped engine is not tried first', () {
+      // Everywhere else the ladder spends a cheap repair before restarting.
+      // There is nothing to re-arm on an engine that is not running, and the
+      // attempt costs a round trip that cannot succeed.
+      expect(
+        planConnectionRecovery(
+          sinceLastEvent: const Duration(minutes: 10),
+          engineStopped: true,
+        ),
+        ConnectionRecovery.restart,
+      );
+    });
+
+    test('a running engine still gets the old ladder', () {
+      expect(
+        planConnectionRecovery(sinceLastEvent: Duration.zero),
+        ConnectionRecovery.waitItIsAlive,
+      );
+      expect(
+        planConnectionRecovery(sinceLastEvent: const Duration(minutes: 10)),
+        ConnectionRecovery.nudge,
+      );
+      expect(
+        planConnectionRecovery(
+          sinceLastEvent: const Duration(minutes: 10),
+          alreadyNudged: true,
+        ),
+        ConnectionRecovery.restart,
+      );
+    });
+  });
+
   group('planConnectionRecovery', () {
     test('an engine that is still emitting is not torn down', () {
       // The case that cost a user an hour: the probe lost a race against the
@@ -158,8 +216,11 @@ void main() {
     test('a swapped socket is repaired without a restart', () {
       // Idle and unreachable, but re-arming answers — the notify stream had
       // gone silent under a replaced transport. No restart in the sequence.
-      final steps =
-          walk(quiet: const Duration(minutes: 2), busy: false, reArmWorks: true);
+      final steps = walk(
+        quiet: const Duration(minutes: 2),
+        busy: false,
+        reArmWorks: true,
+      );
       expect(steps, [ConnectionRecovery.nudge]);
       expect(steps, isNot(contains(ConnectionRecovery.restart)));
     });

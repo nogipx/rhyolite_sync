@@ -9,9 +9,9 @@
 // authentication (the tag fails to decrypt), not by any content check in the
 // sync engine itself.
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:convergent/convergent.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rhyolite_sync/src/sync_v3/disk_reconciler.dart';
 import 'package:rhyolite_sync/src/sync_v3/remote_applier.dart';

@@ -8,7 +8,6 @@
 ///      it up.
 ///   3. The IBlobStorage shim properly forwards the context.
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rhyolite_sync/src/sync_v3/disk_reconciler.dart';

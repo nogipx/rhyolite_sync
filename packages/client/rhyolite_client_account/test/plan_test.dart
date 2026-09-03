@@ -8,10 +8,7 @@ void main() {
         canUseManagedStorage: false,
         canUseExternalStorage: true,
       );
-      expect(
-        PlanCapabilities.fromJson(caps.toJson()),
-        equals(caps),
-      );
+      expect(PlanCapabilities.fromJson(caps.toJson()), equals(caps));
     });
 
     test('JSON round-trip with all fields', () {
@@ -22,10 +19,7 @@ void main() {
         maxFileSizeBytes: 10 * 1024 * 1024,
         managedStorageQuotaBytes: 1024 * 1024 * 1024,
       );
-      expect(
-        PlanCapabilities.fromJson(caps.toJson()),
-        equals(caps),
-      );
+      expect(PlanCapabilities.fromJson(caps.toJson()), equals(caps));
     });
 
     test('deny denies everything', () {

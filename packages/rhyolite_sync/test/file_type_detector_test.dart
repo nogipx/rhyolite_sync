@@ -2,9 +2,10 @@ import 'dart:convert';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 void main() {
-  const detector = FileTypeDetector();
+  const detector = FileTypeDetector.builtInsOnly();
 
   group('FileTypeDetector .excalidraw handling', () {
     test('.excalidraw.md is forced binary despite the .md suffix', () {
@@ -51,7 +52,7 @@ void main() {
     });
 
     test('overrides a built-in text extension (json -> binary)', () {
-      expect(const FileTypeDetector().isText('a.json'), isTrue);
+      expect(const FileTypeDetector.builtInsOnly().isText('a.json'), isTrue);
       expect(configured.isText('a.json'), isFalse);
       expect(configured.shouldChunk('a.json'), isTrue);
     });
@@ -62,8 +63,11 @@ void main() {
     });
 
     test('the empty default set changes nothing', () {
-      expect(const FileTypeDetector().isText('a.json'), isTrue);
-      expect(const FileTypeDetector().isText('a.foo'), isFalse); // unknown->bin
+      expect(const FileTypeDetector.builtInsOnly().isText('a.json'), isTrue);
+      expect(
+        const FileTypeDetector.builtInsOnly().isText('a.foo'),
+        isFalse,
+      ); // unknown->bin
     });
   });
 
@@ -75,14 +79,18 @@ void main() {
       // Sanity: the wire blob is NOT the raw drawing (it carries the magic).
       expect(blob.sublist(0, 4), equals(<int>[0x00, 0x66, 0x67, 0x31]));
 
-      final out = materializeFileContent(blob, 'board.excalidraw.md');
+      final out = materializeFileContent(
+        blob,
+        'board.excalidraw.md',
+        isTextPath: true,
+      );
       expect(out, isNotNull);
       expect(utf8.decode(out!), equals(drawing));
     });
 
     test('a genuine binary blob passes through unchanged', () {
       final raw = utf8.encode('\x89PNG not-really-but-not-fugue');
-      final out = materializeFileContent(raw, 'image.png');
+      final out = materializeFileContent(raw, 'image.png', isTextPath: true);
       expect(out, equals(raw));
     });
   });

@@ -28,7 +28,11 @@ Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
     plugin,
     build: (ctx) {
       ctx.h3(S.backupsTitle);
-      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: S.backupsDescription);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.backupsDescription,
+      );
       ctx.spaceVertical(px: 8);
 
       ctx.buttonRow([
@@ -41,14 +45,20 @@ Future<void> showBackupModal(PluginHandle plugin, ISyncEngine engine) async {
       ctx.spaceVertical(px: 12);
 
       if (snapshots.isEmpty) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc', text: S.noRestorePointsYet);
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.noRestorePointsYet,
+        );
       } else {
         for (final s in snapshots) {
-          final when =
-              DateTime.fromMillisecondsSinceEpoch(s.createdAtMs).toLocal();
-          ctx.createEl('p',
-              text: S.restorePointLine(_fmt(when), s.recordCount));
+          final when = DateTime.fromMillisecondsSinceEpoch(
+            s.createdAtMs,
+          ).toLocal();
+          ctx.createEl(
+            'p',
+            text: S.restorePointLine(_fmt(when), s.recordCount),
+          );
           ctx.buttonRow([
             ButtonSpec(S.details, () async {
               ctx.close(null);
@@ -86,9 +96,11 @@ Future<void> _capture(
   showNotice(S.creatingRestorePoint);
   try {
     final snap = await engine.captureBackup();
-    showNotice(snap == null
-        ? S.notConnectedNoCapture
-        : S.restorePointCreated(snap.recordCount));
+    showNotice(
+      snap == null
+          ? S.notConnectedNoCapture
+          : S.restorePointCreated(snap.recordCount),
+    );
   } catch (e) {
     showNotice(S.captureFailed(e));
   }
@@ -120,13 +132,18 @@ Future<void> _restoreAll(
   BackupSnapshotInfo snapshot,
 ) async {
   ctx.close(null);
-  final when = DateTime.fromMillisecondsSinceEpoch(snapshot.createdAtMs).toLocal();
+  final when = DateTime.fromMillisecondsSinceEpoch(
+    snapshot.createdAtMs,
+  ).toLocal();
   await showModalWith<void>(
     plugin,
     build: (c) {
       c.h3(S.restoreAllTitle(_fmt(when)));
-      c.createEl('p',
-          cls: 'rhyolite-setting-desc', text: S.restoreAllConfirmBody);
+      c.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.restoreAllConfirmBody,
+      );
       c.spaceVertical(px: 12);
       c.buttonRow([
         ButtonSpec(S.restoreAllConfirm, () async {

@@ -22,8 +22,10 @@ void main() {
     test('compound extensions, which decide the sync path', () {
       // .excalidraw.md is what forces a file onto the binary conflict-copy
       // path. Hiding it would hide why the file behaves as it does.
-      expect(r.redactPath('Drawings/Plan.excalidraw.md'),
-          endsWith('.excalidraw.md'));
+      expect(
+        r.redactPath('Drawings/Plan.excalidraw.md'),
+        endsWith('.excalidraw.md'),
+      );
       expect(r.redactPath('backup.tar.gz'), endsWith('.tar.gz'));
     });
 
@@ -59,12 +61,12 @@ void main() {
 
     test('different vaults produce unrelated pseudonyms', () {
       final other = DiagnosticRedactor(salt: 'vault-2');
-      expect(r.redactPath('Notes/Daily.md'),
-          isNot(other.redactPath('Notes/Daily.md')));
+      expect(
+        r.redactPath('Notes/Daily.md'),
+        isNot(other.redactPath('Notes/Daily.md')),
+      );
     });
   });
-
-
 
   test('an extension-less path still loses every segment', () {
     final out = r.redactPath('Work/Projects');

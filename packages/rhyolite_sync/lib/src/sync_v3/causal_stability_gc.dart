@@ -1,7 +1,7 @@
 import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
-import 'fugue_frontier.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Aggregates per-device heads from the server (one fetch, throttled) and does
 /// two causal-stability sweeps off it:

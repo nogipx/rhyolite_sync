@@ -5,7 +5,11 @@ import 'dart:typed_data';
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart'
-    show ChunkedBlobIO, LogPath, PluginDirManifest, PluginFileRef,
+    show
+        ChunkedBlobIO,
+        LogPath,
+        PluginDirManifest,
+        PluginFileRef,
         boundedParallel;
 import 'package:rpc_dart/rpc_dart.dart' show LogScope;
 
@@ -16,13 +20,14 @@ export 'synced_dir_kind.dart';
 
 /// Live progress of one blob-backed file transfer, for the sync panel's
 /// active-transfers view.
-typedef DirTransferReport = void Function({
-  required String path,
-  required bool upload,
-  required int sentBytes,
-  required int totalBytes,
-  required bool done,
-});
+typedef DirTransferReport =
+    void Function({
+      required String path,
+      required bool upload,
+      required int sentBytes,
+      required int totalBytes,
+      required bool done,
+    });
 
 /// Moves blob-backed `.obsidian` directories — community plugins and themes —
 /// between disk and the vault's blob bucket.
@@ -48,11 +53,11 @@ class BlobDirSync {
     LogScope? log,
     Object? pluginsManagerRaw,
     DirTransferReport? onTransfer,
-  })  : _adapter = adapter,
-        _blobIO = blobIO,
-        _log = log ?? LogScope.noop,
-        _pluginsManagerRaw = pluginsManagerRaw,
-        _onTransfer = onTransfer;
+  }) : _adapter = adapter,
+       _blobIO = blobIO,
+       _log = log ?? LogScope.noop,
+       _pluginsManagerRaw = pluginsManagerRaw,
+       _onTransfer = onTransfer;
 
   static const configDir = '.obsidian';
 
@@ -204,14 +209,17 @@ class BlobDirSync {
       return null;
     }
 
-    final manifestBytes =
-        await _readOrNull(filePath(kind, id, 'manifest.json'));
+    final manifestBytes = await _readOrNull(
+      filePath(kind, id, 'manifest.json'),
+    );
     if (manifestBytes == null) return null;
     final meta = _parseObsidianManifest(manifestBytes);
 
     final entryBytes = await _readOrNull(filePath(kind, id, kind.entryFile));
     if (entryBytes == null) {
-      _log.warning('${kind.folder} capture skipped (no ${kind.entryFile}): $id');
+      _log.warning(
+        '${kind.folder} capture skipped (no ${kind.entryFile}): $id',
+      );
       return null;
     }
 
@@ -228,8 +236,10 @@ class BlobDirSync {
 
     for (final entry in sources.entries) {
       if (entry.value.length > maxFileBytes) {
-        _log.info('${kind.folder} capture skipped (${entry.key} is '
-            '${entry.value.length} B > $maxFileBytes): $id');
+        _log.info(
+          '${kind.folder} capture skipped (${entry.key} is '
+          '${entry.value.length} B > $maxFileBytes): $id',
+        );
         return null;
       }
     }
@@ -248,7 +258,9 @@ class BlobDirSync {
     // is a round trip against a dedup that does not happen. Chunks the PREVIOUS
     // manifest put on the server are still skipped: `known` is seeded before
     // the pool starts and is only read from inside it.
-    await boundedParallel(sources.entries.toList(), sources.length, (entry) async {
+    await boundedParallel(sources.entries.toList(), sources.length, (
+      entry,
+    ) async {
       final path = filePath(kind, id, entry.key);
       final total = entry.value.length;
       try {
@@ -298,8 +310,10 @@ class BlobDirSync {
     // `../plugins/rhyolite-sync/main.js` and replace the running engine.
     final id = kind.idOf(resourceId);
     if (id == null) {
-      _log.warning('refusing unusable resource id',
-          data: {'resource': LogPath.config(resourceId)});
+      _log.warning(
+        'refusing unusable resource id',
+        data: {'resource': LogPath.config(resourceId)},
+      );
       return false;
     }
     // The same denylist classify() applies to resource ids, restated at the
@@ -333,8 +347,10 @@ class BlobDirSync {
     }).toList();
     for (final entry in wanted) {
       if (entry.value.size > maxFileBytes) {
-        throw StateError('${kind.folder} file ${entry.key} of $id declares '
-            '${entry.value.size} B, over the $maxFileBytes B cap');
+        throw StateError(
+          '${kind.folder} file ${entry.key} of $id declares '
+          '${entry.value.size} B, over the $maxFileBytes B cap',
+        );
       }
     }
 
@@ -359,8 +375,10 @@ class BlobDirSync {
       stale.add(entry);
     }
     if (stale.length < wanted.length) {
-      _log.info('${kind.folder} $id: ${wanted.length - stale.length} of '
-          '${wanted.length} file(s) already current on disk');
+      _log.info(
+        '${kind.folder} $id: ${wanted.length - stale.length} of '
+        '${wanted.length} file(s) already current on disk',
+      );
     }
 
     // Fetch everything MISSING before touching disk. A partial write would
@@ -384,8 +402,10 @@ class BlobDirSync {
         _report(path, false, ref.size, ref.size, true);
       }
       if (bytes == null) {
-        throw StateError('blob ${ref.blobRef} for $id/${entry.key} '
-            'could not be fetched');
+        throw StateError(
+          'blob ${ref.blobRef} for $id/${entry.key} '
+          'could not be fetched',
+        );
       }
       fetched[entry.key] = bytes;
     });
@@ -397,11 +417,13 @@ class BlobDirSync {
     // so a crash mid-apply must never leave a manifest advertising a release
     // whose content did not land.
     final ordered = fetched.keys.toList()
-      ..sort((a, b) => a == 'manifest.json'
-          ? 1
-          : b == 'manifest.json'
-              ? -1
-              : a.compareTo(b));
+      ..sort(
+        (a, b) => a == 'manifest.json'
+            ? 1
+            : b == 'manifest.json'
+            ? -1
+            : a.compareTo(b),
+      );
     var wrote = 0;
     for (final name in ordered) {
       final path = filePath(kind, id, name);
@@ -423,14 +445,18 @@ class BlobDirSync {
         await _adapter.remove(path);
         removed++;
       } catch (e) {
-        _log.warning('${kind.folder} file remove failed: $e',
-            data: {'resource': LogPath.config(path)});
+        _log.warning(
+          '${kind.folder} file remove failed: $e',
+          data: {'resource': LogPath.config(path)},
+        );
       }
     }
 
     if (wrote == 0 && removed == 0) return false;
-    _log.info('${kind.folder} applied: $id ${manifest.version ?? "?"} '
-        '($wrote written, $removed removed)');
+    _log.info(
+      '${kind.folder} applied: $id ${manifest.version ?? "?"} '
+      '($wrote written, $removed removed)',
+    );
     if (kind.reloadable) _reload(id);
     return true;
   }
@@ -463,8 +489,10 @@ class BlobDirSync {
     try {
       return await io.blobRefOf(bytes) == ref.blobRef;
     } catch (e) {
-      _log.warning('${kind.folder} $id: verify failed for $name, '
-          'will download: $e');
+      _log.warning(
+        '${kind.folder} $id: verify failed for $name, '
+        'will download: $e',
+      );
       return false;
     }
   }
@@ -490,8 +518,10 @@ class BlobDirSync {
         await _adapter.remove(path);
         removed++;
       } catch (e) {
-        _log.warning('${kind.folder} file remove failed: $e',
-            data: {'resource': LogPath.config(path)});
+        _log.warning(
+          '${kind.folder} file remove failed: $e',
+          data: {'resource': LogPath.config(path)},
+        );
       }
     }
     try {
@@ -499,8 +529,10 @@ class BlobDirSync {
     } catch (e) {
       // Non-empty (it kept its own state) or held open — the content is gone
       // either way, which is what the removal was about.
-      _log.warning('${kind.folder} dir not removed: $e',
-          data: {'resource': LogPath.config(dir)});
+      _log.warning(
+        '${kind.folder} dir not removed: $e',
+        data: {'resource': LogPath.config(dir)},
+      );
     }
     _log.info('${kind.folder} removed locally: $id ($removed files)');
     return removed > 0;
@@ -571,8 +603,7 @@ class BlobDirSync {
     try {
       return await _adapter.readBinary(path);
     } catch (e) {
-      _log.warning('read failed: $e',
-          data: {'resource': LogPath.config(path)});
+      _log.warning('read failed: $e', data: {'resource': LogPath.config(path)});
       return null;
     }
   }

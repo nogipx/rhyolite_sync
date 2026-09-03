@@ -10,6 +10,21 @@ import 'sync_engine_event.dart';
 /// Both [SyncEngine] (graph-based) and [CrdtSyncEngine] (CRDT-based)
 /// implement this, allowing plugin.dart and UI components to work
 /// with either implementation.
+/// The outcome of [ISyncEngine.probe].
+enum EngineProbe {
+  /// The roundtrip completed. The connection is usable.
+  alive,
+
+  /// The engine is running but the roundtrip failed or timed out. May be a
+  /// dead socket, may be a busy one — the probe cannot tell, and the host's
+  /// recovery ladder decides by how recently the engine spoke.
+  unreachable,
+
+  /// The engine is not running. Nothing to wait for and nothing to nudge: no
+  /// amount of patience turns a stopped engine into a live one.
+  stopped,
+}
+
 abstract interface class ISyncEngine {
   Stream<SyncEngineEvent> get events;
 
@@ -52,13 +67,22 @@ abstract interface class ISyncEngine {
   /// starts from a clean local slate. Engine must be stopped first.
   Future<void> wipeLocalState();
 
-  /// Cheap roundtrip to verify the engine's connection is alive. Returns
-  /// false on timeout or any error — the caller is expected to follow up
-  /// with `stop()` + `start()` to rebuild the underlying transport.
+  /// Cheap roundtrip to verify the engine's connection is alive.
   ///
-  /// Intended for resume-from-background flows where the WebSocket may
-  /// have died silently while the host process was suspended.
+  /// Prefer [probe], which distinguishes the two ways this returns false. This
+  /// stays for callers that only need a yes/no.
   Future<bool> healthCheck({Duration timeout = const Duration(seconds: 5)});
+
+  /// What a health probe found.
+  ///
+  /// [healthCheck] collapses two opposite facts into `false`: the socket did
+  /// not answer, and the engine is not running at all. They call for opposite
+  /// responses — wait out a slow socket, restart a stopped engine — and the
+  /// host could not tell them apart, so it read the second as the first. In
+  /// one report an engine that answered `stopped` in zero milliseconds was
+  /// classified "alive, do not disturb" four times running while the vault sat
+  /// broken.
+  Future<EngineProbe> probe({Duration timeout = const Duration(seconds: 5)});
 
   /// Re-establishes the live server-notify subscription on the current
   /// connection, idempotently. Notify is a best-effort push channel; its

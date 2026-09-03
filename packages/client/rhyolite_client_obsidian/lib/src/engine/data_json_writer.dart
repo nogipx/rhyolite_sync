@@ -52,8 +52,9 @@ Map<String, dynamic> deepConvertJsonMap(Map map) {
     if (value is Map) {
       result[key] = deepConvertJsonMap(value);
     } else if (value is List) {
-      result[key] =
-          value.map((e) => e is Map ? deepConvertJsonMap(e) : e).toList();
+      result[key] = value
+          .map((e) => e is Map ? deepConvertJsonMap(e) : e)
+          .toList();
     } else {
       result[key] = value;
     }

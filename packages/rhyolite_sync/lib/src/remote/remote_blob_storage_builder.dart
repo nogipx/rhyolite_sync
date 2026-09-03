@@ -25,6 +25,12 @@ typedef RemoteBlobStorageBuilder =
       required IVaultCipher? cipher,
       required http.Client? httpClient,
       required RpcCallerEndpoint? endpoint,
+
+      /// Optional so an existing builder (and every test double) keeps
+      /// compiling. Only the HTTP backend uses it, and only to say when it is
+      /// waiting out a throttle — which was silent, and silence there is
+      /// indistinguishable from a transfer that has hung.
+      LogScope? logger,
     });
 
 /// Default production stack: gzip-over-encrypt-over-backend.
@@ -41,6 +47,7 @@ IBlobStorage? defaultRemoteBlobStorageBuilder({
   required IVaultCipher? cipher,
   required http.Client? httpClient,
   required RpcCallerEndpoint? endpoint,
+  LogScope? logger,
 }) {
   final extConfig = config.externalBlobConfig;
   if (extConfig != null) {
@@ -49,6 +56,7 @@ IBlobStorage? defaultRemoteBlobStorageBuilder({
         inner: extConfig.createBlobStorage(
           vaultId: config.vaultId,
           httpClient: httpClient,
+          logger: logger,
         ),
         cipher: cipher,
       ),

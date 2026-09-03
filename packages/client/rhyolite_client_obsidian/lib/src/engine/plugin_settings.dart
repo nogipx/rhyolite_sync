@@ -23,6 +23,7 @@ import 'db_recovery.dart';
 import 'modal_lock.dart';
 import 'obsidian_config_storage.dart';
 import 'self_host_modal.dart';
+import 'auth_config.dart';
 
 /// Registers the settings tab. The tab rebuilds its UI on every open so that
 /// auth and vault state are always up to date.
@@ -68,6 +69,7 @@ import 'self_host_modal.dart';
   required Future<void> Function(ExternalBlobConfig config)
   onSaveExternalBlobConfig,
   required Future<void> Function() onClearExternalBlobConfig,
+
   /// Re-uploads content the CURRENT backend lacks, from this device. Returns
   /// (uploaded, unhealable), or null when sync is not running.
   required SettingsSyncPrefs Function() settingsSyncPrefs,
@@ -376,9 +378,11 @@ import 'self_host_modal.dart';
         final alert = planNotice();
         if (alert.alert == PlanAlert.ended) {
           t.addCustom((s) {
-            s.setName(alert.date == null
-                ? S.planEndedNoDate
-                : S.endedOn(formatPlanDay(alert.date!)));
+            s.setName(
+              alert.date == null
+                  ? S.planEndedNoDate
+                  : S.endedOn(formatPlanDay(alert.date!)),
+            );
             s.setDesc(S.subscriptionEnded);
           });
         }
@@ -443,17 +447,15 @@ import 'self_host_modal.dart';
         placeholder: kDefaultLogUri.isNotEmpty
             ? kDefaultLogUri
             : 'wss://collector.example.com:9500',
-        onChange: (v) => onDiagnosticsChanged(
-          diagnosticsPrefs().copyWith(url: v.trim()),
-        ),
+        onChange: (v) =>
+            onDiagnosticsChanged(diagnosticsPrefs().copyWith(url: v.trim())),
       );
       t.addToggle(
         name: S.sendLogsToCollector,
         description: S.sendLogsDescription,
         initialValue: prefs.enabled,
-        onChange: (v) => onDiagnosticsChanged(
-          diagnosticsPrefs().copyWith(enabled: v),
-        ),
+        onChange: (v) =>
+            onDiagnosticsChanged(diagnosticsPrefs().copyWith(enabled: v)),
       );
     }
 
@@ -591,7 +593,11 @@ import 'self_host_modal.dart';
       if (isSignedIn) {
         addSignOutButton(t, userEmail);
         if (currentConfig.vaultId.isNotEmpty) {
-          _addStorageUsage(t, vaultUsage, onShowOverview: onShowStorageOverview);
+          _addStorageUsage(
+            t,
+            vaultUsage,
+            onShowOverview: onShowStorageOverview,
+          );
           addDisconnectVaultButton(t);
           addTroubleshootingSection(t);
         } else {
@@ -838,10 +844,10 @@ void _addExternalStorageSection(
       S3BlobConfig(:final endpoint, :final bucket) => 'S3: $endpoint/$bucket',
       WebDavBlobConfig(:final endpoint) => 'WebDAV: $endpoint',
       _ => switch (kind) {
-          's3' => 'S3',
-          'webdav' => 'WebDAV',
-          _ => 'Custom',
-        },
+        's3' => 'S3',
+        'webdav' => 'WebDAV',
+        _ => 'Custom',
+      },
     };
     t.addCustom((s) {
       s.setName(S.connected);
@@ -877,10 +883,12 @@ void _addExternalStorageSection(
       final result = await _showS3ConfigModal(t.plugin);
       if (result == null) return;
       try {
-        await onSave(config.copyWith(
-          externalBlobConfig: result,
-          externalStorageKind: result.kind,
-        ));
+        await onSave(
+          config.copyWith(
+            externalBlobConfig: result,
+            externalStorageKind: result.kind,
+          ),
+        );
         showNotice(S.externalStorageConnected('S3'));
         // Say what switching actually did to what is already synced. Files
         // uploaded before this moment live in the OLD storage; the new one has
@@ -915,10 +923,12 @@ void _addExternalStorageSection(
       final result = await _showWebDavConfigModal(t.plugin);
       if (result == null) return;
       try {
-        await onSave(config.copyWith(
-          externalBlobConfig: result,
-          externalStorageKind: result.kind,
-        ));
+        await onSave(
+          config.copyWith(
+            externalBlobConfig: result,
+            externalStorageKind: result.kind,
+          ),
+        );
         showNotice(S.externalStorageConnected('WebDAV'));
         // Say what switching actually did to what is already synced. Files
         // uploaded before this moment live in the OLD storage; the new one has
@@ -1001,8 +1011,9 @@ Future<S3BlobConfig?> _showS3ConfigModal(PluginHandle plugin) async {
           if (endpoint.isEmpty ||
               bucket.isEmpty ||
               accessKey.isEmpty ||
-              secretKey.isEmpty)
+              secretKey.isEmpty) {
             return;
+          }
           ctx.close(
             S3BlobConfig(
               endpoint: endpoint,
@@ -1139,7 +1150,8 @@ void _addStorageUsage(
     final usedMiB = usage.usedBytes / (1024 * 1024);
     final quotaMiB = usage.quotaBytes / (1024 * 1024);
     final percent = (usage.usedBytes / usage.quotaBytes * 100).clamp(0, 100);
-    label = '${usedMiB.toStringAsFixed(1)} / ${quotaMiB.toStringAsFixed(0)} MiB '
+    label =
+        '${usedMiB.toStringAsFixed(1)} / ${quotaMiB.toStringAsFixed(0)} MiB '
         '(${percent.toStringAsFixed(0)}%)';
   } else {
     label = S.storageOverviewRowDesc;

@@ -14,7 +14,12 @@ Future<Map<String, String>> _unzipWithSystemTool(List<int> bytes) async {
   final dir = await Directory.systemTemp.createTemp('rhyolite-zip-test');
   try {
     final archive = File('${dir.path}/a.zip')..writeAsBytesSync(bytes);
-    final result = await Process.run('unzip', ['-o', archive.path, '-d', dir.path]);
+    final result = await Process.run('unzip', [
+      '-o',
+      archive.path,
+      '-d',
+      dir.path,
+    ]);
     expect(result.exitCode, 0, reason: 'unzip said: ${result.stderr}');
 
     final out = <String, String>{};
@@ -46,11 +51,17 @@ void main() {
   test('content survives compression byte for byte', () async {
     // Highly compressible, so the deflate path is genuinely exercised rather
     // than falling back to stored.
-    final body = List.generate(2000, (i) => '#$i INF engine: reconcile\n').join();
+    final body = List.generate(
+      2000,
+      (i) => '#$i INF engine: reconcile\n',
+    ).join();
     final bytes = await buildZip([ZipEntry('logs/big.log', body)]);
 
-    expect(bytes.length, lessThan(body.length ~/ 4),
-        reason: 'entries should be deflated, not stored');
+    expect(
+      bytes.length,
+      lessThan(body.length ~/ 4),
+      reason: 'entries should be deflated, not stored',
+    );
     final files = await _unzipWithSystemTool(bytes);
     expect(files['logs/big.log'], body);
   });

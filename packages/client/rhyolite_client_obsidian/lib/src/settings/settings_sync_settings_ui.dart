@@ -138,8 +138,9 @@ void _addPluginCodeRow(
   String? size,
 }) {
   const category = SettingsCategory.communityPluginCode;
-  final sizeNote =
-      size == null ? '' : ' ${S.settingsCatCommunityPluginCodeSize(size)}';
+  final sizeNote = size == null
+      ? ''
+      : ' ${S.settingsCatCommunityPluginCodeSize(size)}';
 
   switch (availability) {
     case PluginCodeAvailability.allowed:

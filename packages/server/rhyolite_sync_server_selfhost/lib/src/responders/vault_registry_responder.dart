@@ -45,8 +45,10 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     CreateVaultRequest request, {
     RpcContext? context,
   }) async {
-    final existing =
-        await _client.get(collection: _vaultsCollection, id: request.vaultId);
+    final existing = await _client.get(
+      collection: _vaultsCollection,
+      id: request.vaultId,
+    );
     if (existing != null) {
       if (existing.payload['deletedAt'] != null) {
         // Revive a tombstoned vault: clear deletedAt + refresh the name. A plain
@@ -69,7 +71,8 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
       // Idempotent: registering an existing (live) vault returns the stored entry.
       return VaultRegistryEntry(
         vaultId: request.vaultId,
-        vaultName: existing.payload['vaultName'] as String? ?? request.vaultName,
+        vaultName:
+            existing.payload['vaultName'] as String? ?? request.vaultName,
         verificationToken: existing.payload['verificationToken'] as String?,
       );
     }
@@ -95,8 +98,10 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     UpdateVaultTokenRequest request, {
     RpcContext? context,
   }) async {
-    final existing =
-        await _client.get(collection: _vaultsCollection, id: request.vaultId);
+    final existing = await _client.get(
+      collection: _vaultsCollection,
+      id: request.vaultId,
+    );
     if (existing == null) {
       await _client.create(
         collection: _vaultsCollection,
@@ -125,8 +130,10 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     VaultMetaRequest request, {
     RpcContext? context,
   }) async {
-    final rec =
-        await _client.get(collection: _metaCollection, id: request.vaultId);
+    final rec = await _client.get(
+      collection: _metaCollection,
+      id: request.vaultId,
+    );
     return VaultMetaResponse(
       encryptedMeta: rec?.payload['encryptedMeta'] as String?,
     );
@@ -137,8 +144,10 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     SetVaultMetaRequest request, {
     RpcContext? context,
   }) async {
-    final existing =
-        await _client.get(collection: _metaCollection, id: request.vaultId);
+    final existing = await _client.get(
+      collection: _metaCollection,
+      id: request.vaultId,
+    );
     final payload = {'encryptedMeta': request.encryptedMeta};
     if (existing == null) {
       await _client.create(
@@ -167,8 +176,10 @@ class LocalVaultRegistryResponder extends VaultRegistryContractResponder {
     // vault locally. The vault's sync data is purged separately via purgeVault.
     // Idempotent — a missing or already-tombstoned entry is a no-op. The
     // encrypted meta is no longer needed once the vault is gone.
-    final existing =
-        await _client.get(collection: _vaultsCollection, id: request.vaultId);
+    final existing = await _client.get(
+      collection: _vaultsCollection,
+      id: request.vaultId,
+    );
     if (existing != null && existing.payload['deletedAt'] == null) {
       final payload = Map<String, dynamic>.from(existing.payload)
         ..['deletedAt'] = DateTime.now().millisecondsSinceEpoch;

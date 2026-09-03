@@ -17,8 +17,5 @@ class AccountVaultMetaStorage implements IVaultMetaStorage {
 
   @override
   Future<void> setEncryptedMeta(String vaultId, String encryptedMeta) =>
-      _client.updateVaultMeta(
-        vaultId: vaultId,
-        encryptedMeta: encryptedMeta,
-      );
+      _client.updateVaultMeta(vaultId: vaultId, encryptedMeta: encryptedMeta);
 }

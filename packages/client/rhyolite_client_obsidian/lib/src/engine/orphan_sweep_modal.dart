@@ -61,14 +61,23 @@ Future<void> showOrphanSweepModal(
       );
       ctx.spaceVertical(px: 12);
 
-      _kv(ctx, S.totalBlobs,
-          '${blobs!.totalBlobs}  (${_bytes(blobs.totalBytes)})');
-      _kv(ctx, S.orphanedBlobsReclaimable,
-          '$orphanBlobs  (${_bytes(orphanBytes)})');
+      _kv(
+        ctx,
+        S.totalBlobs,
+        '${blobs!.totalBlobs}  (${_bytes(blobs.totalBytes)})',
+      );
+      _kv(
+        ctx,
+        S.orphanedBlobsReclaimable,
+        '$orphanBlobs  (${_bytes(orphanBytes)})',
+      );
       final t = tombs;
       if (t != null) {
-        _kv(ctx, S.deletedMarkersReclaimable,
-            S.markersOfTotal(stableTombs, t.totalTombstones));
+        _kv(
+          ctx,
+          S.deletedMarkersReclaimable,
+          S.markersOfTotal(stableTombs, t.totalTombstones),
+        );
       }
       ctx.spaceVertical(px: 16);
 
@@ -86,7 +95,11 @@ Future<void> showOrphanSweepModal(
           if (orphanBlobs > 0) {
             final r = await janitor.sweepOrphans(dryRun: false);
             parts.add(
-                S.reclaimedBlobs(r?.deletedBlobs ?? 0, _bytes(r?.orphanBytes ?? 0)));
+              S.reclaimedBlobs(
+                r?.deletedBlobs ?? 0,
+                _bytes(r?.orphanBytes ?? 0),
+              ),
+            );
           }
           if (stableTombs > 0) {
             final r = await janitor.sweepStableTombstones(dryRun: false);
@@ -102,8 +115,11 @@ Future<void> showOrphanSweepModal(
       if (orphanBytes > 0) segs.add(_bytes(orphanBytes));
       if (stableTombs > 0) segs.add(S.markersCount(stableTombs));
       ctx.buttonRow([
-        ButtonSpec('${S.reclaimVerb} ${segs.join(' + ')}', reclaim,
-            variant: ButtonVariant.destructive),
+        ButtonSpec(
+          '${S.reclaimVerb} ${segs.join(' + ')}',
+          reclaim,
+          variant: ButtonVariant.destructive,
+        ),
         ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));
@@ -167,19 +183,15 @@ Future<void> _showByoSweepModal(
       }
 
       ctx.buttonRow([
-        ButtonSpec(
-          '${S.reclaimVerb} ${plan.deadCount}',
-          () async {
-            ctx.close(null);
-            try {
-              final deleted = await janitor.execute(plan);
-              showNotice(S.reclaimedByo(deleted));
-            } catch (e) {
-              showNotice(S.reclaimFailed(e));
-            }
-          },
-          variant: ButtonVariant.destructive,
-        ),
+        ButtonSpec('${S.reclaimVerb} ${plan.deadCount}', () async {
+          ctx.close(null);
+          try {
+            final deleted = await janitor.execute(plan);
+            showNotice(S.reclaimedByo(deleted));
+          } catch (e) {
+            showNotice(S.reclaimFailed(e));
+          }
+        }, variant: ButtonVariant.destructive),
         ButtonSpec(S.cancel, () => ctx.close(null)),
       ]);
       ctx.onEscape(() => ctx.close(null));

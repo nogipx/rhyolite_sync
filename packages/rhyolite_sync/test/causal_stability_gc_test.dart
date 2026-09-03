@@ -1,8 +1,7 @@
 import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rhyolite_sync/src/sync_v3/causal_stability_gc.dart';
-import 'package:rhyolite_sync/src/sync_v3/fugue_frontier.dart';
-import 'package:rhyolite_sync/src/sync_v3/fugue_store.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:rpc_dart/rpc_dart.dart' show RpcContext;
 import 'package:test/test.dart';

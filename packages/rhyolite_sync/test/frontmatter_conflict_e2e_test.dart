@@ -2,8 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_store.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_tail.dart';
+import 'package:rhyolite_sync/src/storage/fm_store.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/src/sync_v3/disk_reconciler.dart';
 import 'package:rhyolite_sync/src/sync_v3/remote_applier.dart';
 import 'package:rhyolite_sync/src/sync_v3/state_record_codec.dart';
@@ -16,7 +16,11 @@ import 'package:uuid/uuid.dart';
 const _vaultPath = '/vault';
 const _vaultId = '00000000-0000-4000-8000-000000000001';
 const _note = 'Acme onboarding.md';
-const _notePath = 'test/fixtures/frontmatter_heavy_note.md';
+// The corpus lives with the domain that defines its round-trip, not with the
+// harness that happens to also exercise it: one note, one expectation. A second
+// copy here would drift, and the two suites would quietly stop testing the
+// same thing.
+const _notePath = '../rhyolite_core/test/fixtures/frontmatter_heavy_note.md';
 
 String fileIdFor(String relPath) => const Uuid().v5(_vaultId, relPath);
 

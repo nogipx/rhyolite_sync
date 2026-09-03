@@ -1,10 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:rhyolite_sync/src/settings_sync/resource_crdt_codec.dart';
-import 'package:rhyolite_sync/src/settings_sync/settings_store.dart';
-import 'package:rhyolite_sync/src/settings_sync/settings_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';

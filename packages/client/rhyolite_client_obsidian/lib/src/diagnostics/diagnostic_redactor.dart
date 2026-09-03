@@ -159,6 +159,8 @@ class DiagnosticRedactor {
 
   /// Six hex characters. Short enough to read a path at a glance, wide enough
   /// that two names in one vault will not collide.
-  String _hash(String value) =>
-      pc.sha256.convert(utf8.encode('$_salt $value')).toString().substring(0, 6);
+  String _hash(String value) => pc.sha256
+      .convert(utf8.encode('$_salt $value'))
+      .toString()
+      .substring(0, 6);
 }

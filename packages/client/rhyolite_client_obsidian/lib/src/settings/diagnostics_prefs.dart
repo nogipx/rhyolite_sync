@@ -19,8 +19,10 @@ class DiagnosticsPrefs {
 
   static const dataKey = 'diagnostics';
 
-  static const DiagnosticsPrefs disabled =
-      DiagnosticsPrefs(enabled: false, url: '');
+  static const DiagnosticsPrefs disabled = DiagnosticsPrefs(
+    enabled: false,
+    url: '',
+  );
 
   /// Parses prefs from the raw `data.json` map (the whole document).
   factory DiagnosticsPrefs.fromData(Object? rawData) {
@@ -35,8 +37,6 @@ class DiagnosticsPrefs {
 
   Map<String, Object?> toJson() => {'enabled': enabled, 'url': url};
 
-  DiagnosticsPrefs copyWith({bool? enabled, String? url}) => DiagnosticsPrefs(
-        enabled: enabled ?? this.enabled,
-        url: url ?? this.url,
-      );
+  DiagnosticsPrefs copyWith({bool? enabled, String? url}) =>
+      DiagnosticsPrefs(enabled: enabled ?? this.enabled, url: url ?? this.url);
 }

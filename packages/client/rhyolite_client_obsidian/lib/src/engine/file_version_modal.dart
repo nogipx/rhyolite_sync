@@ -101,9 +101,9 @@ Future<void> showHistoryPathPicker(
   }
 
   final paths = byPath.entries.toList()
-    ..sort((a, b) => b.value.newest.createdAt.compareTo(
-          a.value.newest.createdAt,
-        ));
+    ..sort(
+      (a, b) => b.value.newest.createdAt.compareTo(a.value.newest.createdAt),
+    );
 
   await _showPathList(plugin, viewer, browser, paths, all.length);
 }
@@ -184,7 +184,7 @@ Future<void> _showPathList(
           'span',
           text: gone
               ? '${S.historyGoneMark}  ·  '
-                  '${S.historyPathMeta(info.count, _fmt(info.newest.createdAt))}'
+                    '${S.historyPathMeta(info.count, _fmt(info.newest.createdAt))}'
               : S.historyPathMeta(info.count, _fmt(info.newest.createdAt)),
         );
         _css(meta, {'fontSize': '11px', 'opacity': '0.7'});
@@ -199,8 +199,8 @@ Future<void> _showPathList(
       jsu.callMethod<void>(filter, 'addEventListener', [
         'input',
         jsu.allowInterop((JSAny? _) {
-          final q =
-              (jsu.getProperty<String?>(filter, 'value') ?? '').toLowerCase();
+          final q = (jsu.getProperty<String?>(filter, 'value') ?? '')
+              .toLowerCase();
           var shown = 0;
           for (final (haystack, el) in rows) {
             final match = q.isEmpty || haystack.contains(q);
@@ -251,11 +251,7 @@ Future<void> _showVersionList(
     plugin,
     build: (ctx) {
       ctx.h3(S.versionHistoryTitle);
-      ctx.createEl(
-        'p',
-        cls: 'rhyolite-setting-desc',
-        text: relPath,
-      );
+      ctx.createEl('p', cls: 'rhyolite-setting-desc', text: relPath);
       ctx.spaceVertical(px: 8);
 
       ctx.createEl(
@@ -371,20 +367,23 @@ Future<void> _showVersionPreview(
       if (versionIsText && currentIsText) {
         // Diff current → version: '-' lines are dropped by a restore, '+'
         // lines are added — so the user sees exactly what Restore would do.
-        final currentText =
-            current == null ? '' : utf8.decode(current, allowMalformed: true);
+        final currentText = current == null
+            ? ''
+            : utf8.decode(current, allowMalformed: true);
         final versionText = utf8.decode(bytes, allowMalformed: true);
         if (current == null) {
-          ctx.createEl('p',
-              cls: 'rhyolite-setting-desc',
-              text: S.fileDoesNotExistWillRecreate);
+          ctx.createEl(
+            'p',
+            cls: 'rhyolite-setting-desc',
+            text: S.fileDoesNotExistWillRecreate,
+          );
         }
         final diff = const DiffTextUseCase()(currentText, versionText);
         if (diff == null) {
           // Too many distinct lines to diff — fall back to a plain preview.
           final preview = versionText.length > 8000
               ? '${versionText.substring(0, 8000)}\n\n'
-                  '${S.moreCharacters(versionText.length - 8000)}'
+                    '${S.moreCharacters(versionText.length - 8000)}'
               : versionText;
           ctx.createEl('pre', cls: 'rhyolite-version-preview', text: preview);
         } else if (diff.every((l) => l.op == TextDiffOp.equal)) {
@@ -408,7 +407,11 @@ Future<void> _showVersionPreview(
       }
 
       ctx.buttonRow([
-        ButtonSpec(S.restoreVerb, doRestore, variant: ButtonVariant.destructive),
+        ButtonSpec(
+          S.restoreVerb,
+          doRestore,
+          variant: ButtonVariant.destructive,
+        ),
         ButtonSpec(S.back, () async {
           ctx.close(null);
           await back();

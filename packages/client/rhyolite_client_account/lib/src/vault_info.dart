@@ -12,8 +12,8 @@ class VaultInfo {
   final String? verificationToken;
 
   factory VaultInfo.fromJson(Map<String, dynamic> json) => VaultInfo(
-        vaultId: json['vault_id'] as String,
-        vaultName: json['vault_name'] as String? ?? '',
-        verificationToken: json['verification_token'] as String?,
-      );
+    vaultId: json['vault_id'] as String,
+    vaultName: json['vault_name'] as String? ?? '',
+    verificationToken: json['verification_token'] as String?,
+  );
 }

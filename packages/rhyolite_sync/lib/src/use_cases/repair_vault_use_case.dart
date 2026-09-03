@@ -4,20 +4,15 @@ import 'dart:typed_data';
 
 import 'package:convergent/fugue.dart';
 
-import '../chunking/file_type_detector.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
+
+import '../policy/path_scope.dart';
 import '../sync_v3/time_budget_yielder.dart';
 import '../engine/sync_engine_event.dart';
-import '../frontmatter/fm_state.dart';
-import '../frontmatter/fm_store.dart';
-import '../frontmatter/frontmatter_parser.dart';
-import '../frontmatter/frontmatter_split.dart';
+import '../storage/fm_store.dart';
 import '../platform/i_platform_io.dart';
-import '../sync_v3/file_state.dart';
 import '../sync_v3/file_state_store.dart';
 import '../sync_v3/fugue_store.dart';
-import '../sync_v3/fugue_text_sync.dart';
-import '../sync_v3/path_scope.dart';
-import '../sync_v3/record_id.dart';
 
 /// Result of a vault repair pass.
 class RepairResult {

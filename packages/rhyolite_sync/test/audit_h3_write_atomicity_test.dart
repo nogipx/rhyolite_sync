@@ -25,6 +25,7 @@ import 'package:uuid/uuid.dart';
 import 'support/fake_blob_storage.dart';
 import 'support/fake_change_provider.dart';
 import 'support/fake_platform_io.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _vaultPath = '/vault';
 const _vaultId = '00000000-0000-4000-8000-0000000000a3';

@@ -21,10 +21,10 @@ class DiagnosticsLogging {
     required DeviceInfo Function() device,
     required RpcLogLevel baselineLevel,
     LogScope? log,
-  })  : _controller = controller,
-        _device = device,
-        _baselineLevel = baselineLevel,
-        _log = log;
+  }) : _controller = controller,
+       _device = device,
+       _baselineLevel = baselineLevel,
+       _log = log;
 
   final LogController _controller;
   final DeviceInfo Function() _device;

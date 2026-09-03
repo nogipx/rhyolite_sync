@@ -159,9 +159,9 @@ class UpdateVaultMetaRequest implements IRpcSerializable {
 
   @override
   Map<String, dynamic> toJson() => {
-        'vault_id': vaultId,
-        'encrypted_meta': encryptedMeta,
-      };
+    'vault_id': vaultId,
+    'encrypted_meta': encryptedMeta,
+  };
 }
 
 class UpdateVaultMetaResponse implements IRpcSerializable {

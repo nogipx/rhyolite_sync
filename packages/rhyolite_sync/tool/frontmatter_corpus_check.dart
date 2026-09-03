@@ -13,10 +13,7 @@
 // author left it.
 
 import 'dart:io';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_document.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_parser.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_render.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_split.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 void main(List<String> roots) {
   var total = 0, withFm = 0, asMap = 0, asRaw = 0;
@@ -35,7 +32,12 @@ void main(List<String> roots) {
       if (s.region == null) continue;
       withFm++;
       final fm = parseFrontmatterRegion(s.region!);
-      if (fm is FmRaw) { asRaw++; rawPaths.add(f.path); } else { asMap++; }
+      if (fm is FmRaw) {
+        asRaw++;
+        rawPaths.add(f.path);
+      } else {
+        asMap++;
+      }
       if (fm is FmMap) {
         for (final e in fm.entries) {
           if (e.value is FmOpaque) opaqueKeys.add(e.key);
@@ -61,7 +63,8 @@ void main(List<String> roots) {
   print('  parsed as raw   $asRaw');
   print('semantically stable $stable / $withFm');
   print('byte-identical      $byteIdentical / $withFm  (quality metric)');
-  if (opaqueKeys.isNotEmpty) print('opaque keys: ${opaqueKeys.toList()..sort()}');
+  if (opaqueKeys.isNotEmpty)
+    print('opaque keys: ${opaqueKeys.toList()..sort()}');
   for (final p in rawPaths.take(5)) print('  RAW: $p');
   for (final p in unstable.take(10)) print('  UNSTABLE: $p');
 }

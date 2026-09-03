@@ -5,10 +5,13 @@ import 'dart:js_util' as jsu;
 
 import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
+
+import 'sync_activity.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
 import '../i18n/i18n.dart';
 import 'server_rejections.dart';
+import 'session_contracts.dart';
 
 /// Unified sync state indicator — a coloured dot followed by a short
 /// progress label.
@@ -25,18 +28,20 @@ import 'server_rejections.dart';
 /// Either way the content is identical: a single coloured dot + a
 /// terse status label that grows to include progress counts during
 /// initial upload/download. Click opens settings.
-class SyncStatusIndicator {
+class SyncStatusIndicator implements SessionIndicator {
   SyncStatusIndicator({
     required PluginHandle plugin,
     required ISyncEngine engine,
     LogScope? logger,
     void Function()? onTap,
     void Function()? onReconnect,
+    bool Function()? settingsBusy,
   }) : _plugin = plugin,
        _engine = engine,
        _log = logger,
        _onTap = onTap,
-       _onReconnect = onReconnect;
+       _onReconnect = onReconnect,
+       _activity = SyncActivity(settingsBusy: settingsBusy);
 
   final PluginHandle _plugin;
   final ISyncEngine _engine;
@@ -51,6 +56,11 @@ class SyncStatusIndicator {
   /// by tapping the red dot they already reach for, without waiting for a DOM
   /// online/visibility event.
   final void Function()? _onReconnect;
+
+  /// The shared answer to "is anything working" — see [SyncActivity]. Owned
+  /// rather than reimplemented, because the panel asks the same question and
+  /// the two used to answer it differently.
+  final SyncActivity _activity;
 
   static const _pluginId = 'rhyolite-sync';
   static const _revertDelay = Duration(seconds: 3);
@@ -83,7 +93,6 @@ class SyncStatusIndicator {
   /// phase-specific events rather than inferred from their spacing — see
   /// [SyncBusy]. Guards the idle paint so green never means "done" while a
   /// download is still running.
-  bool _busy = false;
 
   /// Last state passed to [_set]. Needed so SyncPending can repaint
   /// the dot without forcing a logical state transition.
@@ -92,7 +101,7 @@ class SyncStatusIndicator {
   /// True while `.obsidian` settings sync is in flight. Surfaced as a subtle
   /// overlay only when notes sync is otherwise idle — notes activity, errors
   /// and auth/sub states always dominate the single dot.
-  bool _settingsSyncing = false;
+
 
   void init() {
     final mobile = _detectMobile();
@@ -106,6 +115,7 @@ class SyncStatusIndicator {
     _sub = _engine.events.listen(_onEvent);
   }
 
+  @override
   void dispose() {
     _sub?.cancel();
     _revertTimer?.cancel();
@@ -223,17 +233,21 @@ class SyncStatusIndicator {
   // ---------------------------------------------------------------------------
 
   void _onEvent(SyncEngineEvent event) {
+    // Folded first: the shared rule owns busy, transfers and teardown, and the
+    // switch below only decides how to PAINT what it now says.
+    if (_activity.observe(event) &&
+        (_currentState == _State.idle || _currentState == _State.pulling)) {
+      _set(_restingState);
+    }
     switch (event) {
       case SyncStarted():
         _set(_State.connecting);
       case SyncStopped():
         _cancelRevert();
-        _busy = false;
         _set(_State.off);
       case SyncConnecting():
         _set(_State.connecting);
-      case SyncBusy(:final busy):
-        _busy = busy;
+      case SyncBusy():
         _cancelRevert();
         // Generic "working": the specific phase paints over this as soon as it
         // reports, and this is what holds the indicator between reports.
@@ -242,10 +256,12 @@ class SyncStatusIndicator {
         _cancelRevert();
         // Connected now fires when the socket comes up, which is BEFORE the
         // startup pull — so it must not paint green over work still to come.
-        if (!_busy) _set(_State.idle);
+        // Through the resting state, not straight to idle: settings work is
+        // work too, and this was one of the two places that painted "up to
+        // date" straight over it.
+        if (!_activity.engineBusy) _set(_restingState);
       case SyncDisconnected():
         _cancelRevert();
-        _busy = false;
         // Distinct from `off` (intentionally stopped): the engine was running
         // and lost the backend. Orange so green never implies "ready" while
         // we actually can't reach the server.
@@ -320,11 +336,20 @@ class SyncStatusIndicator {
 
   /// Called by the settings-sync driver as a `.obsidian` sync starts/ends.
   /// Repaints with the same logical notes state — the overlay only changes the
-  /// dot when notes sync is idle, so this never forces a state transition.
+  @override
   void setSettingsActivity(bool active) {
-    if (active == _settingsSyncing) return;
-    _settingsSyncing = active;
-    _set(_currentState);
+    // The VALUE comes from [SyncActivity], which reads it live; this is only
+    // the nudge to repaint at the moment it changes.
+    // Recomputed, not repainted. Repainting the CURRENT state was the other
+    // half of the "up to date" report: settings could start working while the
+    // dot sat at idle, and re-drawing idle left it at idle. A state that is
+    // merely resting has to be asked again; a loud one — progress, an error,
+    // auth — is left alone.
+    _set(
+      _currentState == _State.idle || _currentState == _State.pulling
+          ? _restingState
+          : _currentState,
+    );
   }
 
   static const _settingsColor = 'rgb(48, 128, 240)';
@@ -334,9 +359,14 @@ class SyncStatusIndicator {
     final el = _container;
     final doc = _document;
     if (el == null || doc == null) return;
-    // Settings-sync overlay wins only over idle — notes activity, progress,
-    // errors and auth/sub all dominate the single dot.
-    final overlay = _settingsSyncing && state == _State.idle;
+    // The tint distinguishes settings-only work from the engine's, and it is
+    // only ever a tint: the STATE is busy either way, so this can no longer
+    // make the dot read as resting. Anything louder than settings — progress,
+    // errors, auth — still dominates.
+    final overlay =
+        _activity.settingsBusy &&
+        !_activity.engineBusy &&
+        state == _State.pulling;
     final color = overlay
         ? _settingsColor
         : _colorFor(state, hasPending: _hasPending);
@@ -396,7 +426,20 @@ class SyncStatusIndicator {
   /// that is still going, and a green dot next to a panel reading
   /// "Syncing 242/255" is the reassuring kind of wrong — the kind that gets
   /// someone to close the app mid-transfer.
-  _State get _restingState => _busy ? _State.pulling : _State.idle;
+  /// One dot, one meaning: is the plugin doing anything.
+  ///
+  /// Settings activity used to be a tint that appeared only OVER idle, which
+  /// made it a second, quieter indicator — and one that vanished exactly when
+  /// the engine was busy, so during a first sync or a re-upload the settings
+  /// work was invisible for as long as it lasted. Worse, when the engine was
+  /// idle and settings were still transferring, the resting state was still
+  /// `idle`, and the panel said "up to date" over an unfinished queue.
+  ///
+  /// Two signals for one question is a question the reader has to answer
+  /// themselves. The dot now says whether ANY work is outstanding; which work
+  /// belongs in the panel, which is where detail lives.
+  _State get _restingState =>
+      _activity.isWorking ? _State.pulling : _State.idle;
 
   void _cancelRevert() {
     _revertTimer?.cancel();

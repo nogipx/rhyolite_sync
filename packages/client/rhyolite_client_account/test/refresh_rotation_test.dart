@@ -48,8 +48,7 @@ class _ScriptedAuthResponder extends AuthContractResponder {
   }
 
   @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 AuthSession _session(String suffix, {required bool expired}) {
@@ -122,29 +121,32 @@ void main() {
       expect(
         responder.presented,
         ['refresh-a', 'refresh-a'],
-        reason: 'the retry necessarily reuses the single-use token — which '
+        reason:
+            'the retry necessarily reuses the single-use token — which '
             'is why its refusal proves nothing',
       );
     });
 
-    test('network failures throughout are transient, never a dead session',
-        () async {
-      final (client, _) = _connect([
-        RpcException('unavailable: connection closed'),
-        RpcException('unavailable: connection closed'),
-        RpcException('unavailable: connection closed'),
-      ]);
-      client.useSession(_session('a', expired: true));
+    test(
+      'network failures throughout are transient, never a dead session',
+      () async {
+        final (client, _) = _connect([
+          RpcException('unavailable: connection closed'),
+          RpcException('unavailable: connection closed'),
+          RpcException('unavailable: connection closed'),
+        ]);
+        client.useSession(_session('a', expired: true));
 
-      await expectLater(
-        client.refreshSession(),
-        throwsA(
-          isA<RefreshFailedException>()
-              .having((e) => e.kind, 'kind', RefreshFailureKind.transient)
-              .having((e) => e.sessionIsDead, 'sessionIsDead', isFalse),
-        ),
-      );
-    });
+        await expectLater(
+          client.refreshSession(),
+          throwsA(
+            isA<RefreshFailedException>()
+                .having((e) => e.kind, 'kind', RefreshFailureKind.transient)
+                .having((e) => e.sessionIsDead, 'sessionIsDead', isFalse),
+          ),
+        );
+      },
+    );
 
     test('a transient failure that then succeeds keeps the session', () async {
       final fresh = _session('b', expired: false);
@@ -203,19 +205,21 @@ void main() {
       expect(responder.presented, hasLength(2), reason: 'one retry sequence');
     });
 
-    test('a later refresh starts a new attempt once the first settled',
-        () async {
-      final (client, responder) = _connect([
-        _session('b', expired: false),
-        _session('c', expired: false),
-      ]);
-      client.useSession(_session('a', expired: true));
+    test(
+      'a later refresh starts a new attempt once the first settled',
+      () async {
+        final (client, responder) = _connect([
+          _session('b', expired: false),
+          _session('c', expired: false),
+        ]);
+        client.useSession(_session('a', expired: true));
 
-      await client.refreshSession();
-      await client.refreshSession();
+        await client.refreshSession();
+        await client.refreshSession();
 
-      expect(responder.presented, ['refresh-a', 'refresh-b']);
-    });
+        expect(responder.presented, ['refresh-a', 'refresh-b']);
+      },
+    );
   });
 
   test('no session at all fails locally, without a call', () async {
@@ -300,22 +304,27 @@ void main() {
       expect(responder.presented, hasLength(2), reason: 'one retry sequence');
     });
 
-    test('a throwing handler does not replace the error the caller awaits',
-        () async {
-      final (client, _) = _connect([
-        RpcException('unauthenticated: invalid refresh token'),
-        RpcException('unauthenticated: invalid refresh token'),
-      ]);
-      client.useSession(_session('a', expired: true));
-      client.onSessionRefused = (_) => throw StateError('host blew up');
+    test(
+      'a throwing handler does not replace the error the caller awaits',
+      () async {
+        final (client, _) = _connect([
+          RpcException('unauthenticated: invalid refresh token'),
+          RpcException('unauthenticated: invalid refresh token'),
+        ]);
+        client.useSession(_session('a', expired: true));
+        client.onSessionRefused = (_) => throw StateError('host blew up');
 
-      await expectLater(
-        client.refreshSession(),
-        throwsA(
-          isA<RefreshFailedException>()
-              .having((e) => e.sessionIsDead, 'sessionIsDead', isTrue),
-        ),
-      );
-    });
+        await expectLater(
+          client.refreshSession(),
+          throwsA(
+            isA<RefreshFailedException>().having(
+              (e) => e.sessionIsDead,
+              'sessionIsDead',
+              isTrue,
+            ),
+          ),
+        );
+      },
+    );
   });
 }

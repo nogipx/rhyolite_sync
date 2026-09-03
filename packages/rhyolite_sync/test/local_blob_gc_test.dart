@@ -1,8 +1,6 @@
-import 'dart:typed_data';
-
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/src/local/local_blob_store.dart';
-import 'package:rhyolite_sync/src/sync_v3/file_state.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/src/sync_v3/file_state_store.dart';
 import 'package:rhyolite_sync/src/sync_v3/local_blob_gc.dart';
 import 'package:rpc_blob/rpc_blob.dart';
@@ -153,16 +151,73 @@ void main() {
       expect(await blobs.read('stale-plugin-chunk', vaultId: _v), isNull);
     });
 
-    test('null means not ready and skips the sweep entirely', () async {
+    test('null means not ready, so nothing UNCLAIMED is touched', () async {
       await _seedBlob(blobs, 'plugin-chunk', [1]);
       await _seedBlob(blobs, 'real-orphan', [2]);
 
       final r = await gcWith(() => null)();
       expect(r.skipped, isTrue);
       expect(r.deleted, 0);
-      // Even a genuine orphan survives: an incomplete live set must never
-      // delete anything. The next sweep, once the sibling has loaded, gets it.
+      // A genuine orphan survives, and that is the whole point of the skip: on
+      // an incomplete live set an id belonging to no state of ours may belong
+      // to the sibling, and there is no way to tell from here. The next sweep,
+      // once the sibling has loaded, collects it.
       expect(await blobs.read('real-orphan', vaultId: _v), isNotNull);
+    });
+
+    test('but blobs OUR OWN states claim are still reclaimed', () async {
+      // This is the upgrade path, and it has to work on the first start.
+      //
+      // The sweep now runs before the initial pull, and settings sync does not
+      // come up until seconds after the engine — so on any vault with it
+      // enabled the sibling is ALWAYS unavailable at that moment. A sweep that
+      // forfeited the whole pass there would clean nothing on exactly the
+      // start that needs it: the one after upgrading, on a database already
+      // too full to write.
+      //
+      // An id one of our own states names cannot be the sibling's, whatever
+      // the sibling would have answered.
+      await _seedBlob(blobs, 'ours-rebuildable', [1]);
+      await _seedBlob(blobs, 'real-orphan', [2]);
+      store.upsert(_state('f1', blobRef: 'ours-rebuildable'));
+
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        externalLiveIds: () => null,
+        isRegenerable: (_) async => true,
+      )();
+
+      expect(r.deleted, 1);
+      expect(
+        await blobs.read('ours-rebuildable', vaultId: _v),
+        isNull,
+        reason: 'the vault holds these bytes; the cache need not',
+      );
+      expect(
+        await blobs.read('real-orphan', vaultId: _v),
+        isNotNull,
+        reason: 'an unclaimed id might be the sibling\'s — still untouched',
+      );
+    });
+
+    test('and what our states pin is kept even then', () async {
+      // The narrowed sweep must respect the pin, or a conflict's losing
+      // version loses the only bytes a conflict-copy could be written from.
+      await _seedBlob(blobs, 'ours-pinned', [1]);
+      store.upsert(_state('f1', blobRef: 'ours-pinned'));
+
+      final r = await LocalBlobGc(
+        store: store,
+        blobStore: blobs,
+        vaultId: _v,
+        externalLiveIds: () => null,
+        isRegenerable: (_) async => false,
+      )();
+
+      expect(r.deleted, 0);
+      expect(await blobs.read('ours-pinned', vaultId: _v), isNotNull);
     });
 
     test('an empty sibling set is an answer, not a refusal', () async {

@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:rpc_dart/rpc_dart.dart';
 
 /// Abstract blob backend. Concrete implementations: in-memory, local SQLite,

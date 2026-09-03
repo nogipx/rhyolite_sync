@@ -11,12 +11,11 @@ import 'package:test/test.dart';
 /// disagreement, and which are the recogniser working as designed.
 Future<FrontmatterAuditResult> run(
   Map<String, ({String text, ObsidianFrontmatter? cache})> vault,
-) =>
-    auditFrontmatter(
-      paths: vault.keys.toList(),
-      readFile: (p) async => vault[p]!.text,
-      obsidianCache: (p) => vault[p]!.cache,
-    );
+) => auditFrontmatter(
+  paths: vault.keys.toList(),
+  readFile: (p) async => vault[p]!.text,
+  obsidianCache: (p) => vault[p]!.cache,
+);
 
 void main() {
   test('agreement produces no findings', () async {
@@ -25,7 +24,10 @@ void main() {
         text: '---\ntitle: A\ntags:\n  - work\n---\n\nbody\n',
         cache: (hasRegion: true, keys: ['title', 'tags'], values: const {}),
       ),
-      'b.md': (text: 'no frontmatter\n', cache: (hasRegion: false, keys: [], values: const {})),
+      'b.md': (
+        text: 'no frontmatter\n',
+        cache: (hasRegion: false, keys: [], values: const {}),
+      ),
     });
 
     expect(r.clean, isTrue, reason: r.summary());
@@ -52,7 +54,11 @@ void main() {
     final r = await run({
       'a.md': (
         text: '---\ntitle: A\n---\nbody\n',
-        cache: (hasRegion: true, keys: ['title', 'invisible'], values: const {}),
+        cache: (
+          hasRegion: true,
+          keys: ['title', 'invisible'],
+          values: const {},
+        ),
       ),
     });
 
@@ -60,61 +66,72 @@ void main() {
     expect(r.keyDisagreements.single, contains('invisible'));
   });
 
-  test('falling back to raw is only a finding when Obsidian read properties',
-      () async {
-    // Raw is a lossless fallback, not a failure. It becomes interesting only
-    // when the user IS being shown properties for a region we could not place.
-    final quiet = await run({
-      'a.md': (
-        text: '---\n- not a mapping\n---\nbody\n',
-        cache: (hasRegion: true, keys: [], values: const {}),
-      ),
-    });
-    expect(quiet.asRaw, 1);
-    expect(quiet.clean, isTrue, reason: quiet.summary());
+  test(
+    'falling back to raw is only a finding when Obsidian read properties',
+    () async {
+      // Raw is a lossless fallback, not a failure. It becomes interesting only
+      // when the user IS being shown properties for a region we could not place.
+      final quiet = await run({
+        'a.md': (
+          text: '---\n- not a mapping\n---\nbody\n',
+          cache: (hasRegion: true, keys: [], values: const {}),
+        ),
+      });
+      expect(quiet.asRaw, 1);
+      expect(quiet.clean, isTrue, reason: quiet.summary());
 
-    final loud = await run({
-      'a.md': (
-        text: '---\n- not a mapping\n---\nbody\n',
-        cache: (hasRegion: true, keys: ['x'], values: const {}),
-      ),
-    });
-    expect(loud.asRaw, 1);
-    expect(loud.keyDisagreements, hasLength(1));
-  });
+      final loud = await run({
+        'a.md': (
+          text: '---\n- not a mapping\n---\nbody\n',
+          cache: (hasRegion: true, keys: ['x'], values: const {}),
+        ),
+      });
+      expect(loud.asRaw, 1);
+      expect(loud.keyDisagreements, hasLength(1));
+    },
+  );
 
-  test('a type disagreement is caught — the failure key sets would miss',
-      () async {
-    // The reason this comparison exists. `007` is a number to js-yaml's core
-    // schema, and if we read it as text the renderer quotes it and the file
-    // starts meaning something else. Key sets are identical either way.
-    final r = await run({
-      'a.md': (
-        text: '---\nid: 007\n---\nbody\n',
-        cache: (hasRegion: true, keys: ['id'], values: {'id': 7}),
-      ),
-    });
-    expect(r.keyDisagreements, isEmpty, reason: 'the key set agrees');
-    expect(r.valueDisagreements, isEmpty,
-        reason: 'and so does the value: we read 007 as the number seven');
+  test(
+    'a type disagreement is caught — the failure key sets would miss',
+    () async {
+      // The reason this comparison exists. `007` is a number to js-yaml's core
+      // schema, and if we read it as text the renderer quotes it and the file
+      // starts meaning something else. Key sets are identical either way.
+      final r = await run({
+        'a.md': (
+          text: '---\nid: 007\n---\nbody\n',
+          cache: (hasRegion: true, keys: ['id'], values: {'id': 7}),
+        ),
+      });
+      expect(r.keyDisagreements, isEmpty, reason: 'the key set agrees');
+      expect(
+        r.valueDisagreements,
+        isEmpty,
+        reason: 'and so does the value: we read 007 as the number seven',
+      );
 
-    final wrong = await run({
-      'a.md': (
-        text: '---\nid: "007"\n---\nbody\n',
-        cache: (hasRegion: true, keys: ['id'], values: {'id': 7}),
-      ),
-    });
-    expect(wrong.valueDisagreements, hasLength(1));
-    expect(wrong.valueDisagreements.single, contains('number'));
-  });
+      final wrong = await run({
+        'a.md': (
+          text: '---\nid: "007"\n---\nbody\n',
+          cache: (hasRegion: true, keys: ['id'], values: {'id': 7}),
+        ),
+      });
+      expect(wrong.valueDisagreements, hasLength(1));
+      expect(wrong.valueDisagreements.single, contains('number'));
+    },
+  );
 
   test('a list that differs is caught', () async {
     final r = await run({
       'a.md': (
         text: '---\ntags:\n  - a\n  - b\n---\nbody\n',
-        cache: (hasRegion: true, keys: ['tags'], values: {
-          'tags': ['a', 'c'],
-        }),
+        cache: (
+          hasRegion: true,
+          keys: ['tags'],
+          values: {
+            'tags': ['a', 'c'],
+          },
+        ),
       ),
     });
     expect(r.valueDisagreements, hasLength(1));
@@ -148,14 +165,16 @@ void main() {
     expect(r.clean, isTrue, reason: r.summary());
   });
 
-  test('an unreadable file is skipped, not counted as a disagreement',
-      () async {
-    final r = await auditFrontmatter(
-      paths: ['gone.md'],
-      readFile: (_) async => throw StateError('deleted mid-scan'),
-      obsidianCache: (_) => (hasRegion: true, keys: ['x'], values: const {}),
-    );
-    expect(r.clean, isTrue);
-    expect(r.notes, 1);
-  });
+  test(
+    'an unreadable file is skipped, not counted as a disagreement',
+    () async {
+      final r = await auditFrontmatter(
+        paths: ['gone.md'],
+        readFile: (_) async => throw StateError('deleted mid-scan'),
+        obsidianCache: (_) => (hasRegion: true, keys: ['x'], values: const {}),
+      );
+      expect(r.clean, isTrue);
+      expect(r.notes, 1);
+    },
+  );
 }

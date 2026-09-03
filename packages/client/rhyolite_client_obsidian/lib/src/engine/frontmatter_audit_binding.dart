@@ -46,7 +46,6 @@ Future<FrontmatterAuditResult> auditVault(AppHandle app) {
   );
 }
 
-
 /// Converts a JS frontmatter value into something comparable, or null when it
 /// is a shape the audit does not judge (a nested object, a date instance).
 Object? _dartify(Object? v) {

@@ -3,7 +3,7 @@ import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
 import 'disk_reconciler.dart';
-import 'path_normalize.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 class StateStartupDiffResult {
   final int newFiles;
@@ -103,9 +103,24 @@ class StateStartupDiff {
   /// it in the cooperative yielder for the same reason; the comment on the
   /// scan's yield still explains why.
   ///
-  /// Ten seconds costs at most six round trips a minute during a pass, and
-  /// bounds what an interruption throws away to the last ten seconds of work
-  /// rather than the whole hour.
+  /// What this actually delivers is `max(interval, time to finish a group)`,
+  /// because the check sits at job boundaries and a group is eight files. So
+  /// the two regimes differ, and both are wanted:
+  ///   * big files — a group outlasts any interval, so this degenerates to
+  ///     "publish after every group", which is as often as there is anything
+  ///     to publish;
+  ///   * small files — groups finish in milliseconds and the interval is what
+  ///     binds, keeping a vault of ten thousand notes from paying a round trip
+  ///     every few files.
+  ///
+  /// Five seconds because the second regime is the one a measured pass showed:
+  /// 252 files in 78 seconds published five times, the gaps 13-19s — the
+  /// interval plus the push it starts. Halving it roughly doubles how often
+  /// the server hears, and costs almost nothing: each state is encoded once
+  /// either way, so finer slicing adds per-call overhead and no work. Not
+  /// three, only because [StateSyncEngine] already has an unrelated three
+  /// seconds in its text debounce and two constants that match invite the
+  /// belief that they are connected.
   final Duration publishInterval;
 
   /// Called at most once per [publishInterval], so the states of what has been
@@ -148,6 +163,16 @@ class StateStartupDiff {
   /// scale with its size, so a small group only means more of them; this is
   /// the download side's [_prefetchGroupSize] read backwards.
   static const int _uploadGroupSize = 8;
+
+  /// Bytes a group may hold before it is closed, and the size at which a file
+  /// is given a group to itself.
+  ///
+  /// The count bound alone is not enough: eight files can be eight photos or
+  /// one video and seven thumbnails, and in the second case seven uploads
+  /// finish in seconds and then wait minutes on the one they were bundled
+  /// with. Grouping buys round trips, which only matters while the request
+  /// costs more than the bytes — past this size it does not.
+  static const int _uploadGroupMaxBytes = 8 * 1024 * 1024;
 
   /// Number of files uploaded in parallel. Defaults to 4 — single-thread
   /// CPU is still the bottleneck on dart2js, but a small pool hides
@@ -211,13 +236,14 @@ class StateStartupDiff {
     this.onUploadProgress,
     this.onScanProgress,
     this.onProgressPublished,
-    this.publishInterval = const Duration(seconds: 10),
+    this.publishInterval = const Duration(seconds: 5),
     this.onFileTransfer,
     this.uploadConcurrency = 4,
     this.reconcileText,
     this.planTextReconcile,
     this.commitTextReconcile,
     this.sigStore,
+    this.isCancelled,
     Uint8List? blobIdKey,
     Uint8List? recordIdKey,
     int? Function()? maxFileSizeBytes,
@@ -257,6 +283,38 @@ class StateStartupDiff {
   /// in the startup upload progress. Null → every text file is delegated
   /// (pre-signature behavior).
   final StatSigStore? sigStore;
+
+  /// Whether the run that started this pass is still the current one.
+  ///
+  /// Checked in the scan loop and between upload groups, which is the whole of
+  /// the cancellation this class has. It had none at all: the engine tested
+  /// `_running` before calling in and never again, so a pass outlived the
+  /// session that started it — in one report by sixteen minutes, after which
+  /// it wrote 2560 files on behalf of a session that was gone.
+  ///
+  /// Null means "always current", for callers with no lifecycle to speak of
+  /// (offline runs, tests).
+  final bool Function()? isCancelled;
+
+  bool get _cancelled => isCancelled?.call() ?? false;
+
+  /// What a cancelled pass reports: nothing found, nothing missing.
+  ///
+  /// Emphatically NOT "no files are missing" — the walk never finished, so
+  /// this pass has no opinion. [missingFileIds] drives tombstone creation, so
+  /// a partial answer here would delete the files the scan had not reached
+  /// yet. Empty is the only safe report.
+  StateStartupDiffResult _cancelledResult(int diskFileCount) =>
+      StateStartupDiffResult(
+        newFiles: 0,
+        modifiedFiles: 0,
+        missingFileIds: const <String>[],
+        blocked: const <({String path, int sizeBytes, int limitBytes})>[],
+        excluded: const <({String path, String extension})>[],
+        outOfScope: const <String>[],
+        diskFileCount: diskFileCount,
+        skippedGroups: 0,
+      );
 
   /// Per-file scan lines kept before the rest are counted instead of logged.
   static const int _maxScanSamples = 20;
@@ -344,6 +402,9 @@ class StateStartupDiff {
       // Measured in time, not files: the 16 this used to count was one guess
       // covering both a file skipped on its signature and one hashed in full.
       await scanYielder.maybeYield();
+      // Between files, because the yield above is where this pass gives the
+      // host a turn — and the turn is when a stop can arrive.
+      if (_cancelled) return _cancelledResult(diskRelPaths.length);
       scanned++;
       if (onScanProgress != null &&
           (scanBeat.elapsed >= _scanHeartbeat || scanned == diskFiles.length)) {
@@ -696,20 +757,29 @@ class StateStartupDiff {
       onUploadProgress?.call(doneFiles, totalFiles);
     }
 
-    /// Publishes what has landed, if enough has landed since the last time.
+    /// Publishes what has landed, whatever the beat says.
+    ///
+    /// Used at the end of the pass, where being economical about round trips
+    /// buys nothing: there is no later beat to wait for.
+    Future<void> publishNow() async {
+      final publish = onProgressPublished;
+      // Nothing new is worth a round trip however long it has been.
+      if (publish == null || !publishedSomething) return;
+      publishedSomething = false;
+      publishBeat.reset();
+      await publish();
+    }
+
+    /// Publishes what has landed, if enough time has passed since the last
+    /// time.
     ///
     /// Called from BOTH job kinds. It lived in the binary one first, which
     /// meant a vault of notes — where every file takes the text path —
     /// published nothing until the pass ended, and the whole point was lost
     /// for exactly the vaults most likely to be large.
     Future<void> maybePublish() async {
-      final publish = onProgressPublished;
-      // Nothing new is worth a round trip however long it has been.
-      if (publish == null || !publishedSomething) return;
       if (publishBeat.elapsed < publishInterval) return;
-      publishedSomething = false;
-      publishBeat.reset();
-      await publish();
+      await publishNow();
     }
 
     final jobs = <Future<void> Function()>[];
@@ -719,14 +789,31 @@ class StateStartupDiff {
       // round trips. uploadAll sends a group's chunks together and then its
       // manifests together — same manifest-last guarantee, made stricter
       // across the group, at two requests per group instead of per file.
-      for (var i = 0; i < pending.length; i += _uploadGroupSize) {
-        final group = pending.sublist(
-          i,
-          i + _uploadGroupSize > pending.length
-              ? pending.length
-              : i + _uploadGroupSize,
-        );
+      // Grouped by SIZE as well as by count, because a group costs whatever
+      // its largest member costs and everything else in it waits.
+      //
+      // A fixed eight-per-group put a 54 MB video in with seven photos of
+      // 400 KB, and the panel showed exactly that: seven rows sitting at 100%
+      // for minutes with one bar creeping along beneath them. The round trips
+      // the grouping exists to save are worth saving for small files, where
+      // the request dominates the bytes; for a large file the bytes dominate
+      // and it may as well go alone.
+      //
+      // Ascending, so the many-small case drains first and the count moves
+      // early. The cost is honest and worth naming: the largest files end up
+      // at the tail, where there is less left to overlap them with. Starting
+      // them first would finish the whole pass sooner, and would also mean a
+      // first sync that reports nothing completed for minutes.
+      final groups = groupUploadsBySize(
+        pending,
+        sizeOf: (item) => item.bytes.length,
+      );
+
+      for (final group in groups) {
         jobs.add(() async {
+          // Files already retired from the active list, so the sweep after the
+          // group does not report them a second time.
+          final retired = <int>{};
           final results = await chunkedIO.uploadAll(
             [for (final item in group) item.bytes],
             knownChunks,
@@ -737,15 +824,35 @@ class StateStartupDiff {
               if (item.bytes.length < DiskReconciler.transferMonitorMinBytes) {
                 return;
               }
-              onFileTransfer?.call(item.relPath, sent, total, false);
+              // Retired on ITS OWN last byte, not on the group's.
+              //
+              // Retiring per group is what filled the panel with rows sitting
+              // at 100%: a file's bytes were long gone and its row stayed
+              // until the slowest member of its group finished. With groups
+              // now bounded by size that wait is shorter, but it is still a
+              // wait, and there is nothing left to show about a file whose
+              // content is up.
+              //
+              // What this does concede: the group's manifests go last, so a
+              // row disappears a moment before the upload is durable, and a
+              // group that fails afterwards will have shown its files as
+              // finished. The pass reports that failure and leaves them
+              // pending for the next one — a retry, not a loss.
+              if (sent >= total && retired.add(index)) {
+                onFileTransfer?.call(item.relPath, total, total, true);
+              } else {
+                onFileTransfer?.call(item.relPath, sent, total, false);
+              }
             },
           );
           for (var j = 0; j < group.length; j++) {
             final item = group[j];
             final result = results[j];
-            if (item.bytes.length >= DiskReconciler.transferMonitorMinBytes) {
-              // Retire it from the active list; without this it sits there at
-              // whatever fraction the last chunk left it on.
+            // Backstop for anything progress never reported complete — a
+            // file whose chunks were all already on the server, so nothing
+            // was sent and no callback ever fired for it.
+            if (item.bytes.length >= DiskReconciler.transferMonitorMinBytes &&
+                !retired.contains(j)) {
               onFileTransfer?.call(
                 item.relPath,
                 item.bytes.length,
@@ -875,10 +982,6 @@ class StateStartupDiff {
           final results = await chunkedIO.uploadAll(
             [for (final plan in plans) plan.blobBytes],
             knownChunks,
-            // These bytes ARE the tree, which the commit writes before the
-            // FileState naming them — so caching a second copy in the same
-            // database buys nothing. Same reason the per-file path passes it.
-            cacheLocally: false,
           );
           for (var j = 0; j < plans.length; j++) {
             final changed = await commitText(
@@ -931,6 +1034,9 @@ class StateStartupDiff {
       Future<void> worker() async {
         while (true) {
           if (abort) return;
+          // The session that asked for this work is gone; banking more of it
+          // writes on behalf of nobody.
+          if (_cancelled) return;
           final i = nextIndex++;
           if (i >= jobs.length) return;
           try {
@@ -999,6 +1105,19 @@ class StateStartupDiff {
         '${skippedGroups > 0 ? ', $skippedGroups group(s) skipped '
                   '(last: $lastGroupError)' : ''}',
       );
+      // Everything banked since the last beat, published now rather than left
+      // for the caller.
+      //
+      // The interval gate is right during the pass and wrong at the end of it:
+      // whatever finished inside the last ten seconds was held back, and since
+      // uploads run four at a time the tail is not small. One run ended with
+      // 100 of its 252 files unpublished — the largest batch of the pass,
+      // arriving in the one push that must not fail, 90 seconds after its
+      // blobs had reached the server.
+      //
+      // Skipped when cancelled: the session that asked for this work is gone,
+      // and the engine's own guard would refuse the push anyway.
+      if (!_cancelled) await publishNow();
     }
 
     final missingFileIds = <String>[];
@@ -1028,4 +1147,56 @@ class StateStartupDiff {
 
   static bool _isHidden(String relPath) =>
       relPath.split('/').any((s) => s.startsWith('.'));
+}
+
+
+/// Splits [items] into upload groups bounded by BOTH count and total bytes,
+/// smallest first.
+///
+/// Top-level and pure so the rule can be read and tested without a disk, a
+/// server or a clock — it decides how long one file waits on another, and that
+/// was previously visible only by watching a progress panel.
+///
+/// A group costs whatever its largest member costs, and everything else in it
+/// waits. Bounding by count alone put a 54 MB video in with seven photos of
+/// 400 KB: seven uploads finished in seconds and then sat at 100% for minutes.
+/// Grouping is worth round trips only while the request costs more than the
+/// bytes, so anything at or above [maxBytes] is given a group of its own.
+///
+/// Ascending, so the many-small case drains first and the file count moves
+/// early. The cost, named rather than hidden: the largest files land at the
+/// tail with less left to overlap them. Starting them first would finish the
+/// pass sooner and report nothing complete for minutes while doing it.
+List<List<T>> groupUploadsBySize<T>(
+  List<T> items, {
+  required int Function(T) sizeOf,
+  int maxCount = StateStartupDiff._uploadGroupSize,
+  int maxBytes = StateStartupDiff._uploadGroupMaxBytes,
+}) {
+  final sorted = List<T>.of(items)
+    ..sort((a, b) => sizeOf(a).compareTo(sizeOf(b)));
+  final groups = <List<T>>[];
+  var current = <T>[];
+  var currentBytes = 0;
+  for (final item in sorted) {
+    final size = sizeOf(item);
+    if (size >= maxBytes) {
+      if (current.isNotEmpty) {
+        groups.add(current);
+        current = [];
+        currentBytes = 0;
+      }
+      groups.add([item]);
+      continue;
+    }
+    if (current.length >= maxCount || currentBytes + size > maxBytes) {
+      groups.add(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.add(item);
+    currentBytes += size;
+  }
+  if (current.isNotEmpty) groups.add(current);
+  return groups;
 }

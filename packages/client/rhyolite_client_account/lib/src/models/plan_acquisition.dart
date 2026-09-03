@@ -55,4 +55,3 @@ class TrialAcquisition extends PlanAcquisition {
   @override
   int get hashCode => 1;
 }
-

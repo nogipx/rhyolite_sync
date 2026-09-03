@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Wire codec between a [FileState] (+ its causal context) and the
 /// encrypted `StatePutItem` / `StateRecord` envelopes on the sync wire.

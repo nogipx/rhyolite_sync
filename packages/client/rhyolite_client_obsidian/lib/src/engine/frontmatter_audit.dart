@@ -1,4 +1,4 @@
-import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Compares our frontmatter recogniser against Obsidian's own, over the real
 /// vault.
@@ -133,8 +133,7 @@ Future<FrontmatterAuditResult> auditFrontmatter({
 
     final ourKeys = map.entries.map((e) => e.key).toSet();
     final theirKeys = theirs.keys.toSet();
-    if (ourKeys.length != theirKeys.length ||
-        !ourKeys.containsAll(theirKeys)) {
+    if (ourKeys.length != theirKeys.length || !ourKeys.containsAll(theirKeys)) {
       final missing = theirKeys.difference(ourKeys);
       final extra = ourKeys.difference(theirKeys);
       result.keyDisagreements.add(

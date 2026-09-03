@@ -31,18 +31,16 @@ class ManagedVaultDirectory implements IVaultDirectory {
   Future<void> createVault({
     required String vaultId,
     required String vaultName,
-  }) =>
-      _client.createVault(vaultId: vaultId, vaultName: vaultName);
+  }) => _client.createVault(vaultId: vaultId, vaultName: vaultName);
 
   @override
   Future<void> updateVerificationToken({
     required String vaultId,
     required String verificationToken,
-  }) =>
-      _client.updateVerificationToken(
-        vaultId: vaultId,
-        verificationToken: verificationToken,
-      );
+  }) => _client.updateVerificationToken(
+    vaultId: vaultId,
+    verificationToken: verificationToken,
+  );
 
   @override
   Future<void> deleteVault({required String vaultId}) =>

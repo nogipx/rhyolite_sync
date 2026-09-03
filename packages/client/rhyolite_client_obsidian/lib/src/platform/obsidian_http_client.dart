@@ -32,9 +32,9 @@ class ObsidianHttpClient extends http.BaseClient {
     final uri = request.url;
     final module = uri.scheme == 'https' ? 'https' : 'http';
 
-    final nodeModule = jsu.callMethod<JSObject>(
-      jsu.globalThis, 'require', [module],
-    );
+    final nodeModule = jsu.callMethod<JSObject>(jsu.globalThis, 'require', [
+      module,
+    ]);
 
     final completer = Completer<http.StreamedResponse>();
 
@@ -55,10 +55,13 @@ class ObsidianHttpClient extends http.BaseClient {
         try {
           final rawHeaders = jsu.getProperty<Object?>(res, 'headers');
           if (rawHeaders != null && rawHeaders is JSObject) {
-            final objectCtor =
-                jsu.getProperty<JSObject>(jsu.globalThis, 'Object');
-            final keys = jsu.callMethod<List<Object?>>(
-                objectCtor, 'keys', [rawHeaders]);
+            final objectCtor = jsu.getProperty<JSObject>(
+              jsu.globalThis,
+              'Object',
+            );
+            final keys = jsu.callMethod<List<Object?>>(objectCtor, 'keys', [
+              rawHeaders,
+            ]);
             for (final key in keys) {
               if (key is String) {
                 final val = jsu.getProperty<Object?>(rawHeaders, key);
@@ -91,12 +94,14 @@ class ObsidianHttpClient extends http.BaseClient {
               builder.add(c);
             }
             if (!completer.isCompleted) {
-              completer.complete(http.StreamedResponse(
-                Stream.value(builder.takeBytes()),
-                statusCode,
-                headers: responseHeaders,
-                request: request,
-              ));
+              completer.complete(
+                http.StreamedResponse(
+                  Stream.value(builder.takeBytes()),
+                  statusCode,
+                  headers: responseHeaders,
+                  request: request,
+                ),
+              );
             }
           }),
         ]);
@@ -132,17 +137,24 @@ class ObsidianHttpClient extends http.BaseClient {
   // Mobile: Obsidian requestUrl
   // ---------------------------------------------------------------------------
 
-  Future<http.StreamedResponse> _sendRequestUrl(http.BaseRequest request) async {
+  Future<http.StreamedResponse> _sendRequestUrl(
+    http.BaseRequest request,
+  ) async {
     final body = request is http.Request ? request.bodyBytes : Uint8List(0);
 
-    final requestUrlFn =
-        jsu.getProperty<JSFunction>(obsidianModule(), 'requestUrl');
+    final requestUrlFn = jsu.getProperty<JSFunction>(
+      obsidianModule(),
+      'requestUrl',
+    );
 
     final options = jsu.newObject<JSObject>();
     jsu.setProperty(options, 'url', request.url.toString());
     jsu.setProperty(options, 'method', request.method);
-    jsu.setProperty(options, 'contentType',
-        request.headers['content-type'] ?? 'application/octet-stream');
+    jsu.setProperty(
+      options,
+      'contentType',
+      request.headers['content-type'] ?? 'application/octet-stream',
+    );
 
     final jsHeaders = jsu.newObject<JSObject>();
     request.headers.forEach((key, value) {
@@ -186,14 +198,16 @@ class ObsidianHttpClient extends http.BaseClient {
     try {
       final headersObj = jsu.getProperty<JSAny?>(result, 'headers');
       if (headersObj != null && headersObj is JSObject) {
-        final objectCtor =
-            jsu.getProperty<JSObject>(jsu.globalThis, 'Object');
-        final keys =
-            jsu.callMethod<List<Object?>>(objectCtor, 'keys', [headersObj]);
+        final objectCtor = jsu.getProperty<JSObject>(jsu.globalThis, 'Object');
+        final keys = jsu.callMethod<List<Object?>>(objectCtor, 'keys', [
+          headersObj,
+        ]);
         for (final key in keys) {
           if (key is String) {
             final val = jsu.getProperty<Object?>(headersObj, key);
-            if (val != null) responseHeaders[key.toLowerCase()] = val.toString();
+            if (val != null) {
+              responseHeaders[key.toLowerCase()] = val.toString();
+            }
           }
         }
       }

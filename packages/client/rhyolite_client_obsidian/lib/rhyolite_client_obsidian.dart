@@ -2,6 +2,7 @@ export 'package:rhyolite_sync/rhyolite_sync.dart';
 
 export 'src/changes/obsidian_change_provider.dart';
 export 'src/engine/format_bytes.dart';
+export 'src/engine/auth_config.dart';
 export 'src/engine/obsidian_config_storage.dart';
 export 'src/engine/passphrase_modal.dart';
 export 'src/vault/vault_directory.dart';

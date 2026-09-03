@@ -20,9 +20,9 @@ class SharedSecretAuthInterceptor implements IRpcInterceptor {
     required String sharedSecret,
     String principalId = 'local',
     Set<String> publicMethods = const {},
-  })  : _sharedSecret = sharedSecret,
-        _principalId = principalId,
-        _publicMethods = publicMethods;
+  }) : _sharedSecret = sharedSecret,
+       _principalId = principalId,
+       _publicMethods = publicMethods;
 
   /// The expected Bearer token.
   final String _sharedSecret;

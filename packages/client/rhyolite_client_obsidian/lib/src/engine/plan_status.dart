@@ -27,23 +27,21 @@ class PlanSnapshot {
   bool get isActive => status == SubscriptionStatus.active;
 
   static PlanSnapshot of(SubscriptionDto dto) => PlanSnapshot(
-        status: dto.status,
-        periodEnd: dto.currentPeriodEnd == null
-            ? null
-            : DateTime.fromMillisecondsSinceEpoch(
-                dto.currentPeriodEnd! * 1000,
-              ),
-        plan: dto.plan,
-        capabilities: dto.capabilities,
-      );
+    status: dto.status,
+    periodEnd: dto.currentPeriodEnd == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(dto.currentPeriodEnd! * 1000),
+    plan: dto.plan,
+    capabilities: dto.capabilities,
+  );
 
   Map<String, Object?> toJson() => {
-        'status': status.name,
-        if (periodEnd != null)
-          'periodEnd': periodEnd!.millisecondsSinceEpoch ~/ 1000,
-        if (plan != null) 'plan': plan,
-        if (capabilities != null) 'capabilities': capabilities!.toJson(),
-      };
+    'status': status.name,
+    if (periodEnd != null)
+      'periodEnd': periodEnd!.millisecondsSinceEpoch ~/ 1000,
+    if (plan != null) 'plan': plan,
+    if (capabilities != null) 'capabilities': capabilities!.toJson(),
+  };
 
   static PlanSnapshot? fromJson(Object? raw) {
     if (raw is! Map) return null;
@@ -103,7 +101,8 @@ PlanSnapshot resolvePlan({
   // whatever this session last concluded, so an already-recorded lapse stays
   // recorded instead of decaying back into "never subscribed" on the second
   // lookup.
-  final had = prior != null &&
+  final had =
+      prior != null &&
       (prior.isActive || prior.status == SubscriptionStatus.expired);
   if (!had) return next;
 

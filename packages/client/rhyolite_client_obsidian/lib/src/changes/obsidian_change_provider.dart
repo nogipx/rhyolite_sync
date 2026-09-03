@@ -88,7 +88,7 @@ class ObsidianChangeProvider implements core.IChangeProvider {
   /// unload, leaking duplicate handlers across engine start/stop cycles.
   void _attachEditorChangeListener() {
     final ws = _plugin.app.workspace;
-    final handler = jsu.allowInterop((JSAny? _, JSAny? __) {
+    final handler = jsu.allowInterop((JSAny? _, JSAny? _) {
       if (_typingController == null || _typingController!.isClosed) return;
       final active = _plugin.app.workspace.getActiveFile();
       final path = active?.path;
@@ -160,7 +160,10 @@ class ObsidianChangeProvider implements core.IChangeProvider {
             _consumeSuppression(oldPath) || _consumeSuppression(e.file.path);
         _log?.info(
           'Obsidian event: RENAMED${suppressed ? " [SUPPRESSED]" : ""}',
-          data: {'from': core.LogPath(oldPath), 'to': core.LogPath(e.file.path)},
+          data: {
+            'from': core.LogPath(oldPath),
+            'to': core.LogPath(e.file.path),
+          },
         );
         if (!suppressed) {
           _controller?.add(

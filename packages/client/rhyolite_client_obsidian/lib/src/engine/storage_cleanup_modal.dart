@@ -67,15 +67,16 @@ Future<int?> _askDays(PluginHandle plugin) {
       ctx.h3(S.storageCleanupTitle);
       ctx.spaceVertical(px: 8);
 
-      ctx.createEl('p',
-          cls: 'rhyolite-setting-desc', text: S.storageCleanupDescription);
+      ctx.createEl(
+        'p',
+        cls: 'rhyolite-setting-desc',
+        text: S.storageCleanupDescription,
+      );
       ctx.spaceVertical(px: 12);
 
       ctx.createEl('p', text: S.deleteEventsOlderThanLabel);
-      final input = ctx.input(
-        type: 'number',
-        placeholder: '$_defaultDays',
-      )..focus();
+      final input = ctx.input(type: 'number', placeholder: '$_defaultDays')
+        ..focus();
       ctx.spaceVertical(px: 16);
 
       void doScan() {
@@ -109,24 +110,32 @@ Future<bool?> _confirmDeletion(
     build: (ctx) {
       ctx.h3(S.confirmCleanupTitle);
       ctx.spaceVertical(px: 12);
-      ctx.createEl('p',
-          text: S.eventsToDelete(plan.eventsToDelete, plan.totalEvents));
+      ctx.createEl(
+        'p',
+        text: S.eventsToDelete(plan.eventsToDelete, plan.totalEvents),
+      );
       ctx.createEl('p', text: S.orphanBlobsToDelete(plan.orphanBlobCount));
       if (plan.oldestDeletedAt != null) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc',
-            text: S.oldestEntryToDelete(_fmt(plan.oldestDeletedAt!)));
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.oldestEntryToDelete(_fmt(plan.oldestDeletedAt!)),
+        );
       }
       if (plan.newestDeletedAt != null) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc',
-            text: S.newestEntryToDelete(_fmt(plan.newestDeletedAt!)));
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.newestEntryToDelete(_fmt(plan.newestDeletedAt!)),
+        );
       }
       if (plan.oldestRemainingAt != null) {
         ctx.spaceVertical(px: 8);
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc',
-            text: S.oldestEntryRemaining(_fmt(plan.oldestRemainingAt!)));
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.oldestEntryRemaining(_fmt(plan.oldestRemainingAt!)),
+        );
       }
 
       // Device-head safety section. Always surface this so the user
@@ -134,15 +143,19 @@ Future<bool?> _confirmDeletion(
       ctx.spaceVertical(px: 16);
       ctx.createEl('p', text: S.deviceSafety);
       if (plan.knownDevices.isEmpty) {
-        ctx.createEl('p',
-            cls: 'rhyolite-setting-desc', text: S.noDeviceHeadYet);
+        ctx.createEl(
+          'p',
+          cls: 'rhyolite-setting-desc',
+          text: S.noDeviceHeadYet,
+        );
       } else {
         for (final h in plan.knownDevices) {
-          final age = DateTime.now().toUtc().millisecondsSinceEpoch -
-              h.updatedAtMs;
+          final age =
+              DateTime.now().toUtc().millisecondsSinceEpoch - h.updatedAtMs;
           final ageDays = (age / 86400000).floor();
-          final ageLabel =
-              ageDays == 0 ? S.ageLessThanDay : S.cleanupDaysAgo(ageDays);
+          final ageLabel = ageDays == 0
+              ? S.ageLessThanDay
+              : S.cleanupDaysAgo(ageDays);
           final tag = plan.activeDeviceCount > 0 && ageDays <= 30
               ? S.activeTag
               : S.staleTag;
@@ -150,18 +163,28 @@ Future<bool?> _confirmDeletion(
             'p',
             cls: 'rhyolite-setting-desc',
             text: S.deviceHeadLine(
-                tag, h.deviceId.substring(0, 8), h.headSeq, ageLabel),
+              tag,
+              h.deviceId.substring(0, 8),
+              h.headSeq,
+              ageLabel,
+            ),
           );
         }
         if (plan.minSafeHead != null && plan.eventsProtectedByHead > 0) {
-          ctx.createEl('p',
-              cls: 'rhyolite-setting-desc',
-              text: S.protectedByMinHead(
-                  plan.minSafeHead!, plan.eventsProtectedByHead));
+          ctx.createEl(
+            'p',
+            cls: 'rhyolite-setting-desc',
+            text: S.protectedByMinHead(
+              plan.minSafeHead!,
+              plan.eventsProtectedByHead,
+            ),
+          );
         } else if (plan.activeDeviceCount == 0) {
-          ctx.createEl('p',
-              cls: 'rhyolite-setting-desc',
-              text: S.noActiveDevicesForCleanup);
+          ctx.createEl(
+            'p',
+            cls: 'rhyolite-setting-desc',
+            text: S.noActiveDevicesForCleanup,
+          );
         }
       }
 

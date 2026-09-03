@@ -1,5 +1,6 @@
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 /// Outcome of a re-upload to the current blob backend.
 class ReuploadStorageResult {

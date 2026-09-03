@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/src/sync_v3/fugue_store.dart';
-import 'package:rhyolite_sync/src/sync_v3/fugue_text_sync.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
 

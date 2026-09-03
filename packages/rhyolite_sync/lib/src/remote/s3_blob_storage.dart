@@ -1,5 +1,6 @@
 import 'package:http/http.dart' as http;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:rpc_dart/rpc_dart.dart';
 
 /// Configuration for S3-compatible blob storage.
 class S3BlobConfig extends ExternalBlobConfig {
@@ -46,6 +47,7 @@ class S3BlobConfig extends ExternalBlobConfig {
   IBlobStorage createBlobStorage({
     required String vaultId,
     http.Client? httpClient,
+    LogScope? logger,
   }) {
     final baseUrl = _normalizeEndpoint('$endpoint/$bucket', useSSL);
     _assertCredentialTransportSecure(baseUrl, useSSL);
@@ -54,6 +56,7 @@ class S3BlobConfig extends ExternalBlobConfig {
       prefix: 'blobs/$vaultId/',
       backend: HttpBlobBackend.s3,
       httpClient: httpClient,
+      logger: logger,
       auth: S3HttpBlobAuth(
         accessKey: accessKey,
         secretKey: secretKey,
@@ -101,6 +104,7 @@ class WebDavBlobConfig extends ExternalBlobConfig {
   IBlobStorage createBlobStorage({
     required String vaultId,
     http.Client? httpClient,
+    LogScope? logger,
   }) {
     final baseUrl = _normalizeEndpoint(endpoint, useSSL);
     _assertCredentialTransportSecure(baseUrl, useSSL);
@@ -109,6 +113,7 @@ class WebDavBlobConfig extends ExternalBlobConfig {
       prefix: 'blobs/$vaultId/',
       backend: HttpBlobBackend.webdav,
       httpClient: httpClient,
+      logger: logger,
       auth: BasicHttpBlobAuth(username: username, password: password),
     );
   }

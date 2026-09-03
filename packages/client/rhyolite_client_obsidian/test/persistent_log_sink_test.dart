@@ -68,8 +68,9 @@ class FakeLogFileStore implements LogFileStore {
   @override
   Future<String> readRecent(int segments) async {
     final ids = heads.keys.toList()..sort();
-    final take =
-        ids.length <= segments ? ids : ids.sublist(ids.length - segments);
+    final take = ids.length <= segments
+        ? ids
+        : ids.sublist(ids.length - segments);
     final parts = <String>[];
     for (final id in take) {
       parts.add(heads[id] ?? '');
@@ -139,16 +140,15 @@ PersistentLogSink _sink(
   int memoryCapacity = 2000,
   int flushThresholdRecords = 200,
   Duration flushInterval = const Duration(seconds: 5),
-}) =>
-    PersistentLogSink(
-      store: store,
-      segmentId: '20260830-195622-000',
-      headLines: headLines,
-      tailSlotBytes: tailSlotBytes,
-      memoryCapacity: memoryCapacity,
-      flushThresholdRecords: flushThresholdRecords,
-      flushInterval: flushInterval,
-    );
+}) => PersistentLogSink(
+  store: store,
+  segmentId: '20260830-195622-000',
+  headLines: headLines,
+  tailSlotBytes: tailSlotBytes,
+  memoryCapacity: memoryCapacity,
+  flushThresholdRecords: flushThresholdRecords,
+  flushInterval: flushInterval,
+);
 
 void main() {
   late FakeLogFileStore store;
@@ -185,21 +185,21 @@ void main() {
     });
   });
 
-
   group('the session head', () {
-    test('holds the first lines and is never displaced by later ones',
-        () async {
-      final sink = _settled(_sink(store, headLines: 3));
-      await sink.start(banner: 'rhyolite 3.15.5 desktop');
-      for (var i = 0; i < 50; i++) {
-        sink.write(_event('later $i'));
-      }
-      await sink.flush();
+    test(
+      'holds the first lines and is never displaced by later ones',
+      () async {
+        final sink = _settled(_sink(store, headLines: 3));
+        await sink.start(banner: 'rhyolite 3.15.5 desktop');
+        for (var i = 0; i < 50; i++) {
+          sink.write(_event('later $i'));
+        }
+        await sink.flush();
 
-      expect(store.heads[store.current], contains('rhyolite 3.15.5 desktop'));
-      expect(store.allTail, isNot(contains('rhyolite 3.15.5')));
-    });
-
+        expect(store.heads[store.current], contains('rhyolite 3.15.5 desktop'));
+        expect(store.allTail, isNot(contains('rhyolite 3.15.5')));
+      },
+    );
   });
 
   test('the tail ping-pongs and reports the discard', () async {
@@ -219,11 +219,11 @@ void main() {
     // weeks for someone who does not, and one head written last Monday would
     // be the only context in a week of log.
     LogEvent at(DateTime when, String message) => LogEvent(
-          scope: 'test',
-          level: RpcLogLevel.info,
-          message: message,
-          timestamp: when,
-        );
+      scope: 'test',
+      level: RpcLogLevel.info,
+      message: message,
+      timestamp: when,
+    );
 
     final beforeMidnight = DateTime.utc(2026, 8, 30, 23, 59, 50);
     final afterMidnight = DateTime.utc(2026, 8, 31, 0, 0, 4);
@@ -257,19 +257,21 @@ void main() {
       expect(store.heads[second], contains('today'));
     });
 
-    test('the new segment opens with its own head, not a stale banner',
-        () async {
-      final sink = _settled(_sink(store, headLines: 2));
-      await sink.start(banner: 'rhyolite 3.15.5 desktop');
-      sink.write(at(beforeMidnight, 'yesterday'));
-      await sink.flush();
-      sink.write(at(afterMidnight, 'today'));
-      await sink.flush();
+    test(
+      'the new segment opens with its own head, not a stale banner',
+      () async {
+        final sink = _settled(_sink(store, headLines: 2));
+        await sink.start(banner: 'rhyolite 3.15.5 desktop');
+        sink.write(at(beforeMidnight, 'yesterday'));
+        await sink.flush();
+        sink.write(at(afterMidnight, 'today'));
+        await sink.flush();
 
-      final second = store.sessions.last;
-      expect(store.heads[second], contains('segment continues from'));
-      expect(store.heads[second], contains('today'));
-    });
+        final second = store.sessions.last;
+        expect(store.heads[second], contains('segment continues from'));
+        expect(store.heads[second], contains('today'));
+      },
+    );
 
     test('a report spans segments, so this morning is not lost', () async {
       // A problem noticed in the afternoon may have started before the roll.
@@ -313,28 +315,32 @@ void main() {
       expect(store.problems, isNot(contains('routine')));
     });
 
-    test('the entry stays in the main log too — it is an index, not a move',
-        () async {
-      final sink = _settled(_sink(store));
-      await sink.start();
-      sink.write(_event('it broke', level: RpcLogLevel.error));
-      await sink.flush();
+    test(
+      'the entry stays in the main log too — it is an index, not a move',
+      () async {
+        final sink = _settled(_sink(store));
+        await sink.start();
+        sink.write(_event('it broke', level: RpcLogLevel.error));
+        await sink.flush();
 
-      expect(store.heads[store.current], contains('it broke'));
-    });
+        expect(store.heads[store.current], contains('it broke'));
+      },
+    );
 
-    test('the cited sequence number finds the line in the session log',
-        () async {
-      final sink = _settled(_sink(store));
-      await sink.start();
-      sink
-        ..write(_event('a'))
-        ..write(_event('boom', level: RpcLogLevel.error));
-      await sink.flush();
+    test(
+      'the cited sequence number finds the line in the session log',
+      () async {
+        final sink = _settled(_sink(store));
+        await sink.start();
+        sink
+          ..write(_event('a'))
+          ..write(_event('boom', level: RpcLogLevel.error));
+        await sink.flush();
 
-      final seq = RegExp(r'#(\d+)').firstMatch(store.problems)!.group(0)!;
-      expect(await sink.readAllLogFilesJoined(), contains('$seq '));
-    });
+        final seq = RegExp(r'#(\d+)').firstMatch(store.problems)!.group(0)!;
+        expect(await sink.readAllLogFilesJoined(), contains('$seq '));
+      },
+    );
   });
 
   group('stats tell the report what it is missing', () {
@@ -369,11 +375,11 @@ void main() {
 
   group('the redactor gate', () {
     LogEvent pathEvent(String path) => LogEvent(
-          scope: 'test',
-          level: RpcLogLevel.info,
-          message: 'reconcile',
-          data: {'path': LogPath(path)},
-        );
+      scope: 'test',
+      level: RpcLogLevel.info,
+      message: 'reconcile',
+      data: {'path': LogPath(path)},
+    );
 
     test('nothing reaches disk before a redactor is known', () async {
       final sink = _sink(store);

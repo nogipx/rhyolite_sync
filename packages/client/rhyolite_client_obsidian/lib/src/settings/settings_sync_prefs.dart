@@ -16,9 +16,9 @@ class SettingsSyncPrefs {
   static const dataKey = 'settingsSync';
 
   static SettingsSyncPrefs defaults() => SettingsSyncPrefs(
-        enabled: false,
-        categories: ObsidianSettingsRegistry.defaultEnabledCategories,
-      );
+    enabled: false,
+    categories: ObsidianSettingsRegistry.defaultEnabledCategories,
+  );
 
   /// Parses prefs from the raw `data.json` map (the whole document).
   factory SettingsSyncPrefs.fromData(Object? rawData) {
@@ -42,15 +42,17 @@ class SettingsSyncPrefs {
   }
 
   Map<String, Object?> toJson() => {
-        'enabled': enabled,
-        'categories': categories.map((c) => c.name).toList(),
-      };
+    'enabled': enabled,
+    'categories': categories.map((c) => c.name).toList(),
+  };
 
-  SettingsSyncPrefs copyWith({bool? enabled, Set<SettingsCategory>? categories}) =>
-      SettingsSyncPrefs(
-        enabled: enabled ?? this.enabled,
-        categories: categories ?? this.categories,
-      );
+  SettingsSyncPrefs copyWith({
+    bool? enabled,
+    Set<SettingsCategory>? categories,
+  }) => SettingsSyncPrefs(
+    enabled: enabled ?? this.enabled,
+    categories: categories ?? this.categories,
+  );
 
   SettingsSyncPrefs withCategory(SettingsCategory category, bool on) {
     final next = Set<SettingsCategory>.of(categories);

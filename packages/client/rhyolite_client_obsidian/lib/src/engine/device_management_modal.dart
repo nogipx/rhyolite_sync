@@ -18,8 +18,9 @@ Future<void> showDeviceManagementModal(
   PluginHandle plugin,
   ISyncEngine engine,
 ) async {
-  final registry =
-      engine is StateSyncEngine ? engine.createDeviceRegistry() : null;
+  final registry = engine is StateSyncEngine
+      ? engine.createDeviceRegistry()
+      : null;
   if (registry == null) {
     showNotice(S.deviceMgmtUnavailable);
     return;
@@ -69,7 +70,8 @@ Future<void> _render(
             try {
               final ok = await registry.forget(d.deviceId);
               showNotice(
-                  ok ? S.forgotDevice(d.name) : S.deviceAlreadyGone(d.name));
+                ok ? S.forgotDevice(d.name) : S.deviceAlreadyGone(d.name),
+              );
               await _render(plugin, registry); // refresh the list
             } catch (e) {
               // e.g. an older server without the forgetDevice RPC.
@@ -105,8 +107,12 @@ void _deviceRow(
   final info = _el(doc, row, 'div');
   _css(info, {'flex': '1 1 auto', 'minWidth': '0'});
 
-  final title = _el(doc, info, 'div',
-      text: d.isCurrent ? '${d.name}${S.thisDeviceSuffix}' : d.name);
+  final title = _el(
+    doc,
+    info,
+    'div',
+    text: d.isCurrent ? '${d.name}${S.thisDeviceSuffix}' : d.name,
+  );
   _css(title, {'fontWeight': '600', 'whiteSpace': 'nowrap'});
 
   final client = [

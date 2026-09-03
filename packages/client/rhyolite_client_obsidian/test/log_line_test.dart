@@ -15,18 +15,17 @@ LogEvent _event({
   Object? error,
   StackTrace? stackTrace,
   String? traceId,
-}) =>
-    LogEvent(
-      scope: scope,
-      level: level,
-      message: message,
-      tag: tag,
-      data: data,
-      error: error,
-      stackTrace: stackTrace,
-      traceId: traceId,
-      timestamp: _at,
-    );
+}) => LogEvent(
+  scope: scope,
+  level: level,
+  message: message,
+  tag: tag,
+  data: data,
+  error: error,
+  stackTrace: stackTrace,
+  traceId: traceId,
+  timestamp: _at,
+);
 
 void main() {
   test('renders stamp, level, scope and message', () {
@@ -101,7 +100,10 @@ void main() {
     );
     final lines = line.split('\n');
     expect(lines.first, startsWith('2026-08-30T01:22:33.123Z ERR'));
-    expect(lines.skip(1).every((l) => l.startsWith(continuationPrefix)), isTrue);
+    expect(
+      lines.skip(1).every((l) => l.startsWith(continuationPrefix)),
+      isTrue,
+    );
     expect(line, contains('! Bad state: boom'));
     expect(line, contains('#1 second'));
   });
@@ -135,8 +137,10 @@ void main() {
     });
 
     test('is pseudonymised when a redactor is given — the shared log', () {
-      final line = formatLogRecord(withPath('Notes/Q3 plan.md'),
-          redactor: redactor);
+      final line = formatLogRecord(
+        withPath('Notes/Q3 plan.md'),
+        redactor: redactor,
+      );
       expect(line, isNot(contains('Q3')));
       expect(line, isNot(contains('plan')));
       expect(line, contains('.md'));
@@ -145,7 +149,10 @@ void main() {
     test('spaces in a name survive redaction whole', () {
       // The point of declaring the path: a scanner could not tell whether the
       // name began at `Q3` or at `plan`, and would have leaked one of them.
-      final line = formatLogRecord(withPath('A/Q3 plan.md'), redactor: redactor);
+      final line = formatLogRecord(
+        withPath('A/Q3 plan.md'),
+        redactor: redactor,
+      );
       expect(line, isNot(contains('Q3 ')));
     });
 

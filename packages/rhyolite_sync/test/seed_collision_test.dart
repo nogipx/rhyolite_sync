@@ -1,5 +1,5 @@
 import 'package:convergent/fugue.dart';
-import 'package:rhyolite_sync/src/sync_v3/fugue_text_sync.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/src/sync_v3/remote_applier.dart';
 import 'package:test/test.dart';
 
@@ -21,6 +21,7 @@ void main() {
   ) {
     final clk = LamportClock(device)..observeAll(old.dots);
     return FugueTextSync.applyTextSnapshot(
+      deadlineSeconds: FugueTextSync.unboundedDiffBudget,
       oldFugue: old,
       newText: text,
       clock: clk,

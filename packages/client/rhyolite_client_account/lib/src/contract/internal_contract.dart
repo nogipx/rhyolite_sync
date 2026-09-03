@@ -120,11 +120,8 @@ class GetPlanResponse implements IRpcSerializable {
   }
 
   @override
-  Map<String, dynamic> toJson() => {
-        if (plan != null) 'plan': plan!.toJson(),
-      };
+  Map<String, dynamic> toJson() => {if (plan != null) 'plan': plan!.toJson()};
 }
-
 
 // --- Contract ---
 

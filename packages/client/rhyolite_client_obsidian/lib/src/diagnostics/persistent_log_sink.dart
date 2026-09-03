@@ -35,7 +35,6 @@ class LogStats {
   bool get isComplete => tailSlotsDiscarded == 0 && fileHealthy;
 }
 
-
 /// The always-on log destination for release builds.
 ///
 /// Two destinations behind one output, because they fail differently:
@@ -68,11 +67,11 @@ class PersistentLogSink extends LogOutput {
     this.headLines = 60,
     this.tailSlotBytes = 2 * 1024 * 1024,
     this.redactorDeadline = const Duration(seconds: 30),
-  })  : _store = store,
-        _segmentId = segmentId,
-        _segmentDay = '',
-        _ring = List<LogRecord?>.filled(memoryCapacity, null),
-        _seqRing = List<int>.filled(memoryCapacity, 0);
+  }) : _store = store,
+       _segmentId = segmentId,
+       _segmentDay = '',
+       _ring = List<LogRecord?>.filled(memoryCapacity, null),
+       _seqRing = List<int>.filled(memoryCapacity, 0);
 
   final LogFileStore _store;
   String _segmentId;
@@ -103,7 +102,6 @@ class PersistentLogSink extends LogOutput {
   /// between one and two of these.
   final int tailSlotBytes;
 
-
   /// How long the first write waits for a [redactor]. Boot sets one within
   /// milliseconds; this only matters when boot dies first, and a session that
   /// never opened a vault has no vault paths to protect anyway.
@@ -119,7 +117,6 @@ class PersistentLogSink extends LogOutput {
   int _headWritten = 0;
   int _discardedSlots = 0;
   int _retainedSegments = 1;
-
 
   Timer? _timer;
   Timer? _deadline;
@@ -151,12 +148,12 @@ class PersistentLogSink extends LogOutput {
   Object? get lastStoreError => _lastStoreError;
 
   LogStats get stats => LogStats(
-        segmentId: _segmentId,
-        recordsSeen: _seq,
-        tailSlotsDiscarded: _discardedSlots,
-        retainedSegments: _retainedSegments,
-        fileHealthy: _lastStoreError == null,
-      );
+    segmentId: _segmentId,
+    recordsSeen: _seq,
+    tailSlotsDiscarded: _discardedSlots,
+    retainedSegments: _retainedSegments,
+    fileHealthy: _lastStoreError == null,
+  );
 
   /// Opens the sink and prunes old sessions.
   Future<void> start({String? banner}) async {
@@ -359,11 +356,11 @@ class PersistentLogSink extends LogOutput {
   /// Never fails, so this is the report's fallback when the files could not be
   /// written.
   List<String> get memoryEntries => [
-        for (final (seq, record) in _entries())
-          if (formatLogRecord(record, redactor: _redactor, seq: seq)
-              case final line when line.isNotEmpty)
-            line,
-      ];
+    for (final (seq, record) in _entries())
+      if (formatLogRecord(record, redactor: _redactor, seq: seq) case final line
+          when line.isNotEmpty)
+        line,
+  ];
 
   /// Every retained log file, as (name, contents), oldest segment first.
   ///
@@ -391,8 +388,7 @@ class PersistentLogSink extends LogOutput {
   /// The retained files joined, for callers that just want to read the log as
   /// one stream. The archive never uses this — it keeps the files apart.
   Future<String> readAllLogFilesJoined({int? maxLines}) async {
-    final text =
-        (await readAllLogFiles()).map((f) => f.$2).join('\n');
+    final text = (await readAllLogFiles()).map((f) => f.$2).join('\n');
     if (maxLines == null) return text;
     return _tail(text, maxLines);
   }

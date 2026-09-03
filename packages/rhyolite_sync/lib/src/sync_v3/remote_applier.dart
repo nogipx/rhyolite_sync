@@ -5,15 +5,10 @@ import 'package:convergent/fugue.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
-import '../frontmatter/fm_state.dart';
-import '../frontmatter/fm_store.dart';
-import '../frontmatter/fm_tail.dart';
-import '../frontmatter/frontmatter_render.dart';
-import '../frontmatter/frontmatter_split.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
+import '../storage/fm_store.dart';
 import 'disk_reconciler.dart';
-import 'path_normalize.dart';
 import 'state_record_codec.dart';
-import 'text_union_merge.dart';
 
 /// Applies pulled records for one fileId onto local state and disk.
 ///
@@ -22,6 +17,29 @@ import 'text_union_merge.dart';
 /// Fugue text-conflict / binary resolver) → materialise → seal. This is
 /// the correctness-critical heart of the pull side; behavior is preserved
 /// verbatim from `StateSyncEngine`.
+/// Thrown when a file's records were fetched but at least one could not be
+/// taken into the register.
+///
+/// The puller's contract is positional, not advisory: a file whose apply
+/// returns normally leaves `unapplied`, and the cursor moves past its seq —
+/// after which `getStates` never offers that record again. So a refusal that
+/// returns cleanly is indistinguishable from success, and the record is gone
+/// for this device while every peer keeps it.
+///
+/// Throwing puts the file back on the path that already exists for a failed
+/// apply: the cursor holds below it, later pulls retry it, and the puller's
+/// own attempt cap eventually gives up and says so — which is the right end
+/// for a clock that is not merely late but wrong.
+class RemoteRecordsUnapplied implements Exception {
+  RemoteRecordsUnapplied(this.fileId, this.reason);
+
+  final String fileId;
+  final String reason;
+
+  @override
+  String toString() => 'RemoteRecordsUnapplied($fileId): $reason';
+}
+
 class RemoteApplier {
   RemoteApplier({
     required this.store,
@@ -101,11 +119,38 @@ class RemoteApplier {
   /// record for the same fileId still applies. Without this isolation a
   /// single bad row would freeze sync for the whole file forever
   /// (`cursor` never advances past the bad record on subsequent pulls).
+  /// Applies [records], then refuses if any of them did not make it in.
+  ///
+  /// A thin wrapper on purpose: the work below has five exit points, and the
+  /// refusal has to survive all of them without each one remembering to check.
+  /// It fires AFTER the body, so whatever DID apply is banked first — the
+  /// puller retries from a cursor held below this file, and a re-join of
+  /// already-applied values is idempotent.
   Future<void> apply(
     String fileId,
     List<StateRecord> records,
     IStateConflictResolver resolver, {
     RpcContext? context,
+  }) async {
+    final refused = <String>[];
+    await _apply(
+      fileId,
+      records,
+      resolver,
+      context: context,
+      onRefused: refused.add,
+    );
+    if (refused.isNotEmpty) {
+      throw RemoteRecordsUnapplied(fileId, refused.join('; '));
+    }
+  }
+
+  Future<void> _apply(
+    String fileId,
+    List<StateRecord> records,
+    IStateConflictResolver resolver, {
+    RpcContext? context,
+    required void Function(String reason) onRefused,
   }) async {
     // Track the server seq we've pulled this file up to — the causal-stability
     // boundary tombstone GC compares against min(headSeq) across devices. This
@@ -164,9 +209,15 @@ class RemoteApplier {
         // The path lives inside the payload we could not open, so it is only
         // known if this device has seen the file before; a first sight has
         // nothing to name and the log line carries the fileId instead.
-        if (e is UnsupportedCipherVersion) {
+        // Two ways a record can be from a newer client, and both must be
+        // told apart from a corrupt row: the envelope tag (a cipher this build
+        // has no reader for) and the state schema. The schema case used to
+        // arrive as a bare FormatException — the same type the cipher throws
+        // for an unreadable envelope — so it fell through to the generic skip
+        // below and was reported as corruption.
+        if (e is UnsupportedCipherVersion || e is UnsupportedStateSchema) {
           _log.error(
-            'Record fileId=${r.fileId} is sealed with $e — update this client',
+            'Record fileId=${r.fileId} cannot be read: $e — update this client',
           );
           final seenAs = store.get(fileId)?.path ?? '';
           if (seenAs.isNotEmpty) {
@@ -265,13 +316,16 @@ class RemoteApplier {
     final joined = store.applyRemote(
       fileId,
       tagged,
-      onSkip: (tv, _) => _emit(
-        SyncRecordSkipped(
-          fileId: fileId,
-          hlcPacked: tv.hlc.pack(),
-          reason: 'hlc.millis exceeds skew bound',
-        ),
-      ),
+      onSkip: (tv, _) {
+        onRefused('hlc ${tv.hlc.pack()} beyond the skew bound');
+        _emit(
+          SyncRecordSkipped(
+            fileId: fileId,
+            hlcPacked: tv.hlc.pack(),
+            reason: 'hlc.millis exceeds skew bound',
+          ),
+        );
+      },
     );
     swApplyRemote.stop();
     _emit(
@@ -664,6 +718,7 @@ class RemoteApplier {
         // can be stamped below adjacent content and land in the wrong place.
         store.observeDots(merged.dots);
         merged = await FugueTextSync.applyTextSnapshot(
+          deadlineSeconds: FugueTextSync.interactiveDiffBudget,
           oldFugue: merged,
           newText: desired,
           clock: store.fugueClock,
@@ -1020,7 +1075,11 @@ class RemoteApplier {
       // (e.g. .excalidraw.md) may still have a Fugue-encoded blob from before
       // reclassification; writing raw \0fg1 bytes would make the conflict copy
       // unopenable. Null means a legacy Sequence blob (not real content) — skip.
-      final materialised = materializeFileContent(loserBytes, loser.path);
+      final materialised = materializeFileContent(
+        loserBytes,
+        loser.path,
+        isTextPath: _detector.isText(loser.path),
+      );
       if (materialised != null) {
         final fullCopyPath = '$vaultPath/$copyPath';
         changeProvider.suppress(copyPath);

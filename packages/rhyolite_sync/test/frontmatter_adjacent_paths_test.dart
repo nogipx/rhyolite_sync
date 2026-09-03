@@ -3,15 +3,8 @@ import 'dart:typed_data';
 
 import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_state.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_tail.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_document.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_parser.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_render.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_split.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'package:rhyolite_sync/src/sync_v3/fugue_store.dart';
-import 'package:rhyolite_sync/src/sync_v3/fugue_text_sync.dart';
-import 'package:rhyolite_sync/src/sync_v3/text_union_merge.dart';
 import 'package:test/test.dart';
 
 /// Every path that turns a stored blob back into something a user reads.
@@ -44,7 +37,10 @@ void main() {
       // state_sync_engine downloadContent -> materializeFileContent, shared by
       // the version viewer and the backup diff.
       final tailed = blobOf(note, fm: build('title: Note\ntags:\n  - work\n'));
-      expect(utf8.decode(materializeFileContent(tailed, 'n.md')!), note);
+      expect(
+        utf8.decode(materializeFileContent(tailed, 'n.md', isTextPath: true)!),
+        note,
+      );
     });
 
     test('backup restore writes the note', () {
@@ -52,7 +48,10 @@ void main() {
       // wires materializeFileContent into it, so the same call is the whole
       // path. Pinned because the wiring is a closure, not a type.
       final tailed = blobOf(note, fm: build('title: Note\n'));
-      expect(utf8.decode(materializeFileContent(tailed, 'n.md')!), note);
+      expect(
+        utf8.decode(materializeFileContent(tailed, 'n.md', isTextPath: true)!),
+        note,
+      );
     });
 
     test('a conflict copy of the loser is readable', () {
@@ -60,13 +59,18 @@ void main() {
       // the winner. A raw tail here would make the copy unopenable.
       final loser = blobOf('---\nx: 2\n---\nloser body\n', fm: build('x: 2\n'));
       expect(
-        utf8.decode(materializeFileContent(loser, 'n.md')!),
+        utf8.decode(materializeFileContent(loser, 'n.md', isTextPath: true)!),
         '---\nx: 2\n---\nloser body\n',
       );
     });
 
     test('a blob written before tails existed still reads', () {
-      expect(utf8.decode(materializeFileContent(blobOf(note), 'n.md')!), note);
+      expect(
+        utf8.decode(
+          materializeFileContent(blobOf(note), 'n.md', isTextPath: true)!,
+        ),
+        note,
+      );
     });
 
     test('a tail on a path now classified binary does not leak', () {
@@ -74,7 +78,9 @@ void main() {
       // The Fugue check is path-independent precisely so this still projects.
       final tailed = blobOf(note, fm: build('title: Note\n'));
       expect(
-        utf8.decode(materializeFileContent(tailed, 'd.excalidraw.md')!),
+        utf8.decode(
+          materializeFileContent(tailed, 'd.excalidraw.md', isTextPath: true)!,
+        ),
         note,
       );
     });

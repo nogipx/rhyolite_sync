@@ -15,11 +15,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:convergent/convergent.dart';
-import 'package:rhyolite_sync/src/frontmatter/fm_state.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_document.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_parser.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_render.dart';
-import 'package:rhyolite_sync/src/frontmatter/frontmatter_split.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 String window(String a, String b) {
   final n = min(a.length, b.length);
@@ -102,8 +98,8 @@ void main(List<String> args) {
       final ext = rel.endsWith('.excalidraw.md')
           ? '.excalidraw.md'
           : rel.endsWith('.canvas.md')
-              ? '.canvas.md'
-              : '.md';
+          ? '.canvas.md'
+          : '.md';
       failByExt[ext] = (failByExt[ext] ?? 0) + 1;
       if (renderFails.length < 6) {
         renderFails.add('$rel\n    ${window(text, rendered)}');
@@ -152,5 +148,7 @@ void main(List<String> args) {
   dump('OPAQUE values (first 12)', opaquePaths);
   dump('RENDER MISMATCHES', renderFails);
   dump('LIFT MISMATCHES', liftFails);
-  print('\ntop keys: ${sortedKeys.take(12).map((e) => '${e.key}(${e.value})').join(', ')}');
+  print(
+    '\ntop keys: ${sortedKeys.take(12).map((e) => '${e.key}(${e.value})').join(', ')}',
+  );
 }

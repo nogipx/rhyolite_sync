@@ -2,7 +2,7 @@ import 'package:convergent/convergent.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
-import 'fugue_frontier.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 import 'state_record_codec.dart';
 
 /// Push-side mechanics for one sync session.
@@ -98,11 +98,36 @@ class StatePusher {
   /// same nine thousand again on the next attempt, burning a server seq apiece
   /// forever.
   ///
-  /// Two hundred is a couple of seconds of server work — comfortably inside
-  /// the deadline with room for a slow day — against forty-six round trips for
-  /// a vault that size, which is nothing next to the blob uploads that
-  /// preceded them.
-  static const int _pushBatchSize = 200;
+  /// The first fix put the batch at two hundred, on an estimate of "a couple
+  /// of seconds of server work". A startup pass measured end to end says
+  /// otherwise. Client and server logs of the same run, aligned (the server
+  /// runs UTC, the device MSK):
+  ///
+  ///   21:23:59  the startup pass ends, push begins
+  ///   21:24:24  server finishes the batch and logs `items=100`
+  ///   21:24:24  client logs `push+persist 25425ms`
+  ///
+  /// So a hundred states cost about 25 seconds, or ~250ms each. What that
+  /// number is NOT: server time. The server's line is written after its item
+  /// loop, and there is no arrival log to subtract, so the 25 seconds covers
+  /// collecting, encoding and encrypting 100 records, the round trip, the
+  /// server's writes and `persistMeta` — and these logs cannot say how it
+  /// divides. An earlier draft of this comment claimed the server was the slow
+  /// part and that two hundred would blow the 30-second deadline. Neither is
+  /// established: the deadline wraps only `putStates`, and the encode loop
+  /// above it is not inside it.
+  ///
+  /// What the measurement does support is the size of the unbanked window. A
+  /// batch is atomic to this client — the signature is recorded only on a
+  /// response — so an interrupted batch banks nothing. Two hundred is fifty
+  /// seconds of work to lose and fifty seconds before the server hears
+  /// anything; fifty is around thirteen. The cost is round trips, and they are
+  /// the cheap part: a first sync pays them alongside blob uploads that take
+  /// minutes.
+  ///
+  /// Public so a test can express "one batch landed, the next did not" in
+  /// terms of the batch rather than a number that silently stops meaning that.
+  static const int pushBatchSize = 50;
 
   Future<void> push({RpcContext? context}) async {
     final caller = stateCaller;
@@ -124,10 +149,10 @@ class StatePusher {
     var batches = 0;
     var lastCursor = 0;
 
-    for (var offset = 0; offset < dirty.length; offset += _pushBatchSize) {
-      final end = offset + _pushBatchSize > dirty.length
+    for (var offset = 0; offset < dirty.length; offset += pushBatchSize) {
+      final end = offset + pushBatchSize > dirty.length
           ? dirty.length
-          : offset + _pushBatchSize;
+          : offset + pushBatchSize;
       final batch = dirty.sublist(offset, end);
 
       final items = <StatePutItem>[];

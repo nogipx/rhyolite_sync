@@ -9,7 +9,9 @@ import 'package:rpc_dart/rpc_dart.dart';
 
 import '../i18n/i18n.dart';
 import 'plan_status.dart';
+import 'sync_activity.dart';
 import 'server_rejections.dart';
+import 'session_contracts.dart';
 
 /// Stylesheet for the docked sync panel. Injected once at plugin load through
 /// `bootstrapPlugin(extraCss: ...)` and removed on unload, so the panel styles
@@ -411,7 +413,7 @@ void _renderBootPlaceholder(JSObject view) {
 /// sections below it, rebuilt wholesale on every render. Keeping the animated
 /// bits (status pulse, indeterminate bar, spinner) out of the rebuilt part is
 /// what stops them from restarting on every engine event.
-class SyncPanel {
+class SyncPanel implements SessionPanel {
   SyncPanel({
     required PluginHandle plugin,
     required ISyncEngine engine,
@@ -430,9 +432,13 @@ class SyncPanel {
     Future<void> Function()? onUnlock,
     Future<void> Function()? onReconnect,
     Future<({int usedBytes, int quotaBytes})?> Function()? onFetchUsage,
-    Future<int> Function()? onSettingsSize,
+    int? Function()? onSettingsCategories,
+    bool? Function()? onPluginSyncEnabled,
+    bool Function()? onSettingsBusy,
     Future<({int count, int bytes})?> Function()? onPluginStats,
     void Function()? onStorageDetails,
+    Future<({int? fileBytes, int? freeBytes})?> Function()? onDatabaseStats,
+    Future<void> Function()? onCompactDatabase,
     void Function()? onPlanAction,
     Future<void> Function(List<String> fileIds)? onConfirmVanished,
     LogScope? logger,
@@ -453,9 +459,13 @@ class SyncPanel {
        _onUnlock = onUnlock,
        _onReconnect = onReconnect,
        _onFetchUsage = onFetchUsage,
-       _onSettingsSize = onSettingsSize,
+       _onSettingsCategories = onSettingsCategories,
+       _onPluginSyncEnabled = onPluginSyncEnabled,
+       _work = SyncActivity(settingsBusy: onSettingsBusy),
        _onPluginStats = onPluginStats,
        _onStorageDetails = onStorageDetails,
+       _onDatabaseStats = onDatabaseStats,
+       _onCompactDatabase = onCompactDatabase,
        _onPlanAction = onPlanAction,
        _onConfirmVanished = onConfirmVanished,
        _log = logger;
@@ -485,7 +495,11 @@ class SyncPanel {
   final Future<void> Function()? _onUnlock;
   final Future<void> Function()? _onReconnect;
   final Future<({int usedBytes, int quotaBytes})?> Function()? _onFetchUsage;
-  final Future<int> Function()? _onSettingsSize;
+  final int? Function()? _onSettingsCategories;
+  final bool? Function()? _onPluginSyncEnabled;
+  /// The shared answer to "is anything working", identical to the status
+  /// dot's — see [SyncActivity]. Two rules that had to agree are now one.
+  final SyncActivity _work;
   final Future<({int count, int bytes})?> Function()? _onPluginStats;
   final void Function()? _onStorageDetails;
 
@@ -500,6 +514,7 @@ class SyncPanel {
 
   /// Shows (or clears) the plan alert. Cheap to call with an unchanged value —
   /// the host does so after every lookup.
+  @override
   void setPlanNotice(PlanNotice notice) {
     if (notice == _planNotice) return;
     _planNotice = notice;
@@ -512,7 +527,6 @@ class SyncPanel {
 
   /// Approx synced-settings footprint, fetched once per open (null until then
   /// or when settings sync has never run).
-  int? _settingsBytes;
 
   /// Synced plugin count + bytes, fetched once per open. Null when plugin-code
   /// sync is off, which is also why the tile disappears entirely rather than
@@ -577,23 +591,34 @@ class SyncPanel {
   bool _connecting = false;
   int _connectAttempt = 0;
   _Blocker _blocker = _Blocker.none;
-  bool _activity = false;
 
-  /// The engine says it is inside work the user must not interrupt.
+  /// A 3 s idle debounce over whatever events happen to arrive — a hint that
+  /// something is moving, never the verdict on its own.
   ///
-  /// Distinct from [_activity], which is a 3 s idle debounce over whatever
-  /// events happen to arrive: that made the indicator depend on how densely a
-  /// phase reports progress. When the pull's prefetch started batching, its
-  /// progress spread from every ~150 ms to roughly every 5 s and the debounce
-  /// began lapsing mid-download — showing "up to date" while 47 seconds of
-  /// transfer were still to come. Someone who believes that and quits loses
-  /// the rest of it.
-  bool _busy = false;
+  /// Alone it made the indicator depend on how densely a phase reports
+  /// progress. When the pull's prefetch started batching, its progress spread
+  /// from every ~150 ms to roughly every 5 s and the debounce began lapsing
+  /// mid-download — showing "up to date" while 47 seconds of transfer were
+  /// still to come. Someone who believes that and quits loses the rest of it.
+  /// The verdict is [SyncActivity]; this only widens it.
+  bool _activity = false;
   Timer? _activityTimer;
   Timer? _errorTimer;
 
   bool _hasPending = false;
   ({int completed, int total})? _progress;
+
+  /// Whether this pull is reporting files, so the blob figure stops competing.
+  /// Reset when the pull ends.
+  bool _pullProgressSeen = false;
+
+  /// Clears the bar and the preference together. One call, because a flag that
+  /// outlives the value it guards would silence the blob figure for the rest
+  /// of the session — the bar would then be empty AND unable to refill.
+  void _resetProgress() {
+    _progress = null;
+    _pullProgressSeen = false;
+  }
   String? _lastError;
   DateTime? _lastSyncedAt;
   int _uploaded = 0;
@@ -605,10 +630,27 @@ class SyncPanel {
   /// Size-blocked files keyed by path (latest event per path wins).
   final Map<String, SyncFileSizeBlocked> _blocked = {};
 
+  /// Files on the server this device will not fetch, keyed by path.
+  ///
+  /// Kept apart from [_blocked] rather than merged into it: that list is local
+  /// files we decline to SEND, which are safe on disk and need no action. These
+  /// are files that exist and are not here. Same cause, opposite reassurance.
+  final Map<String, SyncFileTooLargeToFetch> _tooLargeToFetch = {};
+
   /// Paths the server holds in a format this build cannot read. Unlike an
   /// error this does not clear itself: it recurs on every reconcile and ends
   /// only when the user updates, so it lives in a list rather than a banner.
   final Set<String> _needsNewerClient = {};
+
+  /// The last time the database was over its ceiling with nothing left to
+  /// reclaim, or null if it has not been.
+  ///
+  /// Also stated in a banner rather than only the log, because the engine keeps
+  /// syncing through it: nothing visibly breaks until writes start failing, and
+  /// by then the vault has been silently unsyncable for a while. Held until the
+  /// engine stops — a later pull that finds room does not clear it, because the
+  /// space is live data and only compacting returns it.
+  ({int bytes, int limitBytes})? _databaseFull;
 
   /// Files this device held and no longer does, reported at startup. Keyed by
   /// fileId because that is what the confirmation takes — the engine refuses
@@ -620,6 +662,22 @@ class SyncPanel {
 
   /// In-flight blob transfers keyed by path — the active-transfers monitor.
   final Map<String, ({bool upload, int sent, int total})> _transfers = {};
+
+  final Future<({int? fileBytes, int? freeBytes})?> Function()?
+  _onDatabaseStats;
+  final Future<void> Function()? _onCompactDatabase;
+
+  /// Last read of the database's size and how much of it is empty.
+  ///
+  /// Cached rather than read per render: the pragmas are cheap but the render
+  /// is synchronous, and a panel that awaited three of them on every repaint
+  /// would be paying for a line most vaults never see.
+  JSObject? _compactRowEl;
+  JSObject? _compactLinkEl;
+  ({int? fileBytes, int? freeBytes})? _dbStats;
+  bool _dbStatsFetching = false;
+  bool _compacting = false;
+
 
   /// Cached managed-storage usage; null until first fetch (or not managed).
   ({int usedBytes, int quotaBytes})? _usage;
@@ -647,10 +705,7 @@ class SyncPanel {
     // the workspace can already be open by the time we get here — showing the
     // placeholder. Adopt it instead of waiting for the user to close and
     // reopen the panel.
-    final pending = jsu.getProperty<JSObject?>(
-      jsu.globalThis,
-      _kOpenViewSlot,
-    );
+    final pending = jsu.getProperty<JSObject?>(jsu.globalThis, _kOpenViewSlot);
     if (pending != null) _onViewOpen(pending);
 
     _sub = _engine.events.listen(_onEvent);
@@ -660,8 +715,19 @@ class SyncPanel {
   /// conditions behind [SyncStartBlock] produce no engine events — a sign-in
   /// while the engine is down would sit behind a stale banner until the 30s
   /// tick. No-op when no view is open.
+  @override
   void refresh() => _scheduleRender();
 
+  /// Told by the host when settings sync starts or stops having work.
+  ///
+  /// The panel cannot observe this itself: settings sync is a sibling of the
+  /// engine, not a source of engine events, and the panel is otherwise
+  /// event-driven off the engine alone. That is exactly how it came to report
+  /// "up to date" over a settings queue that was still transferring.
+  @override
+  void setSettingsActivity(bool active) => _scheduleRender();
+
+  @override
   void dispose() {
     _sub?.cancel();
     _sub = null;
@@ -735,19 +801,6 @@ class SyncPanel {
   void _fetchSideStats() {
     _sideStatsAt = DateTime.now();
 
-    final settings = _onSettingsSize;
-    if (settings != null) {
-      settings()
-          .then((n) {
-            if (n == _settingsBytes) return;
-            _settingsBytes = n;
-            _scheduleRender();
-          })
-          .catchError((Object e) {
-            _log?.warning('sync panel: settings size fetch failed: $e');
-          });
-    }
-
     final plugins = _onPluginStats;
     if (plugins != null) {
       plugins()
@@ -780,13 +833,9 @@ class SyncPanel {
   }
 
   /// True once every side stat that has something to report has reported it.
-  bool get _sideStatsSettled {
-    final settings =
-        _onSettingsSize == null ||
-        (_settingsBytes != null && _settingsBytes! > 0);
-    final plugins = _onPluginStats == null || _pluginStats != null;
-    return settings && plugins;
-  }
+
+  bool get _sideStatsSettled =>
+      _onPluginStats == null || _pluginStats != null;
 
   /// Re-reads the side stats after a sync burst settles — that's when new
   /// settings or plugin records land. Throttled so a chatty vault doesn't
@@ -803,6 +852,7 @@ class SyncPanel {
 
   /// Detaches any open panel leaves — call on plugin unload so a disabled
   /// plugin doesn't leave an orphaned, unbacked view in the sidebar.
+  @override
   void closeLeaves() {
     final workspace = jsu.getProperty<JSObject?>(_plugin.app.raw, 'workspace');
     if (workspace == null) return;
@@ -826,6 +876,7 @@ class SyncPanel {
   // ---------------------------------------------------------------------------
 
   void _onEvent(SyncEngineEvent event) {
+    _work.observe(event);
     switch (event) {
       case SyncStarted():
         // The engine is talking; it owns the status from here.
@@ -850,15 +901,18 @@ class SyncPanel {
         _everStarted = false;
         _connected = false;
         _connecting = false;
-        _busy = false;
+        _databaseFull = null;
         _clearActivity();
       case SyncDisconnected():
         _connected = false;
         _connecting = false;
-        _busy = false;
         _clearActivity();
-      case SyncBusy(:final busy):
-        _busy = busy;
+      case SyncBusy():
+        // Folded by [_work], which both surfaces read. Kept as an arm so the
+        // switch stays exhaustive over what the panel handles.
+        break;
+      case SyncDatabaseFull(:final bytes, :final limitBytes):
+        _databaseFull = (bytes: bytes, limitBytes: limitBytes);
       case SyncPushing():
       case SyncPulling():
         _bumpActivity();
@@ -870,9 +924,15 @@ class SyncPanel {
         _bumpActivity();
       case SyncFilePulled(:final path):
         _lastSyncedAt = event.timestamp;
-        _downloaded++;
-        // It materialised, so this build understands it after all.
+        // Only a real file. The puller ends every pull with an empty-path
+        // SyncFilePulled as a "pull complete" sentinel — its own comment says
+        // it is not a per-file event — and counting it added a phantom to the
+        // tally on every pull, including pulls that wrote nothing at all.
+        if (path.isNotEmpty) _downloaded++;
+        // It materialised, so this build understands it — and could carry it —
+        // after all.
         _needsNewerClient.remove(path);
+        _tooLargeToFetch.remove(path);
         if (path.isNotEmpty) {
           _pushRecent(up: false, path: path, at: event.timestamp);
         }
@@ -881,20 +941,36 @@ class SyncPanel {
         _hasPending = hasPending;
       case SyncCursorAdvanced():
         _lastSyncedAt = event.timestamp;
+        // The pull ended, so its file count is spent. Cleared here rather than
+        // left to decay so the bar does not sit at 100% until something else
+        // happens to move it.
+        _resetProgress();
       case SyncStartupBlobUploadProgress(:final completed, :final total):
         _progress = (completed: completed, total: total);
         _bumpActivity();
+      case SyncPullProgress(:final applied, :final total):
+        // Files, which is what the pull is actually made of and what the user
+        // is counting. Wins over the blob figure below whenever both are in
+        // play: a pull emits nothing at all for a batch it already holds, so
+        // the blob bar sat still through half a run and read as stuck.
+        _progress = (completed: applied, total: total);
+        _pullProgressSeen = true;
+        _bumpActivity();
       case SyncBlobDownloadProgress(:final completed, :final total):
-        _progress = (completed: completed, total: total);
+        // Still the right measure for a stand-alone fetch (a version restore,
+        // a repair) where no pull is counting files.
+        if (!_pullProgressSeen) {
+          _progress = (completed: completed, total: total);
+        }
         _bumpActivity();
       case SyncStartupBlobUploadDone():
-        _progress = null;
+        _resetProgress();
         _clearActivity();
         _lastSyncedAt = event.timestamp;
         _usage = null; // storage changed — refetch on next render
         _maybeFetchUsage();
       case SyncBlobDownloadDone():
-        _progress = null;
+        _resetProgress();
         _clearActivity();
       case SyncBlobTransfer(:final path, :final done):
         if (done) {
@@ -909,6 +985,8 @@ class SyncPanel {
         _bumpActivity();
       case SyncFileSizeBlocked():
         _blocked[event.path] = event;
+      case SyncFileTooLargeToFetch():
+        _tooLargeToFetch[event.path] = event;
       case SyncFileFormatUnsupported(:final path):
         _needsNewerClient.add(path);
       case SyncFilesVanished(:final pathsByFileId):
@@ -974,7 +1052,12 @@ class SyncPanel {
     _activityTimer?.cancel();
     _activityTimer = null;
     _activity = false;
-    _progress = null;
+    _resetProgress();
+    // A stopped or disconnected engine has no transfer in flight, whatever the
+    // last event said. Left behind, they hold the status at "syncing" for a
+    // vault that is not syncing at all — and the entries are never retired,
+    // because the run that would have retired them is the one that ended.
+    _transfers.clear();
   }
 
   void _pushRecent({
@@ -1140,6 +1223,19 @@ class SyncPanel {
       }
     }
 
+    // ── Compaction offer ──
+    //
+    // Its own row rather than a tile: the tiles are a two-column grid of
+    // facts, and an action dropped into that flow lands in the next cell and
+    // reads as a stray caption beside an unrelated number. Built once and
+    // toggled, like the meter above it, so the click handler is attached once
+    // instead of on every render.
+    final compactRow = _el(panel, 'div', cls: 'rh-links rh-hidden');
+    _compactRowEl = compactRow;
+    final compactLink = _el(compactRow, 'span', cls: 'rh-link');
+    _compactLinkEl = compactLink;
+    _onClick(compactLink, _runCompact);
+
     // ── Actions ──
     final actions = _el(panel, 'div', cls: 'rh-actions');
     final primary = _el(actions, 'button', cls: 'rh-primary');
@@ -1210,7 +1306,8 @@ class SyncPanel {
 
     final notice = _planNotice;
     final usage = _usage;
-    final full = usage != null &&
+    final full =
+        usage != null &&
         usage.quotaBytes > 0 &&
         usage.usedBytes >= usage.quotaBytes;
 
@@ -1324,39 +1421,148 @@ class SyncPanel {
     final el = _statsEl!;
     jsu.callMethod<void>(el, 'empty', []);
 
+    // Four tiles, unconditionally, and the same three states as the two below.
+    //
+    // These skipped rendering entirely while the engine had no snapshot yet,
+    // so the grid held two tiles for the first seconds of every launch and
+    // four afterwards — the varying count this layout was fixed to stop.
+    // A tile that is present and says "asking" is also the honest answer:
+    // the number is coming, and the panel is not pretending it already knows.
     final stats = _engine.statsSnapshot();
-    if (stats != null) {
-      _stat(
-        el,
-        icon: 'file-text',
-        label: S.files,
-        value: '${stats.totalFiles - stats.tombstones}',
-      );
-      _stat(
-        el,
-        icon: 'hard-drive',
-        label: S.vaultSizeLabel,
-        value: _bytes(stats.totalSizeBytes),
-      );
-    }
-    final settingsBytes = _settingsBytes;
-    if (settingsBytes != null && settingsBytes > 0) {
-      _stat(
-        el,
-        icon: 'settings',
-        label: S.settingsSizeLabel,
-        value: _bytes(settingsBytes),
-      );
-    }
+    _stat(
+      el,
+      icon: 'file-text',
+      label: S.files,
+      value: stats == null
+          ? _loading
+          : '${stats.totalFiles - stats.tombstones}',
+    );
+    _stat(
+      el,
+      icon: 'hard-drive',
+      label: S.vaultSizeLabel,
+      value: stats == null ? _loading : _bytes(stats.totalSizeBytes),
+    );
+    // Four tiles, always, in a two-column grid.
+    //
+    // These two used to be conditional, so the grid held two, three or four
+    // depending on which optional features a vault had switched on — and an
+    // odd count leaves the last tile alone beside a hole. The empty state is
+    // information too: a dash under "Settings" says settings are not being
+    // synced, which is the question someone came to this panel to answer.
+    // Categories, not bytes. How much space settings take is a fact about the
+    // plugin; how many of them are kept in step is the thing the user chose.
+    //
+    // Three states, not two. A dash for both "still asking" and "switched
+    // off" answers neither question: one of them resolves on its own and the
+    // other never will, and only one of them is worth going to settings
+    // about.
+    final categories = _onSettingsCategories?.call();
+    _stat(
+      el,
+      icon: 'settings',
+      label: S.settingsSizeLabel,
+      value: switch (categories) {
+        null => _loading,
+        0 => S.featureOff,
+        final n => S.categoriesCount(n),
+      },
+    );
+    // Same three states, asked in the same order. Null is "settings sync has
+    // not come up yet", which is why this is nullable rather than defaulted:
+    // coercing it to false made the tile report the feature as switched off
+    // for the first seconds of every launch, which is the one reading that
+    // sends someone to settings for nothing.
     final pluginStats = _pluginStats;
-    if (pluginStats != null && pluginStats.count > 0) {
-      _stat(
-        el,
-        icon: 'package',
-        label: S.pluginsSizeLabel,
-        value: '${pluginStats.count} · ${_bytes(pluginStats.bytes)}',
-      );
+    final pluginsOn = _onPluginSyncEnabled?.call();
+    _stat(
+      el,
+      icon: 'package',
+      label: S.pluginsSizeLabel,
+      value: switch (pluginsOn) {
+        null => _loading,
+        false => S.featureOff,
+        // Null is now "no answer yet" at the source too, so it needs no
+        // separate flag to tell that from an answer of none.
+        true => switch (pluginStats) {
+          null => _loading,
+          final s when s.count > 0 => '${s.count} · ${_bytes(s.bytes)}',
+          _ => _empty,
+        },
+      },
+    );
+    _renderCompactHint();
+  }
+
+  /// Nothing to report, though the feature is on and answering.
+  static const String _empty = '—';
+
+  /// No answer yet. Distinct from [_empty] because this one resolves itself
+  /// and needs no one to do anything about it.
+  static const String _loading = '…';
+
+  /// Offers compaction, and only when it would return something.
+  ///
+  /// Deleting rows hands their pages to a freelist INSIDE the database. That
+  /// is what lets it write again, and it is invisible: the file keeps its size
+  /// and the IndexedDB VFS charges every open for that size. One vault sat at
+  /// 1462 MB with 1349 MB of it empty and spent twenty-two seconds on each
+  /// launch, before and after the space came back, with nothing on screen
+  /// connecting the two.
+  ///
+  /// Stated in megabytes rather than as a page count. `reusable=172745` is
+  /// true and unactionable unless the reader already knows what a freelist is,
+  /// which is exactly the reader who does not need telling.
+  void _renderCompactHint() {
+    _refreshDbStatsIfStale();
+    final stats = _dbStats;
+    final file = stats?.fileBytes;
+    final free = stats?.freeBytes;
+    // Half, so this appears when it is worth minutes of rewriting and stays
+    // quiet the rest of the time.
+    final offer = file != null && free != null && free > file / 2;
+
+    final row = _compactRowEl;
+    final link = _compactLinkEl;
+    if (row == null || link == null) return;
+    _setHidden(row, !offer);
+    if (!offer) return;
+    _setText(
+      link,
+      _compacting ? S.compactRunning : S.compactOffer(_bytes(free)),
+    );
+    _toggleClass(link, 'is-busy', _compacting);
+  }
+
+  /// Rewrites the database file. Offered from two places — the freelist hint
+  /// and the full-database banner — and re-entrant from neither.
+  Future<void> _runCompact() async {
+    if (_compacting) return;
+    _compacting = true;
+    _scheduleRender();
+    try {
+      await _onCompactDatabase?.call();
+    } finally {
+      _compacting = false;
+      _dbStats = null; // the numbers just changed
+      _scheduleRender();
     }
+  }
+
+  void _refreshDbStatsIfStale() {
+    if (_dbStats != null || _dbStatsFetching || _onDatabaseStats == null) {
+      return;
+    }
+    _dbStatsFetching = true;
+    unawaited(
+      _onDatabaseStats().then((v) {
+        _dbStatsFetching = false;
+        _dbStats = v;
+        if (v != null) _scheduleRender();
+      }).catchError((_) {
+        _dbStatsFetching = false;
+      }),
+    );
   }
 
   void _renderMeter() {
@@ -1483,6 +1689,41 @@ class SyncPanel {
       }
     }
 
+    // ── Too large to bring DOWN ──
+    //
+    // Directly below the section above and never folded into it. Both are "too
+    // large", and the reassurance is opposite: up there the file is safe on
+    // this disk, here it is safe everywhere except this disk.
+    if (_tooLargeToFetch.isNotEmpty) {
+      final section = _section(
+        root,
+        icon: 'download',
+        title: S.tooLargeToFetch(_tooLargeToFetch.length),
+        mod: 'mod-warn',
+      );
+      _el(section, 'div', cls: 'rh-hint', text: S.tooLargeToFetchHint);
+      final entries = _tooLargeToFetch.values.toList()
+        ..sort((a, b) => b.sizeBytes.compareTo(a.sizeBytes));
+      for (final f in entries.take(20)) {
+        final card = _el(section, 'div', cls: 'rh-card mod-warn');
+        _path(_el(card, 'div', cls: 'rh-card-title'), f.path);
+        _el(
+          card,
+          'div',
+          cls: 'rh-card-meta',
+          text: S.blockedMeta(_bytes(f.sizeBytes), _bytes(f.limitBytes)),
+        );
+      }
+      if (_tooLargeToFetch.length > 20) {
+        _el(
+          section,
+          'div',
+          cls: 'rh-more',
+          text: S.andMore(_tooLargeToFetch.length - 20),
+        );
+      }
+    }
+
     // ── Files this build cannot read ──
     // ── Files gone since last run ──
     // A question, not a notice. The engine deliberately refuses to decide
@@ -1522,6 +1763,33 @@ class SyncPanel {
       });
     }
 
+    // Above everything else in this block: the others are about some files,
+    // this one is about every future write, including the ones that would
+    // record fixing the others.
+    final dbFull = _databaseFull;
+    if (dbFull != null) {
+      final section = _section(
+        root,
+        icon: 'database',
+        title: S.databaseFull(
+          _bytes(dbFull.bytes),
+          _bytes(dbFull.limitBytes),
+        ),
+        mod: 'mod-warn',
+      );
+      _el(section, 'div', cls: 'rh-hint', text: S.databaseFullHint);
+      if (_onCompactDatabase != null) {
+        final row = _el(section, 'div', cls: 'rh-links');
+        final link = _el(
+          row,
+          'span',
+          cls: 'rh-link',
+          text: _compacting ? S.compactRunning : S.databaseCompactAction,
+        );
+        _onClick(link, _runCompact);
+      }
+    }
+
     // Above the data-loss section on purpose: nothing was lost here, and the
     // fix is one the user can actually perform.
     if (_needsNewerClient.isNotEmpty) {
@@ -1538,12 +1806,7 @@ class SyncPanel {
         _path(_el(card, 'div', cls: 'rh-card-title'), p);
       }
       if (paths.length > 20) {
-        _el(
-          section,
-          'div',
-          cls: 'rh-more',
-          text: S.andMore(paths.length - 20),
-        );
+        _el(section, 'div', cls: 'rh-more', text: S.andMore(paths.length - 20));
       }
     }
 
@@ -1846,10 +2109,21 @@ class SyncPanel {
       case _Blocker.none:
         break;
     }
-    // Before the connection checks: the engine being mid-operation outranks
-    // both "connecting" and "up to date", and unlike the debounce it does not
-    // go quiet just because a phase reports progress sparsely.
-    if (_busy || _activity) return _Status.syncing;
+    // Before the connection checks: work in progress outranks both
+    // "connecting" and "up to date".
+    //
+    // One rule, shared with the status dot — see [SyncActivity]. It used to
+    // be two, and they disagreed on the same screen: the panel counted open
+    // transfers and the dot did not, so a moving file left one saying
+    // "syncing" beside the other at rest.
+    //
+    // `_activity` is a three-second debounce over incoming events and stays
+    // here alone. It smooths a burst that carries no transfer; the dot covers
+    // the same gap with its own revert timer. Neither can make the answer
+    // differ, because neither is the answer.
+    if (_work.isWorking || _activity) {
+      return _Status.syncing;
+    }
     if (_connected) return _hasPending ? _Status.pending : _Status.ready;
     if (_connecting || _resuming) return _Status.connecting;
     if (_everStarted) return _Status.offline;

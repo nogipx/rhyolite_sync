@@ -60,10 +60,19 @@ enum ConnectionRecovery {
 ConnectionRecovery planConnectionRecovery({
   required Duration sinceLastEvent,
   bool busy = false,
+  bool engineStopped = false,
   Duration aliveWithin = const Duration(seconds: 20),
   Duration busyPatience = const Duration(minutes: 5),
   bool alreadyNudged = false,
 }) {
+  // Before anything about recency. A stopped engine is not slow, and every
+  // branch below reasons about how recently it spoke — which a stopped engine
+  // did, right up to the moment it stopped. That is how an instant `stopped`
+  // was read as "alive, do not disturb" four times in a row while a user's
+  // vault sat broken: the strongest evidence of death is also the freshest.
+  //
+  // Nudging is pointless too — there is no connection to re-arm.
+  if (engineStopped) return ConnectionRecovery.restart;
   if (sinceLastEvent <= aliveWithin) return ConnectionRecovery.waitItIsAlive;
   if (busy && sinceLastEvent <= busyPatience) {
     return ConnectionRecovery.waitItIsAlive;

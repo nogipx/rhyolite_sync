@@ -1,5 +1,5 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
@@ -40,7 +40,9 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     required this.auth,
     this.backend = HttpBlobBackend.generic,
     http.Client? httpClient,
-  }) : _http = httpClient ?? http.Client();
+    LogScope? logger,
+  }) : _http = httpClient ?? http.Client(),
+       _log = logger ?? LogScope.noop;
 
   /// Which backend this is. Only the operations that genuinely differ branch
   /// on it; the object CRUD does not.
@@ -50,6 +52,10 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
   final String prefix;
   final IHttpBlobAuth auth;
   final http.Client _http;
+
+  /// Optional, because this class is constructed in tests and by callers that
+  /// have no logger. Silent by default, never absent.
+  final LogScope _log;
 
   /// Set only once the whole [prefix] chain has really been created (or was
   /// already there). It used to be set unconditionally after the first
@@ -469,8 +475,82 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
       final wait =
           _retryAfter(response) ??
           _throttleBackoff[attempt.clamp(0, _throttleBackoff.length - 1)];
+      // Said out loud. Waiting was silent, and a request sitting in backoff
+      // looks from the log exactly like one that has hung — the two need
+      // opposite responses, and a pull that went quiet for six minutes could
+      // not be told apart from a pull that was patiently doing as it was
+      // told. Up to four attempts at up to thirty seconds each is minutes of
+      // legitimate silence per request.
+      _log.warning(
+        'Blob backend throttled: HTTP ${response.statusCode}, '
+        'waiting ${wait.inMilliseconds}ms before attempt ${attempt + 2} '
+        'of $_maxThrottleAttempts',
+      );
       await _sleep(wait, context);
     }
+  }
+
+  /// How long to wait for a response to BEGIN. A backend that has not
+  /// answered at all by now is not answering.
+  static const Duration _headersTimeout = Duration(seconds: 30);
+
+  /// How long a transfer may go SILENT before it is treated as dead. Between
+  /// chunks, not in total, so a slow-but-moving transfer is left alone.
+  static const Duration _idleTimeout = Duration(seconds: 20);
+
+  /// Collects [source] into one buffer, failing if it ever goes quiet for
+  /// [_idleTimeout].
+  ///
+  /// The timer is re-armed by each chunk, so what it measures is silence
+  /// rather than duration — a large file crawling in at a few hundred KB/s
+  /// keeps resetting it and is never cut off, while a connection that has
+  /// simply stopped is caught in twenty seconds instead of never.
+  static Future<Uint8List> _readBounded(Stream<List<int>> source) {
+    final chunks = <List<int>>[];
+    var length = 0;
+    final done = Completer<Uint8List>();
+    Timer? idle;
+    late StreamSubscription<List<int>> sub;
+
+    void fail(Object error, [StackTrace? stack]) {
+      if (done.isCompleted) return;
+      idle?.cancel();
+      unawaited(sub.cancel());
+      done.completeError(error, stack);
+    }
+
+    void arm() {
+      idle?.cancel();
+      idle = Timer(
+        _idleTimeout,
+        () => fail(
+          TimeoutException('no data for ${_idleTimeout.inSeconds}s'),
+        ),
+      );
+    }
+
+    sub = source.listen(
+      (chunk) {
+        chunks.add(chunk);
+        length += chunk.length;
+        arm();
+      },
+      onError: fail,
+      onDone: () {
+        if (done.isCompleted) return;
+        idle?.cancel();
+        final out = Uint8List(length);
+        var offset = 0;
+        for (final chunk in chunks) {
+          out.setRange(offset, offset + chunk.length, chunk);
+          offset += chunk.length;
+        }
+        done.complete(out);
+      },
+      cancelOnError: true,
+    );
+    arm();
+    return done.future;
   }
 
   Future<http.Response> _sendOnce(
@@ -490,12 +570,35 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     if (body != null) request.bodyBytes = body;
 
     try {
-      final streamed = await _http.send(request);
-      // Awaited on purpose: returning the future bare would let a failure
-      // while READING the body escape this catch, so a truncated or reset
-      // response surfaced raw instead of as the wrapped error every caller
-      // here expects.
-      return await http.Response.fromStream(streamed);
+      // Bounded, because it was not.
+      //
+      // The invariant is already written down for the gRPC path: a blob
+      // transfer on the pull path must be timeout-bounded, since the pull is a
+      // single lane and a transfer that never finishes stops everything behind
+      // it. It was never applied here, so on BYO storage a stalled response
+      // hung its group, the group hung its batch, and the batch hung the pull.
+      //
+      // IDLE, not total, for the reason the gRPC path gives: a 17 MB
+      // attachment over a slow link is slow legitimately, and only true
+      // silence is a fault. Measured here at five large blobs in 278 seconds —
+      // any total bound tight enough to catch a hang would have cut that.
+      //
+      // Written with an explicit timer rather than `Stream.timeout`, which
+      // never completes under `fakeAsync` — the harness the throttle tests
+      // run in. Isolated: `fromStream`, a bare `await for`, and a future
+      // timeout all behave; only the stream operator hangs. A bound that
+      // cannot be tested is not one worth having.
+      final streamed = await _http.send(request).timeout(_headersTimeout);
+      final bytes = await _readBounded(streamed.stream);
+      return http.Response.bytes(
+        bytes,
+        streamed.statusCode,
+        request: streamed.request,
+        headers: streamed.headers,
+        isRedirect: streamed.isRedirect,
+        persistentConnection: streamed.persistentConnection,
+        reasonPhrase: streamed.reasonPhrase,
+      );
     } catch (e) {
       throw Exception('HTTP $method $uri failed: $e');
     }

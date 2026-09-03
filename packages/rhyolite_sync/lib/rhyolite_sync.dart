@@ -15,6 +15,15 @@
 /// See README.md for the full integration guide.
 library;
 
+// The domain is NOT re-exported. It was, briefly, so nothing downstream had to
+// change during the split — and the cost showed up immediately: two thirds of
+// this package reached the domain without naming it, so the compiler could no
+// longer answer which files depend on it, or on what. That question is the one
+// that found every misplaced rule during the extraction.
+//
+// Consumers name `rhyolite_core` themselves. It is a dependency, not ambient.
+export 'src/policy/path_scope.dart';
+
 // --- Wire protocol (contracts + DTOs) ----------------------------------
 export 'src/contract/backup_contract.dart';
 export 'src/contract/blob_contract.dart';
@@ -29,7 +38,6 @@ export 'src/platform/i_platform_io.dart';
 
 // --- Logging ------------------------------------------------------------
 export 'src/logging/log_path.dart';
-export 'src/sync_v3/never_synced.dart';
 
 // --- Auth + transport interceptor --------------------------------------
 export 'src/auth/auth_keys.dart';
@@ -49,15 +57,8 @@ export 'src/crypto/vault_cipher.dart';
 // fm_codec, fm_tail, fm_store, frac_index) stays private: it is how the engine
 // stores and merges, and an embedder reaching into it would be depending on a
 // representation, not on a meaning.
-export 'src/frontmatter/frontmatter_document.dart';
-export 'src/frontmatter/frontmatter_parser.dart';
-export 'src/frontmatter/frontmatter_render.dart';
-export 'src/frontmatter/frontmatter_split.dart';
 
 // --- Chunking ----------------------------------------------------------
-export 'src/chunking/blob_manifest.dart';
-export 'src/chunking/content_defined_chunker.dart';
-export 'src/chunking/file_type_detector.dart';
 
 // --- Blob storage interface + bundled backends -------------------------
 export 'src/remote/blob_transfer_hub.dart';
@@ -75,6 +76,8 @@ export 'src/remote/s3_blob_storage.dart';
 export 'src/remote/vault_meta_service.dart';
 export 'src/local/local_blob_store.dart';
 export 'src/local/local_blob_storage_adapter.dart';
+export 'src/local/connection_gate.dart';
+export 'src/local/gated_blob_repository.dart';
 export 'src/local/serialised_data_client.dart';
 
 // --- Sync engine + state types -----------------------------------------
@@ -82,22 +85,18 @@ export 'src/engine/i_sync_engine.dart';
 export 'src/engine/server_rejection_mapper.dart';
 export 'src/engine/sync_engine_event.dart';
 export 'src/engine/vault_config.dart';
-export 'src/sync_v3/blob_classifier.dart';
 export 'src/sync_v3/bounded_parallel.dart';
 export 'src/sync_v3/time_budget_yielder.dart';
 export 'src/sync_v3/blob_janitor.dart';
+export 'src/sync_v3/blob_storage_provider.dart';
 export 'src/sync_v3/byo_blob_janitor.dart';
+export 'src/sync_v3/blob_staging.dart';
 export 'src/sync_v3/chunked_blob_io.dart';
-export 'src/sync_v3/content_materializer.dart';
-export 'src/sync_v3/file_state.dart';
 export 'src/sync_v3/file_state_store.dart';
 export 'src/sync_v3/file_version_viewer.dart';
 export 'src/sync_v3/fugue_store.dart';
-export 'src/sync_v3/fugue_text_sync.dart';
 export 'src/sync_v3/history_browser.dart';
 export 'src/sync_v3/local_blob_gc.dart';
-export 'src/sync_v3/path_scope.dart';
-export 'src/sync_v3/record_id.dart';
 export 'src/sync_v3/notify_coordinator.dart';
 export 'src/sync_v3/stat_sig_store.dart';
 export 'src/sync_v3/state_conflict_resolver.dart';

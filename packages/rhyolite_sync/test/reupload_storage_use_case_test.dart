@@ -1,15 +1,8 @@
-/// Re-uploading to a freshly connected backend is not the same job as
-/// verifying an established one, and it was being done by the verify pass.
-///
-/// The differences show up exactly when the backend is empty — which is the
-/// only time the button is pressed.
-import 'dart:typed_data';
-
 import 'package:rhyolite_sync/rhyolite_sync.dart';
-import 'package:rpc_blob/rpc_blob.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 import 'package:rpc_data/rpc_data.dart';
 import 'package:test/test.dart';
+import 'package:rhyolite_core/rhyolite_core.dart';
 
 const _vaultId = '00000000-0000-4000-8000-0000000000cc';
 

@@ -1,5 +1,6 @@
 import 'package:http/http.dart' as http;
 import 'package:rhyolite_sync/rhyolite_sync.dart';
+import 'package:rpc_dart/rpc_dart.dart';
 
 /// External blob storage configuration.
 /// When set in VaultConfig, blobs are stored directly in the user's
@@ -29,5 +30,9 @@ abstract class ExternalBlobConfig {
   IBlobStorage createBlobStorage({
     required String vaultId,
     http.Client? httpClient,
+
+    /// Where the backend's own complaints go. Throttling was invisible, and a
+    /// request waiting out a backoff looks exactly like one that has hung.
+    LogScope? logger,
   });
 }

@@ -450,6 +450,7 @@ class StateSyncEngine implements ISyncEngine {
         sigStore: _sigStore,
         fmStore: _fmStore,
         fmGcBarrier: () => _causalGc.minSafeHeadSeq,
+        onBlobUnavailable: _noteBlobUnavailable,
         logger: _log,
       );
 
@@ -614,6 +615,9 @@ class StateSyncEngine implements ISyncEngine {
     // A new session must re-establish what the server holds: between sessions
     // a storage sweep may have reclaimed blobs this one saw as present.
     _verifiedPresent.clear();
+    // Same reason read the other way round: this only suppresses a duplicate
+    // sweep, and the next session is entitled to schedule its own.
+    _provenMissingBlobs.clear();
     _lastEmittedHasPending = false;
     _wasOnline = false;
     await _connSub?.cancel();
@@ -1162,6 +1166,7 @@ class StateSyncEngine implements ISyncEngine {
       relievePressure: _relieveDatabasePressure,
       shouldPrefetch: _recordWantedOnThisDevice,
       pathOfRecord: _pathOfRecord,
+      diskProvablyHolds: _diskProvablyHolds,
       checkpoint: _flushDatabase == null ? null : _checkpointDatabase,
       openStaging: _openPullStaging,
       closeStaging: _closePullStaging,
@@ -1578,13 +1583,29 @@ class StateSyncEngine implements ISyncEngine {
     Future<void> Function(RpcContext) run, {
     Duration retryDelay = const Duration(seconds: 5),
     Duration delay = Duration.zero,
+  }) => _scheduleBackgroundAt(key, run, retryDelay: retryDelay, delay: delay);
+
+  /// [_scheduleBackground] with the tier spelled out.
+  ///
+  /// Maintenance is the right default and stays it — see [_pMaintenance]. The
+  /// parameter is for the case where the same task has stopped being
+  /// speculative: work scheduled because something was PROVEN wrong is not
+  /// housekeeping any more, and leaving it in the tier that only runs when
+  /// nothing else wants the lane means it does not run at all on the devices
+  /// that need it most.
+  void _scheduleBackgroundAt(
+    Object key,
+    Future<void> Function(RpcContext) run, {
+    Duration retryDelay = const Duration(seconds: 5),
+    Duration delay = Duration.zero,
+    int priority = _pMaintenance,
   }) {
     if (!_running) return;
     late final Future<void> task;
     task = _scheduler.schedule(
       key: key,
       group: _schedulerGroup,
-      priority: _pMaintenance,
+      priority: priority,
       delay: delay,
       preemptible: true,
       run: (token) async {
@@ -1600,13 +1621,17 @@ class StateSyncEngine implements ISyncEngine {
         try {
           await run(RpcContext.withCancellation(rpcToken));
         } on RpcCancelledException catch (_) {
-          // Finish later, after the burst that preempted us has passed.
+          // Finish later, after the burst that preempted us has passed — and
+          // at the tier it was scheduled in, or a task promoted out of
+          // maintenance would silently fall back into it on its first
+          // preemption, which is the one thing it was promoted to survive.
           if (_running) {
-            _scheduleBackground(
+            _scheduleBackgroundAt(
               key,
               run,
               retryDelay: retryDelay,
               delay: retryDelay,
+              priority: priority,
             );
           }
         } on BlobStorageRefused catch (e) {
@@ -3180,6 +3205,58 @@ class StateSyncEngine implements ISyncEngine {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Blob ids a materialise has proven the backend does not hold, this run.
+  ///
+  /// Only so the sweep is scheduled once per burst rather than once per file:
+  /// the pass itself re-derives the whole referenced set, so nothing here is
+  /// an input to it.
+  final Set<String> _provenMissingBlobs = {};
+
+  /// A materialise could not fetch a blob the records still reference.
+  ///
+  /// Schedules the heal that already exists, and does it at [_pBackground]
+  /// rather than the maintenance tier the routine sweep runs in. The tiers
+  /// answer different questions. Maintenance is where speculative work
+  /// belongs — the startup sweep probes a whole vault to find out whether
+  /// anything is wrong, and putting it below everything else is what took a
+  /// start from 39 s to 4 s. This is not speculative: a file was asked for and
+  /// the backend did not have it, which is the fault that sweep exists to
+  /// repair, already proven.
+  ///
+  /// Debounced, because the proof arrives per file and a pull can produce
+  /// hundreds in a row — one sweep after the burst settles, not one per file.
+  /// [_verifiedPresent] carries what earlier passes established, so a repeat
+  /// costs the probes it has not already answered.
+  /// The path is part of the reporting contract and deliberately unused here:
+  /// the sweep re-derives every referenced blob itself, so naming one file
+  /// would only invite a per-file repair that does not exist.
+  void _noteBlobUnavailable(String blobRef, String _) {
+    if (blobRef.isEmpty) return;
+    if (!_provenMissingBlobs.add(blobRef)) return;
+    _scheduleBackgroundAt(
+      'verify-blobs',
+      (ctx) => runVerifyBlobs(context: ctx),
+      priority: _pBackground,
+      delay: const Duration(seconds: 20),
+    );
+  }
+
+  /// The in-memory half of [DiskReconciler]'s own-echo guard, so the pull can
+  /// ask it BEFORE deciding not to prefetch a file.
+  ///
+  /// Deliberately only the half that costs nothing: the reconciler also stats
+  /// the file, and a stat per record is not a price a 9000-file pull should
+  /// pay twice. A signature that names this blobRef but has since drifted
+  /// leaves one file to the apply's download-and-compare, which is the
+  /// behaviour that was correct there anyway. What this must never do is say
+  /// yes where the reconciler would say no — that is the disagreement that
+  /// turned a batched prefetch into a per-file one.
+  bool _diskProvablyHolds(String fileId, String blobRef) {
+    if (blobRef.isEmpty) return false;
+    final sig = _sigStore?.get(fileId);
+    return sig != null && sig.blobRef == blobRef;
   }
 
   /// Aggregates every chunk hash referenced by some current file_state

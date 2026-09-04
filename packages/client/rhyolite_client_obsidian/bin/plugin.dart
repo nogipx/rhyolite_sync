@@ -452,15 +452,29 @@ Future<void> _scheduleBoot(
   PluginSession session,
   Future<void> Function(TaskCancelToken token) body, {
   bool automatic = false,
-}) {
-  final scheduler = session.scheduler;
-  if (scheduler == null) return body(TaskCancelController().token);
-  return scheduler.schedule(
-    key: 'engine-lifecycle',
-    priority: automatic ? _kRecoveryPriority : _kBootPriority,
-    preemptible: automatic,
-    run: body,
-  );
+}) async {
+  // Raised on the way IN — before the scheduler is even consulted — because
+  // the window this guards opens the moment a restart is decided on, not the
+  // moment it starts running. A boot that is still queued behind another has
+  // already stopped nothing and started nothing, and the engine it will
+  // replace may already be down.
+  if (session.engineBootsInFlight == 0) {
+    session.engineBootStartedAt = DateTime.now();
+  }
+  session.engineBootsInFlight += 1;
+  try {
+    final scheduler = session.scheduler;
+    if (scheduler == null) return await body(TaskCancelController().token);
+    return await scheduler.schedule(
+      key: 'engine-lifecycle',
+      priority: automatic ? _kRecoveryPriority : _kBootPriority,
+      preemptible: automatic,
+      run: body,
+    );
+  } finally {
+    session.engineBootsInFlight -= 1;
+    if (session.engineBootsInFlight <= 0) session.engineBootStartedAt = null;
+  }
 }
 
 /// Copies the engine's device identity into data.json the first time.
@@ -2381,21 +2395,25 @@ $kSyncPanelCss
             Future<void> recoverConnection({
               required bool requireVisible,
             }) async {
-              if (recoverInFlight || session.syncPaused) return;
-              // Nothing to recover TO. Restarting the engine against a missing
-              // session or a locked vault cannot succeed, and each attempt
-              // costs a full refresh round-trip (~15s with the retry ladder)
-              // before failing — which is what turned a dead session into an
-              // endless "Connecting…" and a plugin that felt slow to start.
-              // The panel names the missing piece instead.
-              if (currentStartBlock() != null) return;
-              if (requireVisible && documentJs != null) {
-                final visible =
-                    jsu.getProperty<String?>(documentJs, 'visibilityState') ==
-                    'visible';
-                if (!visible) return;
+              // Every "don't even probe" refusal, in one testable place — see
+              // [shouldAttemptRecovery] for what each one is defending. The
+              // reasons live there rather than here because this closure
+              // cannot be reached from a test and the rule needed to be.
+              final visible =
+                  documentJs == null ||
+                  jsu.getProperty<String?>(documentJs, 'visibilityState') ==
+                      'visible';
+              if (!shouldAttemptRecovery(
+                paused: session.syncPaused,
+                blocked: currentStartBlock() != null,
+                engineMissing: session.engine == null,
+                bootRunningFor: session.engineBootRunningFor(DateTime.now()),
+                alreadyRecovering: recoverInFlight,
+                requireVisible: requireVisible,
+                visible: visible,
+              )) {
+                return;
               }
-              if (session.engine == null) return;
               recoverInFlight = true;
               try {
                 // A busy engine gets a longer deadline. Five seconds is
@@ -2422,6 +2440,7 @@ $kSyncPanelCss
                     'busy=${session.recovery.engineBusy}, '
                     'quiet for ${quietFor.inSeconds}s)',
                   );
+                  var nudged = false;
                   var plan = planConnectionRecovery(
                     sinceLastEvent: quietFor,
                     busy: session.recovery.engineBusy,
@@ -2444,6 +2463,7 @@ $kSyncPanelCss
                     _log.info(
                       'Engine is silent — re-arming before any restart',
                     );
+                    nudged = true;
                     try {
                       await session.engine!.reissueNotify();
                       await session.engine!.triggerPull();
@@ -2466,8 +2486,16 @@ $kSyncPanelCss
                     );
                     if (plan != ConnectionRecovery.restart) return;
                   }
+                  // Says which of the two ways we got here, because they are
+                  // different faults and the line used to claim the second
+                  // whatever happened. A `stopped` probe skips the nudge
+                  // entirely, so "still unreachable after re-arming" was
+                  // printed for an engine nothing had tried to re-arm — and
+                  // that reading is what hid a restart loop in plain sight.
                   _log.warning(
-                    'Still unreachable after re-arming — restarting',
+                    nudged
+                        ? 'Still unreachable after re-arming — restarting'
+                        : 'Engine reports stopped — restarting',
                   );
                   try {
                     await _scheduleBoot(session, (token) async {

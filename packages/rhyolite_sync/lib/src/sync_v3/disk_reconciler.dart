@@ -115,8 +115,14 @@ class DiskReconciler {
     StatSigStore? sigStore,
     FmStore? fmStore,
     int? Function()? fmGcBarrier,
+
+    /// Told when a referenced blob turns out not to be fetchable. See the
+    /// call site for why a materialise is the one place that finds this out
+    /// on its own.
+    void Function(String blobRef, String path)? onBlobUnavailable,
     LogScope? logger,
-  }) : _fmStore = fmStore,
+  }) : _onBlobUnavailable = onBlobUnavailable ?? ((_, _) {}),
+       _fmStore = fmStore,
        _fmGcBarrier = fmGcBarrier ?? (() => null),
        _chunkedIOBuilder = chunkedIOBuilder,
        _knownChunks = knownChunks,
@@ -141,6 +147,7 @@ class DiskReconciler {
   final ChunkedBlobIO? Function() _chunkedIOBuilder;
   final Set<String> Function() _knownChunks;
   final String Function(String relPath) _fileIdFor;
+  final void Function(String blobRef, String path) _onBlobUnavailable;
   final void Function(SyncEngineEvent event) _emit;
 
   /// Current per-file upload size limit in bytes (null = unlimited). A file
@@ -512,6 +519,19 @@ class DiskReconciler {
         'Blob not available: $tag',
         data: {'path': LogPath(state.path)},
       );
+      // The one place in the engine that learns a referenced blob is really
+      // gone, and until now the only thing it did with that was write a line.
+      //
+      // The heal already exists — VerifyBlobsUseCase probes the server and
+      // re-uploads from the local cache or straight from the file on disk —
+      // but it runs in the lowest maintenance tier, and a device stuck
+      // re-pulling never reaches an idle moment to run it in. One report shows
+      // 394 files warning here twice each, on a vault whose disk copies were
+      // all intact: every one of them was healable and none was healed.
+      //
+      // Reporting is all that belongs here. Whether to sweep, and when, is the
+      // engine's call — this class has no scheduler and should not grow one.
+      _onBlobUnavailable(state.blobRef, state.path);
       return false;
     }
 

@@ -1,3 +1,24 @@
+## [3.17.1] - 2026-09-04
+
+**A sync that finished stays finished.**
+Files a device already holds are recognised before anything is fetched, so
+reaching the end of a sync no longer costs a second pass over the whole vault.
+A download interrupted part way keeps the ground it covered instead of
+returning to the beginning.
+
+**Returning to Obsidian no longer interrupts a running sync.**
+Bringing the window back to the front while sync is starting up leaves the
+transfer alone to finish.
+
+**Content missing from storage is repaired from the vault itself.**
+A file whose stored copy has gone missing is re-uploaded from the one on disk
+rather than only reported.
+
+### Bug Fixes
+
+- returning to the window no longer restarts a running sync (obsidian)
+- a sync that finished no longer starts over (core)
+
 ## [3.17.0] - 2026-09-03
 
 **Sync no longer stops because the local database filled up.**

@@ -1120,5 +1120,213 @@ void main() {
         reason: 'the second run completes the set rather than redoing it',
       );
     });
+    test(
+      'a signature left by the sha-skip names the blob it is evidence for',
+      () async {
+        // The line this protects is the one that made a finished sync start
+        // over. `DiskReconciler._diskAlreadyHolds` refuses a blobRef-less
+        // signature by design — it proves "unchanged since we last looked",
+        // not "holds that content" — so its own-echo guard could never fire
+        // for a binary this scan had skipped. The pull that hands a device its
+        // own push straight back then downloaded the whole vault, one file at
+        // a time, to compare every file against itself.
+        //
+        // The signature is born here and nowhere else for these files: a later
+        // scan skips on it without rewriting it, so a blobRef missing on this
+        // pass is missing for good.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = FileStateStore(client: env.client, vaultId: _vaultId);
+        await store.load();
+        final sigs = StatSigStore(client: env.client, vaultId: _vaultId);
+        await sigs.load();
+        final io = _CountingIo();
+        io.files['$_vaultPath/a.bin'] = _randomBytes(4096, 7);
+        final remote = _MemRemote();
+
+        StateStartupDiff diff() => StateStartupDiff(
+          store: store,
+          blobStore: LocalBlobStore(InMemoryBlobRepository()),
+          remoteBlobStorage: remote,
+          io: io,
+          vaultPath: _vaultPath,
+          vaultId: _vaultId,
+          nodeId: 'test-device',
+          readClock: store.nextHlc,
+          writeClock: (_) {},
+          sigStore: sigs,
+        );
+
+        await diff().call();
+        final fileId = const Uuid().v5(_vaultId, 'a.bin');
+        final blobRef = store.get(fileId)!.blobRef;
+        expect(blobRef, isNotEmpty);
+
+        // An install that predates the blobRef field, or one that simply lost
+        // the row: the state is tracked, the signature is not there. This is
+        // the state every vault synced by an older build starts the next scan
+        // in, and the only one in which the sha-skip writes a signature.
+        await sigs.wipeAll();
+
+        await diff().call();
+
+        expect(
+          io.reads,
+          greaterThan(0),
+          reason: 'without a signature the file has to be read — which is '
+              'precisely the pass that then records one',
+        );
+        final sig = sigs.get(fileId);
+        expect(sig, isNotNull, reason: 'the skip must leave a signature');
+        expect(
+          sig!.blobRef,
+          blobRef,
+          reason: 'the fast path proved the disk bytes hash to this state\'s '
+              'chunk list, so the signature may carry the strong claim — and '
+              'must, or the pull re-downloads the file to learn it again',
+        );
+      },
+    );
+    test(
+      'a legacy blobRef-less signature is upgraded by one extra read',
+      () async {
+        // The half that would otherwise have been missed. Recording the
+        // blobRef on the fast path only helps files the scan actually READS,
+        // and the mtime+size skip above returns before any read and does not
+        // rewrite the signature it skipped on. So a vault carrying thousands
+        // of blobRef-less signatures — every vault synced by an older build —
+        // would keep them for ever, and go on re-downloading itself.
+        //
+        // One scan pays for the migration; every scan after it is fast again.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = FileStateStore(client: env.client, vaultId: _vaultId);
+        await store.load();
+        final sigs = StatSigStore(client: env.client, vaultId: _vaultId);
+        await sigs.load();
+        final io = _CountingIo();
+        io.files['$_vaultPath/a.bin'] = _randomBytes(4096, 11);
+
+        StateStartupDiff diff() => StateStartupDiff(
+          store: store,
+          blobStore: LocalBlobStore(InMemoryBlobRepository()),
+          remoteBlobStorage: _MemRemote(),
+          io: io,
+          vaultPath: _vaultPath,
+          vaultId: _vaultId,
+          nodeId: 'test-device',
+          readClock: store.nextHlc,
+          writeClock: (_) {},
+          sigStore: sigs,
+        );
+
+        await diff().call();
+        final fileId = const Uuid().v5(_vaultId, 'a.bin');
+        final blobRef = store.get(fileId)!.blobRef;
+
+        // Exactly what an older build left behind: mtime and size, no blobRef.
+        final stat = (await io.statFile('$_vaultPath/a.bin'))!;
+        sigs.set(fileId, stat.mtimeMs, stat.sizeBytes);
+        // Fire-and-forget by design; a write still in flight when the test's
+        // in-memory endpoint closes surfaces as an unhandled stream error.
+        await sigs.flushPending();
+        expect(sigs.get(fileId)!.blobRef, isNull, reason: 'fixture sanity');
+
+        io.reads = 0;
+        await diff().call();
+
+        expect(
+          io.reads,
+          1,
+          reason: 'the migration costs one read of the file, once',
+        );
+        expect(sigs.get(fileId)!.blobRef, blobRef);
+
+        io.reads = 0;
+        await diff().call();
+
+        expect(
+          io.reads,
+          0,
+          reason: 'and the scan after it skips on the stat again — the '
+              'migration must not become a permanent cost',
+        );
+        await sigs.flushPending();
+      },
+    );
+
+    test(
+      'a value carrying a peer node id is left to the pull, not re-read',
+      () async {
+        // The hazard the migration is fenced against. If the store holds a
+        // peer\'s version this device never materialised — the blob was
+        // missing, refused, or the pull was interrupted — then disk holds OUR
+        // older content. Reading it here would find bytes that do not match
+        // the stored chunk list, call that a local edit, and re-upload our
+        // older content over the peer\'s.
+        //
+        // Only a value this device minted may be confirmed by reading the
+        // file, because only then can the read possibly agree.
+        final env = await DataServiceFactory.inMemory();
+        addTearDown(env.dispose);
+        final store = FileStateStore(client: env.client, vaultId: _vaultId);
+        await store.load();
+        final sigs = StatSigStore(client: env.client, vaultId: _vaultId);
+        await sigs.load();
+        final io = _CountingIo();
+        io.files['$_vaultPath/a.bin'] = _randomBytes(4096, 12);
+        final remote = _MemRemote();
+
+        StateStartupDiff diff() => StateStartupDiff(
+          store: store,
+          blobStore: LocalBlobStore(InMemoryBlobRepository()),
+          remoteBlobStorage: remote,
+          io: io,
+          vaultPath: _vaultPath,
+          vaultId: _vaultId,
+          nodeId: 'test-device',
+          readClock: store.nextHlc,
+          writeClock: (_) {},
+          sigStore: sigs,
+        );
+
+        await diff().call();
+        final fileId = const Uuid().v5(_vaultId, 'a.bin');
+
+        // A peer publishes a version this device has not materialised, and the
+        // signature is the old blobRef-less kind.
+        final mine = store.get(fileId)!;
+        store.applyLocal(
+          FileState(
+            fileId: fileId,
+            path: 'a.bin',
+            blobRef: 'peer-blob-ref',
+            sizeBytes: mine.sizeBytes,
+            hlc: Hlc.now('some-other-device'),
+            chunks: const ['peer-chunk'],
+          ),
+        );
+        final stat = (await io.statFile('$_vaultPath/a.bin'))!;
+        sigs.set(fileId, stat.mtimeMs, stat.sizeBytes);
+        await sigs.flushPending();
+
+        io.reads = 0;
+        final uploadsBefore = remote.uploads;
+        final result = await diff().call();
+
+        expect(
+          io.reads,
+          0,
+          reason: 'a peer value is not ours to confirm by reading the disk',
+        );
+        expect(
+          remote.uploads,
+          uploadsBefore,
+          reason: 'and nothing of ours may be pushed over it',
+        );
+        expect(result.modifiedFiles, 0);
+        await sigs.flushPending();
+      },
+    );
   });
 }

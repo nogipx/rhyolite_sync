@@ -83,6 +83,51 @@ ConnectionRecovery planConnectionRecovery({
   return alreadyNudged ? ConnectionRecovery.restart : ConnectionRecovery.nudge;
 }
 
+/// Whether a recovery attempt should run at all, before anything is probed.
+///
+/// Split out from the probe/plan pair because these are refusals of a
+/// different kind: [planConnectionRecovery] weighs evidence about a live
+/// engine, while every case here says there is nothing to recover, or nothing
+/// to recover TO, and asking would only cost a round trip to find that out.
+///
+/// [bootInFlight] is the one that had to be learned. A restart is a stop
+/// followed by a start, and in between the engine answers `stopped` — the one
+/// verdict the planner never second-guesses, ahead of every liveness test. So
+/// probing across a restart reliably schedules another restart, which lands on
+/// the first and tears down whatever it had going. Coming back to the window
+/// while sync is restarting is an ordinary thing to do, and a user reported it
+/// as sync starting over every time she did.
+///
+/// [alreadyRecovering] guards the same window from the other side: the ladder
+/// re-entering itself.
+///
+/// [bootRunningFor] bounds the boot guard, for the same reason [busyPatience]
+/// bounds deferring to a busy engine: a restart that hangs — a `stop()` waiting
+/// on a pull that will not unwind — would otherwise disable recovery for the
+/// rest of the load, trading a restart loop for a plugin that cannot restart at
+/// all. Past the bound the guard steps out of the way and the ladder decides on
+/// the evidence, as it did before.
+bool shouldAttemptRecovery({
+  required bool paused,
+  required bool blocked,
+  required bool engineMissing,
+  required bool alreadyRecovering,
+  Duration? bootRunningFor,
+  Duration bootPatience = const Duration(minutes: 3),
+  bool requireVisible = false,
+  bool visible = true,
+}) {
+  if (alreadyRecovering) return false;
+  if (paused) return false;
+  // Restarting against a missing session or a locked vault cannot succeed, and
+  // each attempt costs a full refresh round trip before failing.
+  if (blocked) return false;
+  if (engineMissing) return false;
+  if (bootRunningFor != null && bootRunningFor <= bootPatience) return false;
+  if (requireVisible && !visible) return false;
+  return true;
+}
+
 /// How long to give the connection probe.
 ///
 /// Five seconds is fine for an idle engine and wrong for a working one. On

@@ -146,6 +146,7 @@ typedef _Fixture = ({
   _MemRemote remote,
   List<SyncEngineEvent> events,
   StatSigStore? sigStore,
+  List<({String blobRef, String path})> missingBlobs,
   String Function(String) fileIdFor,
 });
 
@@ -201,6 +202,7 @@ Future<_Fixture> _newFixture({
   );
 
   final events = <SyncEngineEvent>[];
+  final missingBlobs = <({String blobRef, String path})>[];
 
   final reconciler = DiskReconciler(
     vaultPath: _vaultPath,
@@ -219,6 +221,8 @@ Future<_Fixture> _newFixture({
     fmStore: frontmatter ? fmStore : null,
     fmGcBarrier: () => fmGcBarrier,
     sigStore: sigStore,
+    onBlobUnavailable: (blobRef, path) =>
+        missingBlobs.add((blobRef: blobRef, path: path)),
   );
 
   return (
@@ -231,6 +235,7 @@ Future<_Fixture> _newFixture({
     localBlobs: localBlobs,
     remote: remote,
     events: events,
+    missingBlobs: missingBlobs,
     sigStore: sigStore,
     fileIdFor: fileIdFor,
   );
@@ -1167,6 +1172,60 @@ void main() {
 
       expect(await f.reconciler.reconcileWithDisk('keeper.md'), isTrue);
       expect(f.store.get(f.fileIdFor('keeper.md')), isNotNull);
+    });
+  });
+  group('a blob the backend no longer holds', () {
+    // 394 files in one report warned here, twice each, on a vault whose disk
+    // copies were all intact. Every one of them was healable — the verify pass
+    // re-uploads from the local cache or straight from the file on disk — and
+    // none was healed, because that pass sits in the lowest maintenance tier
+    // and a device stuck re-pulling never reaches an idle moment to run it in.
+    //
+    // Writing a warning line was the whole of the response. This is the only
+    // place in the engine that LEARNS a referenced blob is really gone, so it
+    // is the only place that can say so.
+    test('is reported, not merely logged', () async {
+      final f = await _newFixture();
+      const relPath = 'notes/gone.bin';
+      final fileId = f.fileIdFor(relPath);
+      // A record that references content no backend has: nothing was ever
+      // uploaded under this ref.
+      final state = FileState(
+        fileId: fileId,
+        path: relPath,
+        blobRef: 'ref-that-nobody-holds',
+        sizeBytes: 12,
+        hlc: Hlc.now('peer'),
+        chunks: const ['chunk-that-nobody-holds'],
+      );
+      f.store.applyLocal(state);
+
+      final wrote = await f.reconciler.writeFileToDisk(state);
+
+      expect(wrote, isFalse, reason: 'nothing could be written');
+      expect(
+        f.missingBlobs,
+        hasLength(1),
+        reason: 'the one thing that knows must tell someone who can act',
+      );
+      expect(f.missingBlobs.single.blobRef, 'ref-that-nobody-holds');
+      expect(f.missingBlobs.single.path, relPath);
+    });
+
+    test('a blob that IS there is not reported', () async {
+      // The report has to mean something. A fetch that works must be silent,
+      // or the heal it schedules fires on every ordinary pull.
+      final f = await _newFixture();
+      const relPath = 'notes/present.md';
+      f.io.files['$_vaultPath/$relPath'] = _bytes('hello');
+      await f.reconciler.reconcileWithDisk(relPath);
+      final state = f.store.get(f.fileIdFor(relPath))!;
+      f.io.files.remove('$_vaultPath/$relPath');
+
+      final wrote = await f.reconciler.writeFileToDisk(state);
+
+      expect(wrote, isTrue);
+      expect(f.missingBlobs, isEmpty);
     });
   });
 }

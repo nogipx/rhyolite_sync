@@ -260,4 +260,93 @@ void main() {
       }
     });
   });
+  group('a recovery attempt that should never have been made', () {
+    // Every case here refuses BEFORE the probe. The planner is good at
+    // weighing evidence about a live engine and has no way to know when there
+    // is no engine to weigh — and the one verdict it never second-guesses,
+    // `stopped`, is exactly what a half-restarted engine answers.
+    bool attempt({
+      bool paused = false,
+      bool blocked = false,
+      bool engineMissing = false,
+      Duration? bootRunningFor,
+      bool alreadyRecovering = false,
+      bool requireVisible = false,
+      bool visible = true,
+    }) => shouldAttemptRecovery(
+      paused: paused,
+      blocked: blocked,
+      engineMissing: engineMissing,
+      bootRunningFor: bootRunningFor,
+      alreadyRecovering: alreadyRecovering,
+      requireVisible: requireVisible,
+      visible: visible,
+    );
+
+    test('an ordinary healthy moment is probed', () {
+      expect(attempt(), isTrue);
+      expect(attempt(requireVisible: true, visible: true), isTrue);
+    });
+
+    test('a restart already in flight is not probed across', () {
+      // The regression. A restart is a stop followed by a start; in between,
+      // `probe` returns `stopped` in zero milliseconds and the planner turns
+      // that into another restart, which lands on the first and tears down
+      // whatever it had going. One report caught it exactly: "Health check
+      // failed after 0ms (trigger=visibility, busy=false, quiet for 1s)" —
+      // an engine that had spoken one second earlier and was applying files
+      // throughout — followed by a restart, while the previous restart's
+      // pull was still running.
+      //
+      // Un-minimising a window during a restart is an ordinary thing to do,
+      // and the user who reported this did it twice in three minutes.
+      expect(attempt(bootRunningFor: Duration.zero), isFalse);
+      expect(
+        attempt(
+          bootRunningFor: const Duration(seconds: 30),
+          requireVisible: true,
+          visible: true,
+        ),
+        isFalse,
+        reason: 'the visibility path is the one that fired',
+      );
+    });
+
+    test('but a boot that never finishes stops being an excuse', () {
+      // The other side of the same invariant the busy guard already carries:
+      // deferring for ever to a restart that has hung — a stop() waiting on a
+      // pull that will not unwind — would trade a restart loop for a plugin
+      // that cannot restart at all.
+      expect(attempt(bootRunningFor: const Duration(minutes: 4)), isTrue);
+      expect(
+        attempt(bootRunningFor: const Duration(minutes: 3)),
+        isFalse,
+        reason: 'the boundary belongs to the guard, as it does for busy',
+      );
+    });
+
+    test('the ladder does not re-enter itself', () {
+      expect(attempt(alreadyRecovering: true), isFalse);
+    });
+
+    test('nothing to recover, or nothing to recover TO', () {
+      expect(attempt(paused: true), isFalse);
+      expect(
+        attempt(blocked: true),
+        isFalse,
+        reason: 'a locked vault or a missing session cannot be restarted into '
+            'working, and each attempt costs a refresh round trip first',
+      );
+      expect(attempt(engineMissing: true), isFalse);
+    });
+
+    test('a hidden window is not probed on the visibility path', () {
+      expect(attempt(requireVisible: true, visible: false), isFalse);
+      expect(
+        attempt(requireVisible: false, visible: false),
+        isTrue,
+        reason: 'the network path fires regardless of visibility',
+      );
+    });
+  });
 }

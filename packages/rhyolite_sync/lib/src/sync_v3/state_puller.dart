@@ -72,6 +72,12 @@ class StatePuller {
     void Function()? closeStaging,
     Future<bool> Function(StateRecord record)? shouldPrefetch,
     Future<String?> Function(StateRecord record)? pathOfRecord,
+
+    /// Can the apply side prove, without fetching, that the file on disk
+    /// already holds [blobRef]? See [_selfEchoedFileIds] for why the prefetch
+    /// may not skip a file this answers no for. Omitted → nothing is treated
+    /// as provable, which costs a batched prefetch and never correctness.
+    bool Function(String fileId, String blobRef)? diskProvablyHolds,
     String Function()? clientName,
     String clientVersion = '',
     String clientKind = '',
@@ -91,6 +97,7 @@ class StatePuller {
        _closeStaging = closeStaging,
        _shouldPrefetch = shouldPrefetch ?? ((_) async => true),
        _pathOfRecord = pathOfRecord ?? ((_) async => null),
+       _diskProvablyHolds = diskProvablyHolds ?? ((_, _) => false),
        _clientName = clientName ?? (() => ''),
        _clientVersion = clientVersion,
        _clientKind = clientKind;
@@ -154,6 +161,10 @@ class StatePuller {
   /// A record's path, for naming a transfer in the UI. Costs a decrypt, so it
   /// is asked only for files big enough that the silence would read as a hang.
   final Future<String?> Function(StateRecord record) _pathOfRecord;
+
+  /// The apply side's own skip guard, asked in advance. In-memory only (a
+  /// signature lookup), so it is safe to ask once per file in a pull.
+  final bool Function(String fileId, String blobRef) _diskProvablyHolds;
 
   /// Below this, a file finishes before anyone could wonder whether it is
   /// stuck, and naming it would cost a decrypt per record for nothing.
@@ -271,13 +282,41 @@ class StatePuller {
         byFile[fid]!.fold<int>(0, (n, r) => n + r.chunks.length);
     int maxSeq(String fid) =>
         byFile[fid]!.fold<int>(0, (m, r) => r.serverSeq > m ? r.serverSeq : m);
+    int minSeq(String fid) => byFile[fid]!.fold<int>(
+      1 << 62,
+      (m, r) => r.serverSeq < m ? r.serverSeq : m,
+    );
+    // WITHIN A WINDOW of adjacent seqs, not across the whole response — and
+    // that bound is what lets the cursor move.
+    //
+    // [commitProgress] can only advance to just below the smallest seq still
+    // unapplied. Sorted globally by size, the response's lowest seq can sit at
+    // the very end of the order, so the cursor stands still for the entire
+    // pull however many files land: one real report applied every one of 9078
+    // records across two passes and persisted a cursor of 61. A restart then
+    // re-fetched all of them.
+    //
+    // Windowing keeps both properties. Inside a window notes still precede
+    // attachments, which is the whole point of the size sort; between windows
+    // the order is causal, so finishing one releases the cursor past it. The
+    // window is several apply batches wide so a commit still covers real work
+    // rather than firing per batch.
+    //
     // Ties break on serverSeq so the order is deterministic (Dart's sort is not
     // stable) and, among equal-size files, causal — same as the old order.
     final fileIds = byFile.keys.toList()
-      ..sort((a, b) {
-        final c = chunkCount(a).compareTo(chunkCount(b));
-        return c != 0 ? c : maxSeq(a).compareTo(maxSeq(b));
-      });
+      ..sort((a, b) => minSeq(a).compareTo(minSeq(b)));
+    for (var start = 0; start < fileIds.length; start += _pullSeqWindowSize) {
+      final end = start + _pullSeqWindowSize > fileIds.length
+          ? fileIds.length
+          : start + _pullSeqWindowSize;
+      final window = fileIds.sublist(start, end)
+        ..sort((a, b) {
+          final c = chunkCount(a).compareTo(chunkCount(b));
+          return c != 0 ? c : maxSeq(a).compareTo(maxSeq(b));
+        });
+      fileIds.setRange(start, end, window);
+    }
     final totalFiles = fileIds.length;
 
     // Pre-count missing blobs across the whole batch so progress events
@@ -680,6 +719,17 @@ class StatePuller {
   /// work is done before the first files appear.
   static const int _pullFileBatchSize = 32;
 
+  /// How many files the smallest-first sort may reorder across.
+  ///
+  /// The size sort and the cursor want opposite things: the sort wants the
+  /// whole response to choose from, the cursor can only advance over a
+  /// contiguous run of applied seqs. This is the seam between them, and its
+  /// value is the trade — eight apply batches wide, so a commit still covers
+  /// real work, and small enough that a 9000-file pull banks its progress
+  /// thirty-odd times instead of once at the very end (which, when a restart
+  /// arrived first, meant never).
+  static const int _pullSeqWindowSize = _pullFileBatchSize * 8;
+
   /// Files per prefetch REQUEST inside a step. The step is fetched as several
   /// of these at once: batching alone made each request fatter and therefore
   /// slower, and with only one in flight that lost more than it saved —
@@ -733,9 +783,19 @@ class StatePuller {
   /// materialise stops at the guard that recognises content already on disk.
   /// The bytes were fetched and then never read.
   ///
-  /// Safe only because that guard exists. Skipping the prefetch without it
-  /// does not remove the download — it moves it into the apply, one file at a
-  /// time instead of a batch, which is six times the round trips.
+  /// Safe only because that guard exists — and ONLY for the files it can
+  /// actually answer for, which is why [_diskProvablyHolds] is asked here
+  /// rather than assumed. Skipping the prefetch for a file the apply cannot
+  /// skip does not remove the download; it moves it into the apply, one file
+  /// at a time instead of a batch, which is six times the round trips.
+  ///
+  /// That is not hypothetical. The startup scan used to record its signatures
+  /// without a blobRef, so the apply guard could never fire for a binary it
+  /// had skipped — while the register test below said "echo" for all 9078 of
+  /// them. The result was a finished first sync followed by a serial
+  /// re-download of the entire vault to compare every file against itself.
+  /// The register knows what this device HOLDS; only the signature knows what
+  /// is on DISK, and the two must agree before any fetch is skipped.
   ///
   /// Requiring a single local value keeps this in step with the apply side. A
   /// register already holding two versions is a real conflict, its resolver
@@ -754,7 +814,13 @@ class StatePuller {
       final allHeld = entry.value.every(
         (r) => r.blobRef == held.blobRef && r.tombstone == held.tombstone,
       );
-      if (allHeld) echoed.add(entry.key);
+      if (!allHeld) continue;
+      // A tombstone materialises to a delete and never reads bytes, so there
+      // is nothing for the disk guard to vouch for.
+      if (!held.tombstone && !_diskProvablyHolds(entry.key, held.blobRef)) {
+        continue;
+      }
+      echoed.add(entry.key);
     }
     return echoed;
   }

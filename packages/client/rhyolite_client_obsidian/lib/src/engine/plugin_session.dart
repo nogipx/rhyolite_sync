@@ -66,6 +66,37 @@ class PluginSession {
   /// the UI says paused.
   bool syncPaused = false;
 
+  /// How many engine-lifecycle boots are in flight (scheduled or running).
+  ///
+  /// A restart is a stop followed by a start, and BETWEEN them the engine
+  /// answers a probe with `stopped` — which the recovery planner treats as
+  /// unconditional grounds for a restart, ahead of every liveness test. So a
+  /// slow restart asks for another one, and the second lands on the first.
+  /// That is what a user saw as sync starting over each time she came back to
+  /// the window: a restart was still finishing, the probe returned `stopped`
+  /// in 0 ms, and the pull it had going was torn down again.
+  ///
+  /// A counter rather than a flag because restarts nest — an explicit one may
+  /// be scheduled while an automatic one runs, and a flag would be cleared by
+  /// whichever finished first.
+  int engineBootsInFlight = 0;
+
+  /// When the OLDEST of them was decided on, so the guard can be bounded —
+  /// see [shouldAttemptRecovery]. Set as the count leaves zero and cleared as
+  /// it returns, so it measures the whole run of nested boots rather than the
+  /// last one: a restart that keeps scheduling restarts is exactly the state
+  /// the bound is there to escape.
+  DateTime? engineBootStartedAt;
+
+  bool get engineBootInFlight => engineBootsInFlight > 0;
+
+  /// How long a boot has been in flight, or null if none is.
+  Duration? engineBootRunningFor(DateTime now) {
+    final since = engineBootStartedAt;
+    if (since == null || engineBootsInFlight <= 0) return null;
+    return now.difference(since);
+  }
+
   /// True while a settings-sync launch is between its stop and its start.
   ///
   /// Only the AUTOMATIC re-arm consults it. An explicit relaunch — a restart, a

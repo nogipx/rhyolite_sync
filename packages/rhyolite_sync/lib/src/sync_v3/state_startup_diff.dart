@@ -538,8 +538,40 @@ class StateStartupDiff {
         if (stat != null &&
             stat.mtimeMs == binSig.mtimeMs &&
             stat.sizeBytes == binSig.sizeBytes) {
-          shaSkipped += 1;
-          continue;
+          // One exception, and it is a migration rather than a rule.
+          //
+          // A signature written before it carried a blobRef proves only "not
+          // changed since we last looked", and the pull's own-echo guard
+          // refuses it — so every one of these files is downloaded and
+          // compared against itself on the next pull. Skipping here preserves
+          // that signature unread, for ever: this branch does not rewrite it,
+          // and nothing else will either.
+          //
+          // So let it fall through to the read ONCE. The read ends in the
+          // fast path below, which records a signature that does name its
+          // blob, and every later scan skips right here.
+          //
+          // Only for a value THIS device minted, which is the narrow case the
+          // migration is for: a push does not advance the LCA, so a first
+          // sync leaves thousands of files provable by nothing else. A value
+          // carrying a peer's node id is not ours to confirm — the disk may
+          // hold our older content against a version we never materialised
+          // (blob missing, refused, interrupted), and reading it here would
+          // present that older content as a local edit and re-upload it over
+          // the peer's. That file belongs to the pull.
+          //
+          // Compared against the store's device id rather than [nodeId]: the
+          // clock this pass writes with is `store.nextHlc`, so that is the id
+          // that actually appears in the value. The engine passes the same
+          // string for both, and this way it cannot start mattering that it
+          // does.
+          final needsBlobRef =
+              binSig.blobRef == null &&
+              current.hlc.nodeId == store.deviceIdOrNull;
+          if (!needsBlobRef) {
+            shaSkipped += 1;
+            continue;
+          }
         }
       }
 
@@ -581,11 +613,33 @@ class StateStartupDiff {
         // read and its stat is what it is — so record it. Without this the
         // signature only ever existed for text, and every binary paid a full
         // read on every scan forever.
+        //
+        // WITH the blobRef, and that half is not decoration. Every caller of
+        // this reaches it by PROVING the disk bytes hash to `current.chunks`
+        // — which is what `current.blobRef` is the manifest of — so the
+        // signature can carry the strong claim ("the file holds that blob")
+        // rather than the weak one ("the file has not moved").
+        //
+        // Written without it, this was the line that made a finished sync
+        // start over. `DiskReconciler._diskAlreadyHolds` refuses a blobRef-less
+        // signature by design, so its own-echo guard could never fire for a
+        // binary this scan skipped; the pull that hands our own push straight
+        // back then downloaded all of it, one file at a time, to compare each
+        // file against itself and discard the bytes. `StatSigStore.set`
+        // replaces the whole tuple, so this did not merely omit the blobRef —
+        // it ERASED the one an upload had just recorded, every startup.
         Future<void> rememberSig() async {
           final store = sigStore;
           if (store == null) return;
           final stat = await io.statFile(absPath);
-          if (stat != null) store.set(fileId, stat.mtimeMs, stat.sizeBytes);
+          if (stat != null) {
+            store.set(
+              fileId,
+              stat.mtimeMs,
+              stat.sizeBytes,
+              blobRef: current.blobRef,
+            );
+          }
         }
 
         // (a) Empty file.

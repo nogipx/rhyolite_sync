@@ -29,6 +29,36 @@ class BlobStorageRefused implements Exception {
       '${detail.isEmpty ? '' : ': $detail'}';
 }
 
+/// A presence probe could not get an answer for part of the batch.
+///
+/// Absence is a conclusion, and it may only be drawn from a reply. A probe
+/// that never completed — DNS down, socket dropped, the backend answering
+/// 5xx — says nothing about whether the blob is there, and the two are not
+/// interchangeable: one is a blob to heal, the other is a network to wait out.
+///
+/// The vault that forced this: a phone whose WebDAV host briefly stopped
+/// resolving. Every HEAD threw, each one was counted as "absent", and the
+/// verify pass concluded 3274 of 3274 referenced blobs were gone from the
+/// backend — warning the user about unrecoverable data loss and starting to
+/// re-upload the entire vault over mobile data. Nothing had been lost at all.
+///
+/// Raised instead of returning a short set, because a caller cannot tell a
+/// short set from a complete one.
+class BlobProbeIncomplete implements Exception {
+  const BlobProbeIncomplete(this.probed, this.unanswered);
+
+  /// How many ids the batch asked about.
+  final int probed;
+
+  /// How many of them got no usable reply.
+  final int unanswered;
+
+  @override
+  String toString() =>
+      'storage did not answer $unanswered of $probed presence probe(s) — '
+      'absence cannot be concluded, retrying later';
+}
+
 abstract interface class IBlobStorage {
   /// Pull blobs by id. Implementations are expected to skip missing ids
   /// silently — the resulting map may have fewer entries than requested.
@@ -56,6 +86,11 @@ abstract interface class IBlobStorage {
   /// silently lost) so they can be re-uploaded. The local-cache presence
   /// of a chunk must NOT be assumed to imply server presence — this is the
   /// authoritative check.
+  ///
+  /// An id missing from the result means the backend SAID it does not hold it.
+  /// Implementations that cannot get an answer for part of the batch throw
+  /// [BlobProbeIncomplete] rather than reporting those ids as absent, and
+  /// [BlobStorageRefused] when the backend refuses the probe outright.
   Future<Set<String>> exists(List<String> blobIds, {RpcContext? context});
 }
 

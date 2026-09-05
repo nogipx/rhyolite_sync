@@ -1,3 +1,23 @@
+## [3.17.2] - 2026-09-05
+
+**Moving or renaming a file costs no download on your other devices.**
+The change travels as one piece, and the content is rebuilt from the copy
+already on disk. A 27 MB attachment moved to another folder arrives in seconds
+and transfers nothing.
+
+**The status dot and the sync panel always show the same thing.**
+One state and one palette drive both, so pausing, losing the connection and
+repairing storage read the same wherever you look at them.
+
+### Bug Fixes
+
+- moving or renaming a file no longer re-downloads it elsewhere (core)
+- the status dot and the panel agree, colours included (obsidian)
+- the recovery notice says what recovery actually does (obsidian)
+- storage checks tell an unreachable backend from an empty one (core)
+- background storage checks wait for the network to come back (core)
+- the sync log says where transferred content came from (core)
+
 ## [3.17.1] - 2026-09-04
 
 **A sync that finished stays finished.**

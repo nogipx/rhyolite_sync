@@ -118,7 +118,6 @@ class ChunkedBlobIO {
     Set<String> knownChunks, {
     RpcContext? context,
     void Function(int sent, int total)? onProgress,
-
   }) async {
     final token = context?.cancellationToken;
     token?.throwIfCancelled();
@@ -559,6 +558,42 @@ class ChunkedBlobIO {
   Future<Map<String, Uint8List>> recompute(Uint8List bytes) async {
     final built = await _build(bytes);
     return {...built.chunkBytes, built.manifestHash: built.manifestPlain};
+  }
+
+  /// Stages every blob [bytes] produces, but only if they really produce
+  /// [manifestHash]. Returns whether they did.
+  ///
+  /// The download-free half of a fetch. A file that is being moved, copied, or
+  /// pulled back after a local delete arrives as a manifest this device has no
+  /// entry for — while its bytes sit on disk under another name. Chunking is
+  /// deterministic and every id is content-addressed, so re-deriving them costs
+  /// a read and a hash and settles the question by construction: the ids either
+  /// come out identical, or these are not the bytes and nothing is staged.
+  ///
+  /// All-or-nothing on purpose. Staging a subset would leave the assemble
+  /// fetching the remainder one blob at a time, which is the shape of round
+  /// trips the batched prefetch exists to avoid.
+  Future<bool> seedFrom(Uint8List bytes, String manifestHash) async {
+    // The same brake the network warm-up uses. [BlobStaging.write] accepts
+    // whatever it is given — the budget is advisory and enforced by whoever
+    // is about to add to it — so without this a large file rebuilt locally
+    // would be held in memory past a ceiling that exists precisely to keep a
+    // pull's transit area bounded. Refusing here sends it down the fetch path,
+    // which has its own pressure handling.
+    if (staging?.isFull ?? false) return false;
+    final Map<String, Uint8List> produced;
+    try {
+      produced = await recompute(bytes);
+    } catch (_) {
+      // Chunking a file that is being written under us can fail; that is a
+      // reason to fetch it, not to fail the pull.
+      return false;
+    }
+    if (!produced.containsKey(manifestHash)) return false;
+    for (final entry in produced.entries) {
+      await _writeCached(entry.value, entry.key);
+    }
+    return true;
   }
 
   /// Fetch manifest by hash, fetch any chunks not in the local cache, and

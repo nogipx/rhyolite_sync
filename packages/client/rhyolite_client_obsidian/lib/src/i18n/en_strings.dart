@@ -1314,14 +1314,15 @@ class EnStrings extends AppStrings {
   String get resetDatabase => 'Reset database';
   @override
   String get localStateLostNotice =>
-      'Rhyolite: the local sync database was lost, so the vault is being '
-      'restored from the server — every file is downloaded again. If a file '
-      'you deleted on this device comes back, delete it once more.';
+      'Rhyolite: the local sync database was lost. Sync state is being rebuilt '
+      'from the server; files already on disk are matched by content and not '
+      'downloaded again. If a file you deleted on this device comes back, '
+      'delete it once more.';
   @override
   String get noDurableStorageNotice =>
       'Rhyolite: this device gave the plugin no durable storage, so sync '
-      'state is kept in memory and lost when Obsidian closes. The vault will '
-      'be downloaded again on every launch.';
+      'state is kept in memory and lost when Obsidian closes. It is rebuilt '
+      'from the server on every launch.';
 
   // ── Status bar / floating pill ──
   @override

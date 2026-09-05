@@ -659,9 +659,9 @@ class StateSyncEngine implements ISyncEngine {
     // Two seconds is long enough for a call to unwind and short enough that a
     // wedged one is a delay rather than a hang.
     if (_ownTasks.isNotEmpty) {
-      await Future.wait(_ownTasks.toList())
-          .timeout(const Duration(seconds: 2))
-          .catchError((_) => <void>[]);
+      await Future.wait(
+        _ownTasks.toList(),
+      ).timeout(const Duration(seconds: 2)).catchError((_) => <void>[]);
     }
     _emit(SyncStopped());
   }
@@ -1063,17 +1063,32 @@ class StateSyncEngine implements ISyncEngine {
   Future<void> _push({RpcContext? context}) async {
     final pusher = _pusher;
     if (pusher == null) return;
-    // In a finally, because a push that FAILS is exactly when the answer
-    // changes and matters: the files stay unsent, and an indicator that only
-    // updates on success would keep showing the state before the attempt.
-    try {
-      await pusher.push(context: context);
-    } finally {
-      // The push is what drains the store's unsent set, and that set is half
-      // of what "are there unsent changes" means. Without this the indicator
-      // only ever heard about the half that file events fill.
-      _emitPendingIfChanged();
-    }
+    // Inside the busy scope, like the pull and the startup pipeline.
+    //
+    // It was the one path that did work without saying so, and the surfaces
+    // paid for it: with nothing stating busy, an interactive push left the
+    // status at "up to date" and its phase unshowable, so the whole thing was
+    // invisible. Both of them had grown a three-second timer to cover the gap
+    // by guessing — a debounce in the panel, a revert on the dot — which is a
+    // guess standing in for a fact the engine is supposed to state. The
+    // invariant is that the engine says when it is working, and fails toward
+    // stuck-busy rather than stuck-idle.
+    //
+    // Nesting is what the depth counter is for: a push issued from inside a
+    // pull neither re-emits nor releases early.
+    return _whileBusy(() async {
+      // In a finally, because a push that FAILS is exactly when the answer
+      // changes and matters: the files stay unsent, and an indicator that only
+      // updates on success would keep showing the state before the attempt.
+      try {
+        await pusher.push(context: context);
+      } finally {
+        // The push is what drains the store's unsent set, and that set is half
+        // of what "are there unsent changes" means. Without this the indicator
+        // only ever heard about the half that file events fill.
+        _emitPendingIfChanged();
+      }
+    });
   }
 
   /// True while a push is running, so the startup diff's periodic hook cannot
@@ -1253,7 +1268,8 @@ class StateSyncEngine implements ISyncEngine {
         'Local sync database is EMPTY but host remembers deviceId '
         '$hostDeviceId for this vault — the database was lost (evicted '
         'browser storage / failed open / manual reset). Restoring from the '
-        'server: pulling from cursor 0, every blob will be re-downloaded.',
+        'server: pulling from cursor 0. Content already on disk is matched '
+        'by hash and not downloaded again.',
       );
       _emit(SyncLocalStateLost(deviceId: hostDeviceId));
     }
@@ -1452,8 +1468,7 @@ class StateSyncEngine implements ISyncEngine {
         _textDebounce.forget(to);
         _reconciler?.forgetStat(from);
         _reconciler?.forgetStat(to);
-        _scheduleReconcile(from);
-        _scheduleReconcile(to);
+        _scheduleRelocation(from, to);
     }
   }
 
@@ -1469,7 +1484,45 @@ class StateSyncEngine implements ISyncEngine {
         key: fileId,
         group: _schedulerGroup,
         priority: _pInteractive,
-        run: (token) => _runReconcilePush(relPath, fileId, token),
+        run: (token) =>
+            _runReconcilePush([(path: relPath, fileId: fileId)], token),
+      ),
+    );
+  }
+
+  /// A relocation's two halves, reconciled and pushed as ONE batch.
+  ///
+  /// Scheduled separately from [_scheduleReconcile] because they are not two
+  /// independent edits that happen to be adjacent. Sent apart, the receiving
+  /// device is woken twice and pulls twice, and the tombstone's pull deletes
+  /// the only local copy of the content before the pull carrying the create
+  /// arrives — so it downloads a file it was holding every byte of. Observed
+  /// as 27 MB and 25 seconds for renaming one book.
+  ///
+  /// The gap is not incidental either. The tombstone is ready the moment the
+  /// file is gone; the create has to chunk the content first, which on a phone
+  /// is seconds for a large file. Whoever sends them separately sends them
+  /// seconds apart, every time.
+  ///
+  /// New path first: it is the one that carries content, and if anything goes
+  /// wrong between them a create that arrived without its tombstone is a
+  /// duplicate, where a tombstone that arrived without its create is a file
+  /// missing from every other device.
+  Future<void> _scheduleRelocation(String from, String to) {
+    if (!_running) return Future<void>.value();
+    final toId = _deterministicFileId(to);
+    final fromId = _deterministicFileId(from);
+    return _track(
+      _scheduler.schedule(
+        // Keyed on the destination: that is the path a later edit would
+        // supersede this with, and the source is on its way out.
+        key: toId,
+        group: _schedulerGroup,
+        priority: _pInteractive,
+        run: (token) => _runReconcilePush([
+          (path: to, fileId: toId),
+          (path: from, fileId: fromId),
+        ], token),
       ),
     );
   }
@@ -1480,13 +1533,15 @@ class StateSyncEngine implements ISyncEngine {
   /// "wire send" and "local persist" leaves the dirty bit set — the next
   /// reconcile picks the work back up.
   Future<void> _runReconcilePush(
-    String relPath,
-    String fileId,
+    List<({String path, String fileId})> files,
     TaskCancelToken token,
   ) async {
     if (!_running) return;
     final reconciler = _reconciler;
     if (reconciler == null) return;
+    // Names the work in the log lines below. A relocation reports under its
+    // destination, which is the path a reader would look for.
+    final relPath = files.first.path;
     final rpcToken = RpcCancellationToken();
     unawaited(
       token.onCancel.then((_) {
@@ -1495,17 +1550,24 @@ class StateSyncEngine implements ISyncEngine {
     );
     final context = RpcContext.withCancellation(rpcToken);
     try {
-      final changed = await reconciler.reconcileWithDisk(
-        relPath,
-        context: context,
-      );
-      if (changed) {
-        _emit(SyncFileModified(relPath));
-        _markPending(fileId);
-        await _push(context: context);
-      } else {
-        _clearPending([fileId]);
+      // Every path first, ONE push after. For a single file that is what it
+      // always did; for a relocation it is the difference between the two
+      // halves reaching the server as one batch and as two.
+      var any = false;
+      for (final f in files) {
+        final changed = await reconciler.reconcileWithDisk(
+          f.path,
+          context: context,
+        );
+        if (changed) {
+          _emit(SyncFileModified(f.path));
+          _markPending(f.fileId);
+          any = true;
+        } else {
+          _clearPending([f.fileId]);
+        }
       }
+      if (any) await _push(context: context);
     } on RpcCancelledException catch (_) {
       _log.info('Reconcile/push superseded', data: {'path': LogPath(relPath)});
     } on TimeoutException catch (e) {
@@ -1528,7 +1590,9 @@ class StateSyncEngine implements ISyncEngine {
       );
       // The file is unsent and stays that way, so it must be visible as unsent
       // rather than quietly forgotten until it happens to change again.
-      _markPending(fileId);
+      for (final f in files) {
+        _markPending(f.fileId);
+      }
       _emit(SyncStorageRefused('$e'));
     } catch (e) {
       _log.warning(
@@ -1537,7 +1601,9 @@ class StateSyncEngine implements ISyncEngine {
       );
       // Whatever went wrong, this file did not reach the server. Saying so is
       // the difference between "unsent changes" and a green dot.
-      _markPending(fileId);
+      for (final f in files) {
+        _markPending(f.fileId);
+      }
     }
   }
 
@@ -1583,7 +1649,19 @@ class StateSyncEngine implements ISyncEngine {
     Future<void> Function(RpcContext) run, {
     Duration retryDelay = const Duration(seconds: 5),
     Duration delay = Duration.zero,
-  }) => _scheduleBackgroundAt(key, run, retryDelay: retryDelay, delay: delay);
+    bool needsNetwork = false,
+  }) => _scheduleBackgroundAt(
+    key,
+    run,
+    retryDelay: retryDelay,
+    delay: delay,
+    needsNetwork: needsNetwork,
+  );
+
+  /// How long a task waits after the blob backend declined to answer it.
+  /// Housekeeping has nowhere to be, and the thing it is waiting for is a
+  /// network coming back.
+  static const Duration _unreachableBackendRetry = Duration(minutes: 2);
 
   /// [_scheduleBackground] with the tier spelled out.
   ///
@@ -1593,12 +1671,18 @@ class StateSyncEngine implements ISyncEngine {
   /// housekeeping any more, and leaving it in the tier that only runs when
   /// nothing else wants the lane means it does not run at all on the devices
   /// that need it most.
+  /// [needsNetwork] marks a task whose failure is only worth reporting when
+  /// the transport was up. Off by default: the local sweeps are the majority
+  /// here, and a bug in one of those has to be heard whatever the network is
+  /// doing — postponing everything while offline would be a way of never
+  /// reporting a broken housekeeping task at all.
   void _scheduleBackgroundAt(
     Object key,
     Future<void> Function(RpcContext) run, {
     Duration retryDelay = const Duration(seconds: 5),
     Duration delay = Duration.zero,
     int priority = _pMaintenance,
+    bool needsNetwork = false,
   }) {
     if (!_running) return;
     late final Future<void> task;
@@ -1632,6 +1716,7 @@ class StateSyncEngine implements ISyncEngine {
               retryDelay: retryDelay,
               delay: retryDelay,
               priority: priority,
+              needsNetwork: needsNetwork,
             );
           }
         } on BlobStorageRefused catch (e) {
@@ -1640,8 +1725,48 @@ class StateSyncEngine implements ISyncEngine {
           // to be noticed. Report it in the same voice as everywhere else.
           _log.error('background task "$key": $e');
           _emit(SyncStorageRefused('$e'));
+        } on BlobProbeIncomplete catch (e) {
+          // Not a failure — the backend was unreachable, which on a phone is
+          // most of the time. Same treatment as a preemption: try again later,
+          // and say so at a level that does not put an offline device in the
+          // problem report.
+          //
+          // On its own delay, not [retryDelay]: that one is sized for work
+          // that lost a race and can go again in seconds, and a device with no
+          // network would spend the rest of the session re-firing a batch of
+          // probes it already knows will not be answered.
+          _log.info('background task "$key" postponed: $e');
+          if (_running) {
+            _scheduleBackgroundAt(
+              key,
+              run,
+              retryDelay: retryDelay,
+              delay: _unreachableBackendRetry,
+              priority: priority,
+              needsNetwork: needsNetwork,
+            );
+          }
         } catch (e) {
-          _log.warning('background task "$key" failed: $e');
+          // Ask the transport rather than the exception. Work that needed the
+          // network and failed while the socket was down failed for a reason
+          // nobody needs telling about — and rpc_dart reports that case as a
+          // bare StateError whose only distinguishing mark is its text, so the
+          // connection's own snapshot is the honest signal.
+          if (needsNetwork && _conn?.currentState != SyncConnState.online) {
+            _log.info('background task "$key" postponed (offline): $e');
+            if (_running) {
+              _scheduleBackgroundAt(
+                key,
+                run,
+                retryDelay: retryDelay,
+                delay: _unreachableBackendRetry,
+                priority: priority,
+                needsNetwork: needsNetwork,
+              );
+            }
+          } else {
+            _log.warning('background task "$key" failed: $e');
+          }
         }
       },
     );
@@ -1932,7 +2057,11 @@ class StateSyncEngine implements ISyncEngine {
   /// uploads; it is cooperative (checks the context token between batches).
   void _scheduleHousekeeping() {
     _scheduleLocalBlobGc();
-    _scheduleBackground('verify-blobs', (ctx) => runVerifyBlobs(context: ctx));
+    _scheduleBackground(
+      'verify-blobs',
+      (ctx) => runVerifyBlobs(context: ctx),
+      needsNetwork: true,
+    );
     // Reclaim orphaned Fugue trees + stat signatures — rows for a fileId with
     // no LIVE (non-tombstone) FileState. Cleans the pre-fix backlog (remote
     // deletes that didn't prune siblings, empty-tree tombstones) that the
@@ -2072,7 +2201,6 @@ class StateSyncEngine implements ISyncEngine {
     if (_store?.hasConflict(state.fileId) ?? true) return false;
     return true;
   }
-
 
   /// Reproduces blobs for [relPath] from the copy the vault already holds, for
   /// a caller that has lost them (a chunk the server dropped, a cache we
@@ -3181,18 +3309,106 @@ class StateSyncEngine implements ISyncEngine {
   /// trips: per file it was one request for the manifest and another for its
   /// chunks, four in flight, which on a ~250 ms link made prefetch five times
   /// the apply it was feeding.
-  Future<void> _prefetchFiles(
+  Future<({int fromServer, int rebuilt})> _prefetchFiles(
     List<String> blobRefs, {
     RpcContext? context,
     void Function(String manifestHash, int sent, int total)? onFileProgress,
   }) async {
     final io = _newChunkedIO();
-    if (io == null) return;
+    if (io == null) return (fromServer: 0, rebuilt: 0);
+    final wanted = await _seedFromLocalCopies(io, blobRefs, context: context);
+    final rebuilt = blobRefs.length - wanted.length;
+    if (wanted.isEmpty) return (fromServer: 0, rebuilt: rebuilt);
     await io.prefetchAll(
-      blobRefs,
+      wanted,
       context: context,
       onFileProgress: onFileProgress,
     );
+    return (fromServer: wanted.length, rebuilt: rebuilt);
+  }
+
+  /// Stages whichever of [blobRefs] this device can rebuild from a file it
+  /// already has, and returns the ones still to fetch.
+  ///
+  /// A move is a tombstone for the old path plus a create for the new one, and
+  /// the new path is a new fileId — so both of the apply's skip guards miss,
+  /// because both are keyed by fileId and a fileId is derived from the path.
+  /// The receiving device then downloaded a file it was holding every byte of.
+  /// Copies and a delete-then-restore land the same way.
+  ///
+  /// Done HERE and not in the apply, for two reasons. By apply time the fetch
+  /// has already happened, so nothing is saved. And by apply time the source
+  /// may be gone: the tombstone for the old path usually sorts ahead of the
+  /// create (the pull orders a window by chunk count, and a tombstone carries
+  /// none), so the file is deleted before the record that wanted it is
+  /// applied. The prefetch runs before its batch's applies, which is the last
+  /// moment the old path is still on disk.
+  ///
+  /// Sources are proposed, never trusted: [ChunkedBlobIO.seedFrom] re-derives
+  /// the ids and stages nothing unless they match, so a stale candidate costs
+  /// a read and is otherwise inert.
+  Future<List<String>> _seedFromLocalCopies(
+    ChunkedBlobIO io,
+    List<String> blobRefs, {
+    RpcContext? context,
+  }) async {
+    final store = _store;
+    if (store == null || blobRefs.isEmpty) return blobRefs;
+    // One pass over the register for the whole group. Built per call rather
+    // than kept: it is only valid until the batch's applies start moving files
+    // around, which is exactly the window it is used in.
+    final holderOf = <String, String>{};
+    for (final state in store.allValuesFlat) {
+      if (state.tombstone || state.path.isEmpty || state.blobRef.isEmpty) {
+        continue;
+      }
+      holderOf.putIfAbsent(state.blobRef, () => state.path);
+    }
+    final remaining = <String>[];
+    for (final ref in blobRefs) {
+      context?.cancellationToken?.throwIfCancelled();
+      final path = holderOf[ref];
+      if (path == null) {
+        remaining.add(ref);
+        continue;
+      }
+      var ok = false;
+      for (final candidate in await _localCandidateBytes(path)) {
+        if (await io.seedFrom(candidate, ref)) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) remaining.add(ref);
+    }
+    return remaining;
+  }
+
+  /// Byte sequences the file at [relPath] might produce, best first.
+  ///
+  /// Text is stored as its Fugue tree, not as the file, and whether the
+  /// frontmatter tail was appended is not recorded anywhere we can consult —
+  /// the uploader decided it from the document it held. Both forms are cheap
+  /// and only the matching one can contribute an id, so offer both rather than
+  /// guess. Same reasoning as [_regenerateBlobs], which recovers for upload
+  /// where this recovers for download.
+  Future<List<Uint8List>> _localCandidateBytes(String relPath) async {
+    if (_detector.isText(relPath)) {
+      final fileId = _deterministicFileId(relPath);
+      final tree = await _fugueStore?.get(fileId);
+      if (tree == null) return const [];
+      final body = FugueStore.encodeBlob(tree);
+      final fm = await _fmStore?.get(fileId);
+      return [body, if (fm != null) appendFmTail(body, fm)];
+    }
+    final absPath = '$vaultPath/$relPath';
+    if (!await io.fileExists(absPath)) return const [];
+    try {
+      return [await io.readFile(absPath)];
+    } catch (_) {
+      // Unreadable is a reason to fetch, not to fail.
+      return const [];
+    }
   }
 
   /// A record's path, for naming a transfer. Costs a decrypt — the puller asks
@@ -3240,6 +3456,7 @@ class StateSyncEngine implements ISyncEngine {
       (ctx) => runVerifyBlobs(context: ctx),
       priority: _pBackground,
       delay: const Duration(seconds: 20),
+      needsNetwork: true,
     );
   }
 

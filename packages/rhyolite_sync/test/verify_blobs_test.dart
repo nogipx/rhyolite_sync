@@ -22,12 +22,20 @@ class _MemRemote implements IBlobStorage {
   /// Number of exists() calls made — asserts batching.
   int existsCalls = 0;
 
+  /// Ids handed to upload(), in order — including ones [dropOnUpload] eats.
+  final List<String> uploadedIds = [];
+
+  /// When set, exists() cannot answer and says so, the way a real backend
+  /// behind a dead network does.
+  BlobProbeIncomplete? existsUnanswerable;
+
   @override
   Future<void> upload(
     List<(Uint8List, String)> blobs, {
     covariant Object? context,
   }) async {
     for (final (bytes, id) in blobs) {
+      uploadedIds.add(id);
       if (dropOnUpload.contains(id)) continue;
       store[id] = bytes;
     }
@@ -58,6 +66,8 @@ class _MemRemote implements IBlobStorage {
     covariant Object? context,
   }) async {
     existsCalls++;
+    final unanswerable = existsUnanswerable;
+    if (unanswerable != null) throw unanswerable;
     return {
       for (final id in blobIds)
         if (store.containsKey(id) && !hideFromExists.contains(id)) id,
@@ -380,6 +390,86 @@ void main() {
       await run();
       await run();
       expect(remote.existsCalls, 2);
+    });
+  });
+
+  group('a backend that cannot answer heals nothing', () {
+    /// A vault whose blobs all live on the server and nowhere else — the
+    /// state a phone is in for most of what it tracks.
+    Future<(FileStateStore, _MemRemote, LocalBlobStore)>
+    unhealableVault() async {
+      final store = await _newStore();
+      final remote = _MemRemote();
+      final local = _newLocalStore();
+      for (var i = 0; i < 10; i++) {
+        remote.store['c$i'] = Uint8List.fromList([i]);
+      }
+      store.applyLocal(
+        FileState(
+          fileId: 'f1',
+          path: 'a.md',
+          blobRef: 'c0',
+          sizeBytes: 4,
+          hlc: store.nextHlc(),
+          chunks: [for (var i = 1; i < 10; i++) 'c$i'],
+        ),
+      );
+      return (store, remote, local);
+    }
+
+    test(
+      'an unanswered probe ends the pass instead of declaring loss',
+      () async {
+        // The reported incident, at the level that acted on it: offline, every
+        // probe threw, and the pass read that as the whole vault being gone.
+        final (store, remote, local) = await unhealableVault();
+        remote.existsUnanswerable = const BlobProbeIncomplete(10, 10);
+        final carried = <String>{};
+
+        await expectLater(
+          VerifyBlobsUseCase(
+            store: store,
+            blobStorage: remote,
+            localBlobStore: local,
+            vaultId: _vaultId,
+            confirmedPresent: carried,
+          )(),
+          throwsA(isA<BlobProbeIncomplete>()),
+        );
+
+        expect(
+          remote.uploadedIds,
+          isEmpty,
+          reason: 'a vault is not re-uploaded because the network was down',
+        );
+        expect(
+          carried,
+          isEmpty,
+          reason: 'an unanswered probe confirms nothing either way',
+        );
+      },
+    );
+
+    test('the next pass, once answerable, reaches a real verdict', () async {
+      // The postponement has to be recoverable, or a phone that is offline
+      // once never verifies again.
+      final (store, remote, local) = await unhealableVault();
+      final carried = <String>{};
+      VerifyBlobsUseCase pass() => VerifyBlobsUseCase(
+        store: store,
+        blobStorage: remote,
+        localBlobStore: local,
+        vaultId: _vaultId,
+        confirmedPresent: carried,
+      );
+
+      remote.existsUnanswerable = const BlobProbeIncomplete(10, 10);
+      await expectLater(pass()(), throwsA(isA<BlobProbeIncomplete>()));
+
+      remote.existsUnanswerable = null;
+      final result = await pass()();
+      expect(result.isClean, isTrue);
+      expect(result.referenced, 10);
     });
   });
 

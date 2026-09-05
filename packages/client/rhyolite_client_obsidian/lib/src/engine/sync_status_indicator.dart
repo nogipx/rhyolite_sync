@@ -1,5 +1,4 @@
 // ignore_for_file: deprecated_member_use
-import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_util' as jsu;
 
@@ -7,10 +6,10 @@ import 'package:obsidian_dart/obsidian_dart.dart';
 import 'package:rhyolite_sync/rhyolite_sync.dart';
 
 import 'sync_activity.dart';
+import 'sync_status.dart';
 import 'package:rpc_dart/rpc_dart.dart';
 
 import '../i18n/i18n.dart';
-import 'server_rejections.dart';
 import 'session_contracts.dart';
 
 /// Unified sync state indicator — a coloured dot followed by a short
@@ -31,20 +30,30 @@ import 'session_contracts.dart';
 class SyncStatusIndicator implements SessionIndicator {
   SyncStatusIndicator({
     required PluginHandle plugin,
-    required ISyncEngine engine,
     LogScope? logger,
     void Function()? onTap,
     void Function()? onReconnect,
     bool Function()? settingsBusy,
+    bool Function()? paused,
+    bool Function()? blocked,
+    SyncStatusModel? status,
   }) : _plugin = plugin,
-       _engine = engine,
        _log = logger,
        _onTap = onTap,
        _onReconnect = onReconnect,
-       _activity = SyncActivity(settingsBusy: settingsBusy);
+       // Accepted rather than always built, so a host that also shows the
+       // panel can hand both surfaces the SAME object. Two models folding the
+       // same stream would agree today and be free to drift tomorrow, which is
+       // the shape of the bug this replaced.
+       _status =
+           status ??
+           SyncStatusModel(
+             settingsBusy: settingsBusy,
+             paused: paused,
+             blocked: blocked,
+           );
 
   final PluginHandle _plugin;
-  final ISyncEngine _engine;
   final LogScope? _log;
 
   /// Click action. Defaults to opening settings; the plugin overrides it to
@@ -57,14 +66,11 @@ class SyncStatusIndicator implements SessionIndicator {
   /// online/visibility event.
   final void Function()? _onReconnect;
 
-  /// The shared answer to "is anything working" — see [SyncActivity]. Owned
-  /// rather than reimplemented, because the panel asks the same question and
-  /// the two used to answer it differently.
-  final SyncActivity _activity;
+  /// The shared answer to "is anything working" — see [SyncActivity]. Reached
+  /// through the status model so there is exactly one of it.
+  SyncActivity get _activity => _status.activity;
 
   static const _pluginId = 'rhyolite-sync';
-  static const _revertDelay = Duration(seconds: 3);
-  static const _errorRevertDelay = Duration(seconds: 5);
 
   /// Outer container: status bar item element on desktop, floating
   /// `<div>` on mobile.
@@ -80,28 +86,19 @@ class SyncStatusIndicator implements SessionIndicator {
   /// dispose() to remove it cleanly.
   JSObject? _floatingParent;
 
-  StreamSubscription<SyncEngineEvent>? _sub;
-  Timer? _revertTimer;
-  ({int completed, int total})? _progress;
-
-  /// True while the engine has local edits it hasn't pushed yet.
-  /// Drives a distinct dot colour at idle so the user knows their
-  /// work hasn't reached the server. Sticky between SyncPending events.
-  bool _hasPending = false;
 
   /// The engine is inside work the user must not interrupt. Held between the
   /// phase-specific events rather than inferred from their spacing — see
   /// [SyncBusy]. Guards the idle paint so green never means "done" while a
   /// download is still running.
 
-  /// Last state passed to [_set]. Needed so SyncPending can repaint
-  /// the dot without forcing a logical state transition.
-  _State _currentState = _State.off;
+  /// The status, shared with the panel. Not a second reading of the same
+  /// events — the same object's answer, so the two cannot disagree.
+  final SyncStatusModel _status;
 
   /// True while `.obsidian` settings sync is in flight. Surfaced as a subtle
   /// overlay only when notes sync is otherwise idle — notes activity, errors
   /// and auth/sub states always dominate the single dot.
-
 
   void init() {
     final mobile = _detectMobile();
@@ -111,14 +108,22 @@ class SyncStatusIndicator implements SessionIndicator {
     } else {
       _initStatusBar();
     }
-    _set(_State.off);
-    _sub = _engine.events.listen(_onEvent);
+    _repaint();
+    // Repaints when the SHARED model says the answer moved. Not a second
+    // subscription to the event stream: the model folds it once, and a surface
+    // that folded it again would be told nothing had changed and would sit
+    // there stale — which is precisely how the dot stopped updating at all.
+    _removeStatusListener = _status.addListener(_repaint);
   }
+
+  void Function()? _removeStatusListener;
 
   @override
   void dispose() {
-    _sub?.cancel();
-    _revertTimer?.cancel();
+    // Only our own listener. The model belongs to whoever built it — the
+    // panel, in the plugin — and outlives this surface.
+    _removeStatusListener?.call();
+    _removeStatusListener = null;
     final parent = _floatingParent;
     final el = _container;
     if (parent != null && el != null) {
@@ -204,13 +209,14 @@ class SyncStatusIndicator implements SessionIndicator {
     final handler = jsu.allowInterop((JSAny? _) {
       // In a stuck state, the tap becomes "reconnect now" — the dot is the
       // surface the user instinctively reaches for when sync looks dead.
+      final kind = _status.kind;
       final stuck =
-          _currentState == _State.offline ||
-          _currentState == _State.error ||
-          _currentState == _State.authExpired;
+          kind == SyncStatusKind.offline ||
+          kind == SyncStatusKind.error ||
+          kind == SyncStatusKind.authExpired;
       final onReconnect = _onReconnect;
       if (stuck && onReconnect != null) {
-        _log?.info('sync indicator: tap in $_currentState — reconnecting');
+        _log?.info('sync indicator: tap in $kind — reconnecting');
         onReconnect();
         return;
       }
@@ -232,104 +238,6 @@ class SyncStatusIndicator implements SessionIndicator {
   // Events
   // ---------------------------------------------------------------------------
 
-  void _onEvent(SyncEngineEvent event) {
-    // Folded first: the shared rule owns busy, transfers and teardown, and the
-    // switch below only decides how to PAINT what it now says.
-    if (_activity.observe(event) &&
-        (_currentState == _State.idle || _currentState == _State.pulling)) {
-      _set(_restingState);
-    }
-    switch (event) {
-      case SyncStarted():
-        _set(_State.connecting);
-      case SyncStopped():
-        _cancelRevert();
-        _set(_State.off);
-      case SyncConnecting():
-        _set(_State.connecting);
-      case SyncBusy():
-        _cancelRevert();
-        // Generic "working": the specific phase paints over this as soon as it
-        // reports, and this is what holds the indicator between reports.
-        _set(_restingState);
-      case SyncConnected():
-        _cancelRevert();
-        // Connected now fires when the socket comes up, which is BEFORE the
-        // startup pull — so it must not paint green over work still to come.
-        // Through the resting state, not straight to idle: settings work is
-        // work too, and this was one of the two places that painted "up to
-        // date" straight over it.
-        if (!_activity.engineBusy) _set(_restingState);
-      case SyncDisconnected():
-        _cancelRevert();
-        // Distinct from `off` (intentionally stopped): the engine was running
-        // and lost the backend. Orange so green never implies "ready" while
-        // we actually can't reach the server.
-        _set(_State.offline);
-      case SyncPushing():
-        _cancelRevert();
-        _set(_State.pushing);
-      case SyncPulling():
-        _cancelRevert();
-        _set(_State.pulling);
-      case SyncPending(:final hasPending):
-        if (hasPending == _hasPending) break;
-        _hasPending = hasPending;
-        // Repaint with the same logical state — only the idle colour
-        // changes (amber vs green), so we don't want a state transition.
-        _set(_currentState);
-      case SyncFilePushed():
-        _setWithRevert(_State.pushing, _revertDelay);
-      case SyncFilePulled():
-        _setWithRevert(_State.pulling, _revertDelay);
-      case SyncStartupBlobUploadProgress(:final completed, :final total):
-        _cancelRevert();
-        _progress = (completed: completed, total: total);
-        _set(_State.uploading);
-      case SyncStartupBlobUploadDone():
-        _progress = null;
-        _set(_restingState);
-      case SyncBlobDownloadProgress(:final completed, :final total):
-        _cancelRevert();
-        _progress = (completed: completed, total: total);
-        _set(_State.downloading);
-      case SyncBlobDownloadDone():
-        _progress = null;
-        // One batch's blobs are in; the pull that asked for them may not be.
-        _set(_restingState);
-      case SyncRepairStarted(:final totalFiles):
-        _cancelRevert();
-        _progress = (completed: 0, total: totalFiles);
-        _set(_State.repairing);
-      case SyncRepairProgress(:final completed, :final total):
-        _cancelRevert();
-        _progress = (completed: completed, total: total);
-        _set(_State.repairing);
-      case SyncRepairDone():
-        _progress = null;
-        _set(_restingState);
-      case SyncError():
-        _setWithRevert(_State.error, _errorRevertDelay);
-      case SessionExpired():
-        _cancelRevert();
-        _set(_State.authExpired);
-      case SubscriptionRequired():
-        _cancelRevert();
-        _set(_State.subExpired);
-      // Any other policy/auth rejection (managed storage unavailable,
-      // quota exceeded, permission denied, etc.) presents as "sync paused
-      // due to subscription/policy state" — same visual as SubscriptionRequired
-      // until we add per-reason copy. Engine has already stopped, so the
-      // dot stays orange until the user fixes the underlying state.
-      case SyncServerRejected(:final code)
-          when code.startsWith('auth.') || code.startsWith('app_policy.'):
-        _cancelRevert();
-        _set(_State.subExpired);
-      default:
-        break;
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Rendering
   // ---------------------------------------------------------------------------
@@ -338,24 +246,21 @@ class SyncStatusIndicator implements SessionIndicator {
   /// Repaints with the same logical notes state — the overlay only changes the
   @override
   void setSettingsActivity(bool active) {
-    // The VALUE comes from [SyncActivity], which reads it live; this is only
-    // the nudge to repaint at the moment it changes.
-    // Recomputed, not repainted. Repainting the CURRENT state was the other
-    // half of the "up to date" report: settings could start working while the
-    // dot sat at idle, and re-drawing idle left it at idle. A state that is
-    // merely resting has to be asked again; a loud one — progress, an error,
-    // auth — is left alone.
-    _set(
-      _currentState == _State.idle || _currentState == _State.pulling
-          ? _restingState
-          : _currentState,
-    );
+    // The VALUE comes from [SyncActivity] through the model, which reads it
+    // live; this is only the nudge to repaint at the moment it changes.
+    //
+    // Everyone, not just this surface. Settings work changes the SHARED
+    // answer, and a nudge that repainted only whoever was told is the second
+    // way these two came apart: the host tells one of them, and the other sits
+    // on the previous answer until an unrelated event happens along.
+    _status.notifyListeners();
   }
 
   static const _settingsColor = 'rgb(48, 128, 240)';
 
-  void _set(_State state) {
-    _currentState = state;
+  void _repaint() {
+    final kind = _status.kind;
+    final phase = _status.phase;
     final el = _container;
     final doc = _document;
     if (el == null || doc == null) return;
@@ -366,15 +271,15 @@ class SyncStatusIndicator implements SessionIndicator {
     final overlay =
         _activity.settingsBusy &&
         !_activity.engineBusy &&
-        state == _State.pulling;
+        kind == SyncStatusKind.syncing;
     final color = overlay
         ? _settingsColor
-        : _colorFor(state, hasPending: _hasPending);
-    final label = overlay ? S.overlaySettings : _labelFor(state);
+        : _colorFor(kind, phase, hasPending: _status.hasPending);
+    final label = overlay ? S.overlaySettings : _labelFor(phase);
     final glow = overlay
         ? '0 0 0 1px rgba(0,0,0,0.18), 0 0 6px '
               '${_settingsColor.replaceFirst('rgb(', 'rgba(').replaceFirst(')', ',0.7)')}'
-        : _glowFor(state, color);
+        : _glowFor(kind, color);
 
     // DOM-API construction — required by Obsidian community plugin
     // review (no innerHTML / outerHTML / insertAdjacentHTML). The
@@ -410,41 +315,18 @@ class SyncStatusIndicator implements SessionIndicator {
     jsu.setProperty(
       el,
       'aria-label',
-      overlay ? S.tipSyncingSettings : _tooltipFor(state),
+      overlay ? S.tipSyncingSettings : _tooltipFor(kind, phase),
     );
   }
 
-  void _setWithRevert(_State state, Duration delay) {
-    _cancelRevert();
-    _set(state);
-    _revertTimer = Timer(delay, () => _set(_restingState));
-  }
-
-  /// Where a per-file flash falls back to when it expires.
+  /// No revert timers any more, and none needed.
   ///
-  /// Not unconditionally idle: these reverts fire between the events of a run
-  /// that is still going, and a green dot next to a panel reading
-  /// "Syncing 242/255" is the reassuring kind of wrong — the kind that gets
-  /// someone to close the app mid-transfer.
-  /// One dot, one meaning: is the plugin doing anything.
-  ///
-  /// Settings activity used to be a tint that appeared only OVER idle, which
-  /// made it a second, quieter indicator — and one that vanished exactly when
-  /// the engine was busy, so during a first sync or a re-upload the settings
-  /// work was invisible for as long as it lasted. Worse, when the engine was
-  /// idle and settings were still transferring, the resting state was still
-  /// `idle`, and the panel said "up to date" over an unfinished queue.
-  ///
-  /// Two signals for one question is a question the reader has to answer
-  /// themselves. The dot now says whether ANY work is outstanding; which work
-  /// belongs in the panel, which is where detail lives.
-  _State get _restingState =>
-      _activity.isWorking ? _State.pulling : _State.idle;
-
-  void _cancelRevert() {
-    _revertTimer?.cancel();
-    _revertTimer = null;
-  }
+  /// A per-file flash used to be painted and then unpainted a few seconds
+  /// later, which meant guessing what to fall back TO — and the guess was the
+  /// resting state, which is how a finished push repainted a disconnected
+  /// vault green. A phase now lives exactly as long as the work does: the
+  /// model only reports one while the status is `syncing`, and `syncing`
+  /// requires a connection and something in flight.
 
   void _openSettings() {
     final setting = jsu.getProperty<Object?>(_plugin.app.raw, 'setting');
@@ -457,83 +339,82 @@ class SyncStatusIndicator implements SessionIndicator {
   // State → presentation
   // ---------------------------------------------------------------------------
 
-  String _labelFor(_State state) {
+  String _labelFor(SyncPhase phase) {
     // Only progress-bearing states get a label — the dot colour carries
     // the rest. Counters (`up 3/47` etc.) are kept because they prove
     // long-running operations are alive; one-shot states (off, idle,
     // pushing without a counter, error, auth, sub) would just be noise.
-    final p = _progress;
+    final p = _status.progress;
     // Only show the counter when there's more than one item to process
     // — `up 1/1` adds no information over the dot colour.
     if (p == null || p.total <= 1) return '';
-    return switch (state) {
-      _State.uploading => S.labelUp(p.completed, p.total),
-      _State.downloading => S.labelDown(p.completed, p.total),
-      _State.repairing => S.labelRepair(p.completed, p.total),
+    return switch (phase) {
+      SyncPhase.uploading => S.labelUp(p.completed, p.total),
+      SyncPhase.downloading => S.labelDown(p.completed, p.total),
+      SyncPhase.repairing => S.labelRepair(p.completed, p.total),
       _ => '',
     };
   }
 
-  String _tooltipFor(_State state) {
-    final p = _progress;
-    if (state == _State.uploading && p != null) {
-      return S.tipUploading(p.completed, p.total);
+  String _tooltipFor(SyncStatusKind kind, SyncPhase phase) {
+    final p = _status.progress;
+    if (p != null) {
+      switch (phase) {
+        case SyncPhase.uploading:
+          return S.tipUploading(p.completed, p.total);
+        case SyncPhase.downloading:
+          return S.tipDownloading(p.completed, p.total);
+        case SyncPhase.repairing:
+          return S.tipRepairing(p.completed, p.total);
+        default:
+          break;
+      }
     }
-    if (state == _State.downloading && p != null) {
-      return S.tipDownloading(p.completed, p.total);
-    }
-    if (state == _State.repairing && p != null) {
-      return S.tipRepairing(p.completed, p.total);
-    }
-    return switch (state) {
-      _State.off => S.tipStopped,
-      _State.offline => S.tipOffline,
-      _State.connecting => S.tipConnecting,
-      _State.idle => S.tipConnected,
-      _State.pushing => S.tipUploadingChanges,
-      _State.pulling => S.tipDownloadingChanges,
-      _State.uploading => S.tipUploadingInitial,
-      _State.downloading => S.tipDownloadingFiles,
-      _State.repairing => S.tipRepairingVault,
-      _State.error => S.tipError,
-      _State.authExpired => S.tipAuthExpired,
-      _State.subExpired => S.tipSubExpired,
+    // Phase before status, but only INSIDE syncing — the model refuses to
+    // report a phase in any other status, so this cannot describe work over a
+    // vault we cannot reach.
+    final byPhase = switch (phase) {
+      SyncPhase.pushing => S.tipUploadingChanges,
+      SyncPhase.pulling => S.tipDownloadingChanges,
+      SyncPhase.uploading => S.tipUploadingInitial,
+      SyncPhase.downloading => S.tipDownloadingFiles,
+      SyncPhase.repairing => S.tipRepairingVault,
+      SyncPhase.none => null,
+    };
+    if (byPhase != null) return byPhase;
+    return switch (kind) {
+      SyncStatusKind.stopped => S.tipStopped,
+      SyncStatusKind.paused => S.tipStopped,
+      SyncStatusKind.blocked => S.tipStopped,
+      SyncStatusKind.offline => S.tipOffline,
+      SyncStatusKind.connecting => S.tipConnecting,
+      SyncStatusKind.ready => S.tipConnected,
+      SyncStatusKind.pending => S.tipConnected,
+      // Working, but no phase has reported yet — the generic busy gap the
+      // engine's SyncBusy exists to cover.
+      SyncStatusKind.syncing => S.tipUploadingChanges,
+      SyncStatusKind.error => S.tipError,
+      SyncStatusKind.authExpired => S.tipAuthExpired,
+      SyncStatusKind.subExpired => S.tipSubExpired,
     };
   }
 
-  static String _colorFor(_State state, {required bool hasPending}) =>
-      switch (state) {
-        _State.off => 'rgb(128, 128, 128)',
-        _State.offline => 'rgb(230, 110, 50)',
-        _State.connecting => 'rgb(180, 180, 180)',
-        // Amber when idle-with-pending — local edits exist that the
-        // engine hasn't pushed yet. Distinct from orange (auth/sub)
-        // since user can fix it just by waiting for sync.
-        _State.idle => hasPending ? 'rgb(220, 180, 60)' : 'rgb(48, 168, 96)',
-        _State.pushing => 'rgb(48, 128, 240)',
-        _State.pulling => 'rgb(48, 128, 240)',
-        _State.uploading => 'rgb(48, 128, 240)',
-        _State.downloading => 'rgb(48, 128, 240)',
-        _State.repairing => 'rgb(160, 96, 220)', // purple — distinct from sync
-        _State.error => 'rgb(220, 56, 56)',
-        _State.authExpired => 'rgb(240, 150, 48)',
-        _State.subExpired => 'rgb(240, 150, 48)',
-      };
+  /// The colour, from the table the panel's stylesheet is generated from.
+  /// Not a copy of it — the same map.
+  static String _colorFor(
+    SyncStatusKind kind,
+    SyncPhase phase, {
+    required bool hasPending,
+  }) => syncToneColor[toneFor(kind, phase, hasPending: hasPending)]!;
 
-  static String _glowFor(_State state, String color) {
+  static String _glowFor(SyncStatusKind kind, String color) {
     const baseShadow = '0 0 0 1px rgba(0,0,0,0.18)';
-    final active = switch (state) {
-      _State.pushing ||
-      _State.pulling ||
-      _State.uploading ||
-      _State.downloading ||
-      _State.repairing ||
-      _State.connecting ||
-      _State.offline ||
-      _State.error ||
-      _State.authExpired ||
-      _State.subExpired => true,
-      _State.off || _State.idle => false,
+    // Everything that wants attention glows; the two resting answers do not.
+    final active = switch (kind) {
+      SyncStatusKind.stopped ||
+      SyncStatusKind.ready ||
+      SyncStatusKind.pending => false,
+      _ => true,
     };
     if (!active) return baseShadow;
     // Soften the colour into the glow.
@@ -584,17 +465,3 @@ class SyncStatusIndicator implements SessionIndicator {
   }
 }
 
-enum _State {
-  off,
-  offline,
-  connecting,
-  idle,
-  pushing,
-  pulling,
-  uploading,
-  downloading,
-  repairing,
-  error,
-  authExpired,
-  subExpired,
-}

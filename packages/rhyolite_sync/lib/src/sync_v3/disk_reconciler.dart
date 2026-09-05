@@ -400,7 +400,7 @@ class DiskReconciler {
       if (_sampleWriteLine(0)) {
         _log.info(
           'disk write bytes=0 '
-          'download=0ms compare=0ms write=0ms total=0ms '
+          'assemble=0ms compare=0ms write=0ms total=0ms '
           'result=skipped-already-synced',
           data: {'path': LogPath(state.path)},
         );
@@ -421,7 +421,7 @@ class DiskReconciler {
       if (_sampleWriteLine(0)) {
         _log.info(
           'disk write bytes=0 '
-          'download=0ms compare=0ms write=0ms total=0ms '
+          'assemble=0ms compare=0ms write=0ms total=0ms '
           'result=skipped-own-echo',
           data: {'path': LogPath(state.path)},
         );
@@ -432,6 +432,13 @@ class DiskReconciler {
     final swWriteTotal = Stopwatch()..start();
     Uint8List? bytes;
     final chunkedIO = _chunkedIOBuilder();
+    // Time to have the bytes in hand, whatever that took. Reported as
+    // `assemble` and not `download` because in the pull path it usually is
+    // not one: the prefetch has already put every chunk in the batch's
+    // staging area, so this is a concatenation. It read as a network cost
+    // that had not been paid — 286ms of "download" for a file that never
+    // touched the wire — which is exactly the reading that sends someone
+    // looking for a slow link.
     final swDownload = Stopwatch();
     final monitor = state.sizeBytes >= _transferMonitorMinBytes;
     // Set when the download refused on size, so the report below can tell a
@@ -651,7 +658,7 @@ class DiskReconciler {
           if (_sampleWriteLine(swWriteTotal.elapsedMilliseconds)) {
             _log.info(
               'disk write bytes=${bytes.length} '
-              'download=${swDownload.elapsedMilliseconds}ms '
+              'assemble=${swDownload.elapsedMilliseconds}ms '
               'compare=${swCompare.elapsedMilliseconds}ms '
               'write=0ms '
               'total=${swWriteTotal.elapsedMilliseconds}ms '
@@ -726,7 +733,7 @@ class DiskReconciler {
     if (_sampleWriteLine(swWriteTotal.elapsedMilliseconds)) {
       _log.info(
         'disk write bytes=${bytes.length} '
-        'download=${swDownload.elapsedMilliseconds}ms '
+        'assemble=${swDownload.elapsedMilliseconds}ms '
         'compare=${swCompare.elapsedMilliseconds}ms '
         'write=${swWrite.elapsedMilliseconds}ms '
         'total=${swWriteTotal.elapsedMilliseconds}ms '

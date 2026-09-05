@@ -37,7 +37,7 @@ class StatePuller {
     required void Function(SyncEngineEvent event) emit,
     required bool Function(Object error) isFatalRejection,
     required LogScope log,
-    required Future<void> Function(
+    required Future<({int fromServer, int rebuilt})> Function(
       List<String> blobRefs, {
       RpcContext? context,
       void Function(String manifestHash, int sent, int total)? onFileProgress,
@@ -139,7 +139,7 @@ class StatePuller {
   /// trips, not bytes: per file it was a request for the manifest and then
   /// another for its chunks, and no amount of running four of those in
   /// parallel changes that 207 files cost 414 requests.
-  final Future<void> Function(
+  final Future<({int fromServer, int rebuilt})> Function(
     List<String> blobRefs, {
     RpcContext? context,
     void Function(String manifestHash, int sent, int total)? onFileProgress,
@@ -196,7 +196,6 @@ class StatePuller {
   /// otherwise stop the pull forever, which is worse than the risk it was
   /// added to remove.
   static const Duration _checkpointTimeout = Duration(seconds: 30);
-
 
   /// Per-file apply lines kept before the rest are counted instead of logged.
   ///
@@ -883,10 +882,11 @@ class StatePuller {
 
     // Whichever binds first: the host's own limit, or the file ceiling above.
     final byFiles = _maxFilesInFlight ~/ _prefetchGroupSize;
-    final concurrency = (_downloadConcurrency < byFiles
-            ? _downloadConcurrency
-            : byFiles)
-        .clamp(1, groups.length);
+    final concurrency =
+        (_downloadConcurrency < byFiles ? _downloadConcurrency : byFiles).clamp(
+          1,
+          groups.length,
+        );
     // The pull's quiet phase, named because it was silent for minutes.
     //
     // A batch's whole fetch used to produce one line, AFTER it finished. On a
@@ -897,14 +897,22 @@ class StatePuller {
     // otherwise.
     final swFetch = Stopwatch()..start();
     _log.info(
-      'Pull: fetching ${refs.length} blob(s) for this batch, '
+      'Pull: resolving ${refs.length} blob(s) for this batch, '
       '$concurrency group(s) in flight',
     );
     var fetchedInBatch = 0;
+    // How the batch's blobs were actually obtained, which is not knowable
+    // before the groups run: a blob this device can rebuild from a copy it
+    // already holds never reaches the network. Counted rather than assumed,
+    // because a line that says "fetched" about bytes that never moved is the
+    // kind that sends the next person reading it after a network fault that
+    // did not happen.
+    var fromServer = 0;
+    var rebuilt = 0;
     await boundedParallel(groups, concurrency, (group) async {
       context?.cancellationToken?.throwIfCancelled();
       try {
-        await _prefetchFiles(
+        final outcome = await _prefetchFiles(
           group,
           context: context,
           onFileProgress: (ref, sent, total) {
@@ -928,6 +936,8 @@ class StatePuller {
             );
           },
         );
+        fromServer += outcome.fromServer;
+        rebuilt += outcome.rebuilt;
       } catch (e) {
         // A preempted pull must abort so the lane frees for the push; every
         // other failure stays best-effort — each file's apply hold-and-retries.
@@ -965,8 +975,15 @@ class StatePuller {
         ),
       );
     }
+    final unresolved = refs.length - fromServer - rebuilt;
     _log.info(
-      'Pull: fetched ${refs.length} blob(s) in ${swFetch.elapsedMilliseconds}ms',
+      'Pull: ${refs.length} blob(s) resolved in ${swFetch.elapsedMilliseconds}'
+      'ms — $fromServer from the server, $rebuilt rebuilt from copies already '
+      'on this device'
+      // Named rather than left as arithmetic: a blob neither fetched nor
+      // rebuilt is one whose group failed, and the apply is about to retry it
+      // one at a time. That is worth seeing here, not inferring later.
+      '${unresolved > 0 ? ', $unresolved unresolved' : ''}',
     );
     _emit(
       SyncBlobDownloadProgress(

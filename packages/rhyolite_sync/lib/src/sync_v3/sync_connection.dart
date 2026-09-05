@@ -42,6 +42,18 @@ abstract interface class SyncConnection {
   /// it is reissued on the fresh transport.
   Stream<SyncConnState> get stateChanges;
 
+  /// What the transport is doing RIGHT NOW, without waiting for the next
+  /// [stateChanges] event.
+  ///
+  /// Exists because a failure has to be read at the moment it happens: work
+  /// that failed while the transport was down failed for a reason nobody needs
+  /// telling about, and work that failed while it was up did not. Asking the
+  /// connection is exact; guessing from the shape of the exception is not —
+  /// rpc_dart reports a call on a dropped transport as a bare
+  /// `StateError('RpcClientConnection: transport not connected')`, which can
+  /// only be matched on its text.
+  SyncConnState get currentState;
+
   Future<void> dispose();
 }
 
@@ -145,6 +157,23 @@ class WebSocketSyncConnection implements SyncConnection {
     final mapped = _mapState(s);
     return mapped == null ? const <SyncConnState>[] : [mapped];
   });
+
+  @override
+  SyncConnState get currentState {
+    final s = _connection?.currentState;
+    if (s is RpcClientOnline) return SyncConnState.online;
+    if (s is RpcClientConnecting) return SyncConnState.connecting;
+    // Everything else is "cannot carry a call": dropped and reconnecting,
+    // given up, never started, or no connection object at all.
+    //
+    // Total on purpose, where [_mapState] is partial. That one feeds a stream
+    // of TRANSITIONS and drops `RpcClientOffline` so a reconnect that
+    // succeeds in a second does not make the engine tear down and rebuild
+    // around it. A snapshot has the opposite job — it is asked precisely
+    // because something just failed — and for it a transport in the middle of
+    // reconnecting is exactly the answer the caller wants.
+    return SyncConnState.offline;
+  }
 
   @override
   Future<void> dispose() async {

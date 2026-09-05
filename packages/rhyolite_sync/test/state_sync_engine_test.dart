@@ -308,6 +308,237 @@ void main() {
       );
     });
 
+    /// Renaming, moving, and doing both are one Obsidian event and one shape
+    /// on the wire: a tombstone for the old path plus a create for the new
+    /// one. What differs is only which part of the path changed — and nothing
+    /// in the fix looks at the path, so each case is worth its own run rather
+    /// than an argument that they must behave alike.
+    ///
+    /// [text] switches the SOURCE of the rebuilt bytes: a note's blob is its
+    /// Fugue tree, read back from the local tree store, where a binary's is
+    /// the file on disk. Two different code paths behind one measurement.
+    Future<void> expectFreeRelocation({
+      required String from,
+      required String to,
+      required bool text,
+    }) async {
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+
+      final content = text
+          ? Uint8List.fromList(utf8.encode('# note\n\n${'body line\n' * 200}'))
+          : Uint8List.fromList(List.generate(4000, (i) => (i * 11) % 256));
+
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      a.io.files['$_vaultPath/$from'] = content;
+      a.changes.emit(FileCreatedEvent(relativePath: from));
+      await pushed;
+
+      final created = _recordsFromPuts(a.state);
+      // A pulls its own record back. That is the convergence point that
+      // records the LCA, and until it happens a later delete on A is not
+      // pushable at all — the tombstone has nothing to be a delta from.
+      a.state.recordsFor = (since) => created;
+      await a.engine.triggerPull();
+
+      final bLog = <String>[];
+      final b = await _Harness.create(sharedRemote: remote, captureLog: bLog);
+      addTearDown(b.dispose);
+      b.state.recordsFor = (since) => since == 0 ? created : const [];
+      b.state.getCursor = created.last.serverSeq;
+      await b.engine.start();
+      expect(
+        b.io.files['$_vaultPath/$from'],
+        equals(content),
+        reason: 'B must hold the file before the relocation is interesting',
+      );
+
+      // Everything B fetched to get here. The relocation should need none of
+      // it again.
+      final afterFirstSync = remote.downloadedIds.length;
+
+      a.state.puts.clear();
+      a.io.files.remove('$_vaultPath/$from');
+      a.io.files['$_vaultPath/$to'] = content;
+      a.changes.emit(FileMovedEvent(fromPath: from, toPath: to));
+      for (var i = 0; i < 400 && _recordsFromPuts(a.state).length < 2; i++) {
+        await pumpEventQueue();
+      }
+      final moveRecords = _recordsFromPuts(a.state);
+      expect(
+        moveRecords.length,
+        greaterThanOrEqualTo(2),
+        reason: 'a relocation goes on the wire as a tombstone plus a create',
+      );
+
+      b.state.recordsFor = (since) => moveRecords;
+      await b.engine.triggerPull();
+
+      expect(
+        b.io.files['$_vaultPath/$to'],
+        equals(content),
+        reason: 'the relocation must land on B',
+      );
+      expect(
+        b.io.files.containsKey('$_vaultPath/$from'),
+        isFalse,
+        reason: 'and the old path must be gone — no duplicate left behind',
+      );
+
+      // The point of the test. B held every byte of this file under the old
+      // name, and both of the apply's skip guards miss because both are keyed
+      // by fileId and a fileId comes from the path. The prefetch rebuilds the
+      // blobs from the copy instead — the last moment the old path is still
+      // there, since the tombstone usually applies first.
+      expect(
+        remote.downloadedIds.length - afterFirstSync,
+        0,
+        reason:
+            'a relocation must cost no bytes: the content is already on this '
+            'device under the old path',
+      );
+
+      // And the log has to SAY that. A line reporting a fetch that did not
+      // happen is how the next person reading it goes looking for a slow
+      // network instead of finding the answer already written down.
+      final resolved = bLog.where((l) => l.contains('blob(s) resolved')).last;
+      expect(resolved, contains('0 from the server'));
+      expect(resolved, contains('1 rebuilt'));
+      expect(
+        bLog.where((l) => l.contains('assemble=')),
+        isNotEmpty,
+        reason: 'and the per-file line must not call a staging read a download',
+      );
+    }
+
+    test('moving a binary to another folder costs no download', () async {
+      await expectFreeRelocation(
+        from: 'Inbox/photo.bin',
+        to: 'Archive/photo.bin',
+        text: false,
+      );
+    });
+
+    test('renaming a binary in place costs no download', () async {
+      await expectFreeRelocation(
+        from: 'Inbox/photo.bin',
+        to: 'Inbox/holiday.bin',
+        text: false,
+      );
+    });
+
+    test('renaming AND moving at once costs no download', () async {
+      await expectFreeRelocation(
+        from: 'Inbox/photo.bin',
+        to: 'Archive/2026/holiday.bin',
+        text: false,
+      );
+    });
+
+    test('renaming and moving a NOTE costs no download', () async {
+      // The common case in Obsidian, and the one whose bytes come from the
+      // Fugue tree rather than from disk.
+      await expectFreeRelocation(
+        from: 'Inbox/draft.md',
+        to: 'Notes/2026/published.md',
+        text: true,
+      );
+    });
+
+    test('a push states that it is working', () async {
+      // It was the one path that did work without saying so. Nothing else
+      // states it on its behalf, so both status surfaces sat at "up to date"
+      // through an interactive push and could not show its phase at all —
+      // which is why each had grown a three-second timer to guess at it.
+      // A guess in the UI is not a substitute for a fact the engine owns.
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.engine.start();
+      // Startup holds the same scope, so wait for it to let go before
+      // clearing — otherwise the first thing seen is its release.
+      for (var i = 0; i < 40; i++) {
+        if (h.events.whereType<SyncBusy>().any((e) => !e.busy)) break;
+        await pumpEventQueue();
+      }
+      h.events.clear();
+
+      final pushed = h.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      h.io.files['$_vaultPath/note.bin'] = Uint8List.fromList([1, 2, 3]);
+      h.changes.emit(const FileCreatedEvent(relativePath: 'note.bin'));
+      await pushed;
+      for (var i = 0; i < 40; i++) {
+        if (h.events.whereType<SyncBusy>().any((e) => !e.busy)) break;
+        await pumpEventQueue();
+      }
+
+      final busy = h.events.whereType<SyncBusy>().toList();
+      expect(
+        busy.map((e) => e.busy),
+        containsAllInOrder([true, false]),
+        reason: 'raised for the push and released after it',
+      );
+    });
+
+    test('a relocation goes to the server as ONE batch', () async {
+      // The fix for what the two-pull case exposed, pinned at its source.
+      //
+      // Sent as two pushes, the receiving device is woken twice and pulls
+      // twice — and the tombstone's pull deletes the only local copy before
+      // the pull carrying the create arrives, so it downloads a file it was
+      // holding every byte of. Observed on real devices as 27 MB and 25
+      // seconds to rename one book.
+      //
+      // The gap between the two is not incidental: the tombstone is ready the
+      // moment the file is gone, while the create must chunk its content
+      // first. Whoever sends them separately sends them seconds apart.
+      final remote = _MemRemote();
+      final a = await _Harness.create(sharedRemote: remote);
+      addTearDown(a.dispose);
+      await a.engine.start();
+
+      final pushed = a.engine.events
+          .firstWhere((e) => e is SyncFilePushed)
+          .timeout(const Duration(seconds: 10));
+      final content = Uint8List.fromList(
+        List.generate(4000, (i) => (i * 11) % 256),
+      );
+      a.io.files['$_vaultPath/Docs/book.epub'] = content;
+      a.changes.emit(const FileCreatedEvent(relativePath: 'Docs/book.epub'));
+      await pushed;
+
+      a.state.recordsFor = (since) => _recordsFromPuts(a.state);
+      await a.engine.triggerPull();
+
+      a.state.puts.clear();
+      a.io.files.remove('$_vaultPath/Docs/book.epub');
+      a.io.files['$_vaultPath/book.epub'] = content;
+      a.changes.emit(
+        const FileMovedEvent(fromPath: 'Docs/book.epub', toPath: 'book.epub'),
+      );
+      for (var i = 0; i < 400 && _recordsFromPuts(a.state).length < 2; i++) {
+        await pumpEventQueue();
+      }
+
+      expect(
+        _recordsFromPuts(a.state).length,
+        2,
+        reason: 'a relocation is a tombstone plus a create',
+      );
+      expect(
+        a.state.puts.length,
+        1,
+        reason:
+            'and both must leave in the same batch — apart, the receiver '
+            'deletes its only copy before the create that needs it arrives',
+      );
+    });
+
     test('a second device pulls the first device\'s pushed file and '
         'materialises it to disk', () async {
       // One shared remote blob store = one server seen by two devices.
@@ -803,56 +1034,59 @@ void main() {
       );
     });
 
-    test('the blob cache is reclaimed BEFORE the initial pull, not after',
-        () async {
-      // The ordering IS the bug, which is why it gets a test of its own.
-      //
-      // This sweep used to run in the housekeeping tier, after the startup
-      // pipeline. That put the cleanup which keeps the database from filling
-      // up behind a startup that a full database makes fail. A vault reached
-      // 1.5 GB of cached chunks, could no longer allocate a page, and died in
-      // its initial pull on every restart — so the sweep never ran, on any of
-      // them, and the state it was holding could never come back. Nothing
-      // about either piece was wrong alone; only the order was.
-      //
-      // Moving it back after the pull must fail here.
-      final h = await _Harness.create();
-      addTearDown(h.dispose);
+    test(
+      'the blob cache is reclaimed BEFORE the initial pull, not after',
+      () async {
+        // The ordering IS the bug, which is why it gets a test of its own.
+        //
+        // This sweep used to run in the housekeeping tier, after the startup
+        // pipeline. That put the cleanup which keeps the database from filling
+        // up behind a startup that a full database makes fail. A vault reached
+        // 1.5 GB of cached chunks, could no longer allocate a page, and died in
+        // its initial pull on every restart — so the sweep never ran, on any of
+        // them, and the state it was holding could never come back. Nothing
+        // about either piece was wrong alone; only the order was.
+        //
+        // Moving it back after the pull must fail here.
+        final h = await _Harness.create();
+        addTearDown(h.dispose);
 
-      // A blob no state refers to: droppable under any policy, so this test
-      // is about WHEN the sweep runs and not about what it chooses.
-      final orphan = Uint8List.fromList(List.generate(64, (i) => i));
-      final orphanId = sha256.convert(orphan).toString();
-      await h.engine.blobStore.write(orphan, orphanId, vaultId: _vaultId);
-      expect(
-        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
-        isNotEmpty,
-      );
+        // A blob no state refers to: droppable under any policy, so this test
+        // is about WHEN the sweep runs and not about what it chooses.
+        final orphan = Uint8List.fromList(List.generate(64, (i) => i));
+        final orphanId = sha256.convert(orphan).toString();
+        await h.engine.blobStore.write(orphan, orphanId, vaultId: _vaultId);
+        expect(
+          await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
+          isNotEmpty,
+        );
 
-      // Park the engine inside its initial pull and look at the cache from
-      // there — the one moment that tells the two orderings apart.
-      final gate = Completer<void>();
-      h.state.getStatesGate = gate;
-      final started = h.engine.start();
-      for (var i = 0; i < 20 && h.state.getSince.isEmpty; i++) {
-        await pumpEventQueue();
-      }
-      expect(
-        h.state.getSince,
-        isNotEmpty,
-        reason: 'the pull must have begun for this observation to mean '
-            'anything',
-      );
+        // Park the engine inside its initial pull and look at the cache from
+        // there — the one moment that tells the two orderings apart.
+        final gate = Completer<void>();
+        h.state.getStatesGate = gate;
+        final started = h.engine.start();
+        for (var i = 0; i < 20 && h.state.getSince.isEmpty; i++) {
+          await pumpEventQueue();
+        }
+        expect(
+          h.state.getSince,
+          isNotEmpty,
+          reason:
+              'the pull must have begun for this observation to mean '
+              'anything',
+        );
 
-      expect(
-        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
-        isEmpty,
-        reason: 'the room has to be free BEFORE the pull needs it to write',
-      );
+        expect(
+          await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
+          isEmpty,
+          reason: 'the room has to be free BEFORE the pull needs it to write',
+        );
 
-      gate.complete();
-      await started;
-    });
+        gate.complete();
+        await started;
+      },
+    );
 
     test("an attachment's chunks never enter the cache — the vault file is "
         'the copy, and it still syncs', () async {
@@ -887,10 +1121,7 @@ void main() {
       // And the sweep, run against it, has nothing to do rather than
       // something to undo.
       await h.engine.runLocalBlobGc();
-      expect(
-        await h.engine.blobStore.listBlobIds(vaultId: _vaultId),
-        isEmpty,
-      );
+      expect(await h.engine.blobStore.listBlobIds(vaultId: _vaultId), isEmpty);
 
       // And the file is still perfectly syncable: the record the peer needs
       // was pushed, and its bytes are on the server, not in our cache.
@@ -2201,6 +2432,130 @@ void main() {
       expect(handed!.isCancelled, isFalse);
     });
 
+    /// Runs the engine until its housekeeping has had a go at the backend,
+    /// and hands back what the scheduler was asked for and what was logged.
+    ///
+    /// The verify pass is scheduled at delay zero, so it only needs the queue
+    /// to drain; its RESCHEDULE is the two-minute one, and waiting for that to
+    /// fire is what these tests deliberately do not do.
+    Future<({_RecordingScheduler sched, List<String> log})> runHousekeeping(
+      Object existsError, {
+      SyncConnState connection = SyncConnState.online,
+    }) async {
+      final sched = _RecordingScheduler(PriorityTaskScheduler());
+      final log = <String>[];
+      final remote = _MemRemote()..existsError = existsError;
+      final h = await _Harness.create(
+        sharedRemote: remote,
+        scheduler: sched,
+        captureLog: log,
+      );
+      addTearDown(h.dispose);
+      h.connection.currentState = connection;
+      // A vault with nothing in it references no blobs, and the pass returns
+      // before it ever reaches the backend — so one file is the difference
+      // between exercising this and asserting on an empty run.
+      h.io.files['$_vaultPath/a.bin'] = Uint8List.fromList([1, 2, 3, 4]);
+      await h.engine.start();
+      for (var i = 0; i < 60; i++) {
+        if (sched.delaysFor('verify-blobs').length > 1) break;
+        await pumpEventQueue();
+      }
+      return (sched: sched, log: log);
+    }
+
+    test('a backend that will not answer postpones the verify pass', () async {
+      // The reported incident: offline, so every presence probe threw. The
+      // pass cannot conclude anything, and the two things it must NOT do are
+      // conclude absence (covered in the storage tests) and report a failure —
+      // a phone with no signal would otherwise put a line in every bug report
+      // it ever files.
+      final run = await runHousekeeping(const BlobProbeIncomplete(128, 128));
+
+      expect(
+        run.sched.delaysFor('verify-blobs'),
+        contains(const Duration(minutes: 2)),
+        reason: 'the pass has to come back once the network might be up',
+      );
+      expect(
+        run.log.where((l) => l.contains('verify-blobs')),
+        contains(contains('postponed')),
+      );
+      expect(
+        run.log.where((l) => l.contains('verify-blobs')),
+        isNot(contains(contains('failed'))),
+      );
+    });
+
+    test('an ordinary error still fails the task, loudly', () async {
+      // The other side of the line. Postponing everything would be a way of
+      // never reporting a broken housekeeping task at all.
+      final run = await runHousekeeping(StateError('something is actually up'));
+
+      expect(
+        run.log.where((l) => l.contains('verify-blobs')),
+        contains(contains('failed')),
+      );
+      expect(
+        run.sched.delaysFor('verify-blobs'),
+        isNot(contains(const Duration(minutes: 2))),
+        reason: 'a real fault is not something to retry on a timer',
+      );
+    });
+
+    test('the same error is a postponement while the socket is down', () async {
+      // The managed path has no BlobProbeIncomplete to raise: its presence
+      // probe is an RPC, and rpc_dart reports a call on a dropped transport as
+      // `StateError('RpcClientConnection: transport not connected')` — a type
+      // that says nothing and a message that can only be matched on its text.
+      // Asking the connection what it was doing settles it without either.
+      final run = await runHousekeeping(
+        StateError('RpcClientConnection: transport not connected'),
+        connection: SyncConnState.offline,
+      );
+
+      expect(
+        run.log.where((l) => l.contains('verify-blobs')),
+        contains(contains('postponed')),
+      );
+      expect(
+        run.log.where((l) => l.contains('verify-blobs')),
+        isNot(contains(contains('failed'))),
+        reason: 'a phone with no signal is not a bug report',
+      );
+      expect(
+        run.sched.delaysFor('verify-blobs'),
+        contains(const Duration(minutes: 2)),
+      );
+    });
+
+    test('a local sweep is never excused by the network', () async {
+      // needsNetwork is opt-in for exactly this reason: the blob-GC and
+      // orphan-CRDT sweeps touch no socket, so a fault in one has to be heard
+      // whatever the transport is doing. The local GC is the reachable one —
+      // its sibling callback is public, so a test can break it from outside.
+      final log = <String>[];
+      final h = await _Harness.create(captureLog: log);
+      addTearDown(h.dispose);
+      await h.engine.start();
+      h.connection.currentState = SyncConnState.offline;
+      h.engine.siblingLiveBlobIds = () =>
+          throw StateError('the local sweep is broken');
+
+      h.engine.rescheduleLocalBlobGc();
+      for (var i = 0; i < 40; i++) {
+        if (log.any((l) => l.contains('local-blob-gc'))) break;
+        await pumpEventQueue();
+      }
+      expect(
+        log.where((l) => l.contains('local-blob-gc')),
+        contains(contains('failed')),
+        reason:
+            'silence here would hide a bug that has nothing to do with the '
+            'network — the sweep never touches the socket',
+      );
+    });
+
     test('stop() cancels only the engine\'s own work and never disposes the '
         'host-owned scheduler', () async {
       final scheduler = PriorityTaskScheduler();
@@ -2368,11 +2723,11 @@ class _Harness {
   final List<SyncEngineEvent> events;
   final Future<void> Function() disposeEnv;
   final StreamSubscription<SyncEngineEvent> eventsSub;
-  final PriorityTaskScheduler scheduler;
+  final ITaskScheduler scheduler;
 
   static Future<_Harness> create({
     _MemRemote? sharedRemote,
-    PriorityTaskScheduler? scheduler,
+    ITaskScheduler? scheduler,
     IVaultCipher? cipher,
     Set<String> Function()? excludedExtensions,
     PathScope Function()? pathScope,
@@ -2621,6 +2976,11 @@ class _FakeConnection implements SyncConnection {
   @override
   Stream<SyncConnState> get stateChanges => _state.stream;
 
+  /// Online unless a test says otherwise — the fake's transport never really
+  /// drops, and every test that predates this one assumes a working socket.
+  @override
+  SyncConnState currentState = SyncConnState.online;
+
   @override
   Future<void> dispose() async {
     disposed = true;
@@ -2644,6 +3004,63 @@ class _CapturingOutput extends LogOutput {
   }
 }
 
+/// Records what the engine ASKED the scheduler for, and forwards it.
+///
+/// The alternative was waiting out the real delay, which for a postponed
+/// housekeeping task is two minutes. What the engine decides is visible at the
+/// call; only its consequence is slow.
+class _RecordingScheduler implements ITaskScheduler {
+  _RecordingScheduler(this._inner);
+
+  final ITaskScheduler _inner;
+  final List<({Object? key, Duration delay})> scheduled = [];
+
+  /// Delays requested for [key], oldest first.
+  List<Duration> delaysFor(Object key) => [
+    for (final s in scheduled)
+      if (s.key == key) s.delay,
+  ];
+
+  @override
+  Future<void> schedule({
+    Object? key,
+    Object? group,
+    int priority = 0,
+    Duration delay = Duration.zero,
+    bool preemptible = false,
+    required TaskRun run,
+  }) {
+    scheduled.add((key: key, delay: delay));
+    return _inner.schedule(
+      key: key,
+      group: group,
+      priority: priority,
+      delay: delay,
+      preemptible: preemptible,
+      run: run,
+    );
+  }
+
+  @override
+  void cancel(Object key) => _inner.cancel(key);
+  @override
+  void cancelGroup(Object group) => _inner.cancelGroup(group);
+  @override
+  void setMinPriority(int minPriority) => _inner.setMinPriority(minPriority);
+  @override
+  void clearMinPriority() => _inner.clearMinPriority();
+  @override
+  Future<void> get whenIdle => _inner.whenIdle;
+  @override
+  bool get isIdle => _inner.isIdle;
+  @override
+  int get queuedCount => _inner.queuedCount;
+  @override
+  int get runningCount => _inner.runningCount;
+  @override
+  Future<void> dispose() => _inner.dispose();
+}
+
 class _MemRemote implements IBlobStorage {
   final Map<String, Uint8List> store = {};
 
@@ -2662,14 +3079,22 @@ class _MemRemote implements IBlobStorage {
   /// download counter draws, on the other direction.
   int uploadCalls = 0;
 
+  /// Thrown from [exists] instead of answering, so a test can put the engine
+  /// in front of a backend that will not give it a verdict.
+  Object? existsError;
+
   @override
   Future<Set<String>> exists(
     List<String> blobIds, {
     RpcContext? context,
-  }) async => {
-    for (final id in blobIds)
-      if (store.containsKey(id)) id,
-  };
+  }) async {
+    final error = existsError;
+    if (error != null) throw error;
+    return {
+      for (final id in blobIds)
+        if (store.containsKey(id)) id,
+    };
+  }
 
   /// Parks every upload from the Nth onwards, so a test can freeze a startup
   /// pass part-way and look at what has already been published.
@@ -3059,7 +3484,8 @@ void _repairPullsFirst() {
       expect(
         measures,
         1,
-        reason: 'a database with room to spare is asked once and left alone. '
+        reason:
+            'a database with room to spare is asked once and left alone. '
             'Counted in measurements rather than flushes: the flush is no '
             'longer this path\'s alone — every batch now drains through the '
             'same callback as a durability checkpoint, and a reclaim is what '
@@ -3070,85 +3496,99 @@ void _repairPullsFirst() {
       expect(b.io.files['$_vaultPath/photo.bin'], equals(published.content));
     });
 
-    test('over the limit it flushes and sweeps BEFORE reading the verdict', () async {
-      // Order is the whole point: the IndexedDB VFS acknowledges a write
-      // before performing it, so pages the sweep just freed are not yet pages
-      // the file can reuse. Measuring first measures a state that has not
-      // happened.
-      final remote = _MemRemote();
-      final published = await publish(remote);
-      final order = <String>[];
-      var bytes = 960 * 1024 * 1024;
-      final b = await receiver(
-        remote,
-        published.records,
-        databaseBytes: () async {
-          order.add('measure');
-          return bytes;
-        },
-        flushDatabase: () async {
-          order.add('flush');
-          bytes = 100 * 1024 * 1024; // the sweep worked
-        },
-      );
-      await b.engine.start();
+    test(
+      'over the limit it flushes and sweeps BEFORE reading the verdict',
+      () async {
+        // Order is the whole point: the IndexedDB VFS acknowledges a write
+        // before performing it, so pages the sweep just freed are not yet pages
+        // the file can reuse. Measuring first measures a state that has not
+        // happened.
+        final remote = _MemRemote();
+        final published = await publish(remote);
+        final order = <String>[];
+        var bytes = 960 * 1024 * 1024;
+        final b = await receiver(
+          remote,
+          published.records,
+          databaseBytes: () async {
+            order.add('measure');
+            return bytes;
+          },
+          flushDatabase: () async {
+            order.add('flush');
+            bytes = 100 * 1024 * 1024; // the sweep worked
+          },
+        );
+        await b.engine.start();
 
-      expect(order.first, 'measure', reason: 'the check starts by asking');
-      expect(
-        order,
-        contains('flush'),
-        reason: 'being over the limit has to actually do something',
-      );
-      expect(
-        order.indexOf('flush') < order.lastIndexOf('measure'),
-        isTrue,
-        reason: 'the verdict must be read after the flush, not before it — '
-            'order was $order',
-      );
-      expect(
-        b.events.whereType<SyncDatabaseFull>(),
-        isEmpty,
-        reason: 'reclaiming worked, so there is nothing to report',
-      );
-    });
+        expect(order.first, 'measure', reason: 'the check starts by asking');
+        expect(
+          order,
+          contains('flush'),
+          reason: 'being over the limit has to actually do something',
+        );
+        expect(
+          order.indexOf('flush') < order.lastIndexOf('measure'),
+          isTrue,
+          reason:
+              'the verdict must be read after the flush, not before it — '
+              'order was $order',
+        );
+        expect(
+          b.events.whereType<SyncDatabaseFull>(),
+          isEmpty,
+          reason: 'reclaiming worked, so there is nothing to report',
+        );
+      },
+    );
 
-    test('still full after reclaiming is reported, and the file still lands', () async {
-      // At this point the space is live data, not staging, and sweeping cannot
-      // help. Refusing to sync would trade a full database for a stale vault,
-      // which is the worse of the two — so it is said, loudly, and the work
-      // goes on.
-      final remote = _MemRemote();
-      final published = await publish(remote);
-      final b = await receiver(
-        remote,
-        published.records,
-        databaseBytes: () async => 999 * 1024 * 1024,
-        flushDatabase: () async {},
-      );
-      await b.engine.start();
+    test(
+      'still full after reclaiming is reported, and the file still lands',
+      () async {
+        // At this point the space is live data, not staging, and sweeping cannot
+        // help. Refusing to sync would trade a full database for a stale vault,
+        // which is the worse of the two — so it is said, loudly, and the work
+        // goes on.
+        final remote = _MemRemote();
+        final published = await publish(remote);
+        final b = await receiver(
+          remote,
+          published.records,
+          databaseBytes: () async => 999 * 1024 * 1024,
+          flushDatabase: () async {},
+        );
+        await b.engine.start();
 
-      final full = b.events.whereType<SyncDatabaseFull>().toList();
-      expect(full, isNotEmpty, reason: 'the user has to be able to learn this');
-      expect(full.first.bytes, 999 * 1024 * 1024);
-      expect(full.first.limitBytes, b.engine.databaseLimitBytes);
-      expect(
-        b.io.files['$_vaultPath/photo.bin'],
-        equals(published.content),
-        reason: 'a full database must not also cost the user their pull',
-      );
-    });
+        final full = b.events.whereType<SyncDatabaseFull>().toList();
+        expect(
+          full,
+          isNotEmpty,
+          reason: 'the user has to be able to learn this',
+        );
+        expect(full.first.bytes, 999 * 1024 * 1024);
+        expect(full.first.limitBytes, b.engine.databaseLimitBytes);
+        expect(
+          b.io.files['$_vaultPath/photo.bin'],
+          equals(published.content),
+          reason: 'a full database must not also cost the user their pull',
+        );
+      },
+    );
 
-    test('a host that does not measure is not read as one with no room', () async {
-      // Every other client of this engine passes nothing, and a missing
-      // measurement must mean "no opinion" rather than "no room".
-      final remote = _MemRemote();
-      final published = await publish(remote);
-      final b = await receiver(remote, published.records);
-      await b.engine.start();
+    test(
+      'a host that does not measure is not read as one with no room',
+      () async {
+        // Every other client of this engine passes nothing, and a missing
+        // measurement must mean "no opinion" rather than "no room".
+        final remote = _MemRemote();
+        final published = await publish(remote);
+        final b = await receiver(remote, published.records);
+        await b.engine.start();
 
-      expect(b.events.whereType<SyncDatabaseFull>(), isEmpty);
-      expect(b.io.files['$_vaultPath/photo.bin'], equals(published.content));
-    });
+        expect(b.events.whereType<SyncDatabaseFull>(), isEmpty);
+        expect(b.io.files['$_vaultPath/photo.bin'], equals(published.content));
+      },
+    );
 
     test('a measurement that throws does not cost the pull', () async {
       final remote = _MemRemote();
@@ -3179,49 +3619,55 @@ void _repairPullsFirst() {
   // `prefetching 1242 blob(s)`, every apply `result=skipped-identical`.
   // -------------------------------------------------------------------------
   group('a pull checkpoints as it goes', () {
-    test('a batch that applies is announced even when the cursor stands still',
-        () async {
-      // The crux. The cursor is bounded by the LOWEST unapplied serverSeq while
-      // files are applied smallest-first, so it can stand still through a great
-      // deal of banked work. A checkpoint tied to it would fire for none of it.
-      final remote = _MemRemote();
-      final a = await _Harness.create(sharedRemote: remote);
-      addTearDown(a.dispose);
-      await a.engine.start();
-      final pushed = a.engine.events
-          .firstWhere((e) => e is SyncFilePushed)
-          .timeout(const Duration(seconds: 10));
-      a.io.files['$_vaultPath/note.md'] = Uint8List.fromList('hello'.codeUnits);
-      a.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
-      await pushed;
-      final records = _recordsFromPuts(a.state);
+    test(
+      'a batch that applies is announced even when the cursor stands still',
+      () async {
+        // The crux. The cursor is bounded by the LOWEST unapplied serverSeq while
+        // files are applied smallest-first, so it can stand still through a great
+        // deal of banked work. A checkpoint tied to it would fire for none of it.
+        final remote = _MemRemote();
+        final a = await _Harness.create(sharedRemote: remote);
+        addTearDown(a.dispose);
+        await a.engine.start();
+        final pushed = a.engine.events
+            .firstWhere((e) => e is SyncFilePushed)
+            .timeout(const Duration(seconds: 10));
+        a.io.files['$_vaultPath/note.md'] = Uint8List.fromList(
+          'hello'.codeUnits,
+        );
+        a.changes.emit(const FileCreatedEvent(relativePath: 'note.md'));
+        await pushed;
+        final records = _recordsFromPuts(a.state);
 
-      final b = await _Harness.create(sharedRemote: remote);
-      addTearDown(b.dispose);
-      b.state.recordsFor = (_) => records;
-      b.state.getCursor = records.last.serverSeq;
-      await b.engine.start();
+        final b = await _Harness.create(sharedRemote: remote);
+        addTearDown(b.dispose);
+        b.state.recordsFor = (_) => records;
+        b.state.getCursor = records.last.serverSeq;
+        await b.engine.start();
 
-      // Everything is applied and the cursor is already where this response
-      // leaves it, so the SECOND pull moves it nowhere — and must still say it
-      // banked a batch.
-      b.events.clear();
-      await b.engine.triggerPull();
+        // Everything is applied and the cursor is already where this response
+        // leaves it, so the SECOND pull moves it nowhere — and must still say it
+        // banked a batch.
+        b.events.clear();
+        await b.engine.triggerPull();
 
-      final checkpoints = b.events.whereType<SyncPullBatchApplied>().toList();
-      expect(
-        checkpoints,
-        isNotEmpty,
-        reason: 'a pull that applied a batch has work worth draining, whether '
-            'or not the cursor moved',
-      );
-      expect(
-        checkpoints.map((c) => c.cursor).toSet(),
-        {records.last.serverSeq},
-        reason: 'the cursor stood still across this pull — which is exactly '
-            'the case a cursor-triggered flush was blind to',
-      );
-    });
+        final checkpoints = b.events.whereType<SyncPullBatchApplied>().toList();
+        expect(
+          checkpoints,
+          isNotEmpty,
+          reason:
+              'a pull that applied a batch has work worth draining, whether '
+              'or not the cursor moved',
+        );
+        expect(
+          checkpoints.map((c) => c.cursor).toSet(),
+          {records.last.serverSeq},
+          reason:
+              'the cursor stood still across this pull — which is exactly '
+              'the case a cursor-triggered flush was blind to',
+        );
+      },
+    );
 
     test('the pull WAITS for the checkpoint before applying more', () async {
       // The property the whole mechanism rests on, and the one four builds
@@ -3273,7 +3719,8 @@ void _repairPullsFirst() {
       expect(
         b.io.files.length,
         appliesAtFlushStart,
-        reason: 'nothing may be applied while the drain is outstanding — that '
+        reason:
+            'nothing may be applied while the drain is outstanding — that '
             'is what makes the drain possible at all',
       );
 
@@ -3281,8 +3728,7 @@ void _repairPullsFirst() {
       await run;
     });
 
-    test('progress is reported for every applied file, not every blob',
-        () async {
+    test('progress is reported for every applied file, not every blob', () async {
       // The bar counted blobs still to fetch. That was right when fetching was
       // the work; a pull now spends most of its time applying, reconciling and
       // pushing, and it emits NOTHING for a batch whose files it already holds
@@ -3309,7 +3755,8 @@ void _repairPullsFirst() {
       expect(
         steps.length,
         records.length,
-        reason: 'one step per applied file — a bar that moves once per batch '
+        reason:
+            'one step per applied file — a bar that moves once per batch '
             'is still for the seconds that matter',
       );
       expect(steps.first.applied, 1);
@@ -3353,13 +3800,15 @@ void _repairPullsFirst() {
       expect(
         b.io.files['$_vaultPath/photo.bin'],
         equals(content),
-        reason: 'the file still has to arrive — staging in memory is a change '
+        reason:
+            'the file still has to arrive — staging in memory is a change '
             'of where the bytes rest, not whether they land',
       );
       expect(
         await b.engine.blobStore.listBlobIds(vaultId: _vaultId),
         isEmpty,
-        reason: 'a pulled file must leave nothing in the database. Anything '
+        reason:
+            'a pulled file must leave nothing in the database. Anything '
             'here is a write the queue has to drain for bytes already on disk',
       );
     });
@@ -3392,7 +3841,8 @@ void _repairPullsFirst() {
       expect(
         b.events.whereType<SyncPullBatchApplied>().length,
         greaterThan(1),
-        reason: 'a checkpoint per batch is the whole point — one for the pull '
+        reason:
+            'a checkpoint per batch is the whole point — one for the pull '
             'is what left a vault\'s worth of writes undrained',
       );
     });
@@ -3407,49 +3857,53 @@ void _repairPullsFirst() {
   // is intact on the server and on every device that could hold it.
   // -------------------------------------------------------------------------
   group('too large to fetch is not the same as lost', () {
-    test('a file over this device\'s ceiling is reported as too large', () async {
-      final remote = _MemRemote();
+    test(
+      'a file over this device\'s ceiling is reported as too large',
+      () async {
+        final remote = _MemRemote();
 
-      // A publishes a file with no ceiling of its own.
-      final a = await _Harness.create(sharedRemote: remote);
-      addTearDown(a.dispose);
-      await a.engine.start();
-      final pushed = a.engine.events
-          .firstWhere((e) => e is SyncFilePushed)
-          .timeout(const Duration(seconds: 10));
-      a.io.files['$_vaultPath/big.bin'] = Uint8List.fromList(
-        List.generate(4000, (i) => (i * 11) % 256),
-      );
-      a.changes.emit(const FileCreatedEvent(relativePath: 'big.bin'));
-      await pushed;
-      final records = _recordsFromPuts(a.state);
-      expect(records, isNotEmpty);
+        // A publishes a file with no ceiling of its own.
+        final a = await _Harness.create(sharedRemote: remote);
+        addTearDown(a.dispose);
+        await a.engine.start();
+        final pushed = a.engine.events
+            .firstWhere((e) => e is SyncFilePushed)
+            .timeout(const Duration(seconds: 10));
+        a.io.files['$_vaultPath/big.bin'] = Uint8List.fromList(
+          List.generate(4000, (i) => (i * 11) % 256),
+        );
+        a.changes.emit(const FileCreatedEvent(relativePath: 'big.bin'));
+        await pushed;
+        final records = _recordsFromPuts(a.state);
+        expect(records, isNotEmpty);
 
-      // B cannot carry a file that size.
-      final b = await _Harness.create(
-        sharedRemote: remote,
-        maxFileSizeBytes: () => 500,
-      );
-      addTearDown(b.dispose);
-      b.state.recordsFor = (since) => since == 0 ? records : const [];
-      b.state.getCursor = records.last.serverSeq;
-      await b.engine.start();
+        // B cannot carry a file that size.
+        final b = await _Harness.create(
+          sharedRemote: remote,
+          maxFileSizeBytes: () => 500,
+        );
+        addTearDown(b.dispose);
+        b.state.recordsFor = (since) => since == 0 ? records : const [];
+        b.state.getCursor = records.last.serverSeq;
+        await b.engine.start();
 
-      final refused = b.events.whereType<SyncFileTooLargeToFetch>().toList();
-      expect(
-        refused,
-        isNotEmpty,
-        reason: 'the refusal has to be distinguishable from a lost blob, '
-            'which is what the user was told before',
-      );
-      expect(refused.first.limitBytes, 500);
-      expect(refused.first.sizeBytes, greaterThan(500));
-      expect(
-        b.io.files.containsKey('$_vaultPath/big.bin'),
-        isFalse,
-        reason: 'refused means not written, not written-partially',
-      );
-    });
+        final refused = b.events.whereType<SyncFileTooLargeToFetch>().toList();
+        expect(
+          refused,
+          isNotEmpty,
+          reason:
+              'the refusal has to be distinguishable from a lost blob, '
+              'which is what the user was told before',
+        );
+        expect(refused.first.limitBytes, 500);
+        expect(refused.first.sizeBytes, greaterThan(500));
+        expect(
+          b.io.files.containsKey('$_vaultPath/big.bin'),
+          isFalse,
+          reason: 'refused means not written, not written-partially',
+        );
+      },
+    );
 
     test('a file within the ceiling is fetched and says nothing', () async {
       final remote = _MemRemote();

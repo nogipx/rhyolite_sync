@@ -871,8 +871,17 @@ Future<void> _probeExternalStorage(
   final id = ChunkedBlobIO.hasherFor(null)(bytes);
   try {
     await storage.upload([(bytes, id)]);
-    final present = await storage.exists([id]);
-    if (!present.contains(id)) {
+    bool readBack;
+    try {
+      readBack = (await storage.exists([id])).contains(id);
+    } on BlobProbeIncomplete {
+      // The upload just proved the network is up, so this is a backend that
+      // stores objects but will not answer HEAD for them. That costs it the
+      // background integrity pass, not the ability to hold a vault — so ask
+      // for the object instead of turning it away at setup.
+      readBack = (await storage.download([id])).containsKey(id);
+    }
+    if (!readBack) {
       throw StateError(
         'the storage accepted a test object but did not return it — check the '
         'bucket or path',
@@ -1928,17 +1937,20 @@ $kSyncPanelCss
           // the docked panel.
           session.indicator = SyncStatusIndicator(
             plugin: plugin,
-            engine: engine,
+            // No engine: this surface does not listen to it. The model folds
+            // the stream once and this repaints when told. A constructor that
+            // still took the engine would invite a second subscription, which
+            // is exactly how the dot came to sit stale.
             logger: _logController.scope('plugin'),
             onTap: () => unawaited(syncPanel.reveal()),
             // In offline/error/auth-expired the tap forces a recovery instead of
             // just opening the panel (see recover assignment below).
             onReconnect: () => unawaited(recover?.call(requireVisible: false)),
-            // Same source as the panel, read at the same moments. Both used to
-            // hold a value pushed on transitions, and whichever was built
-            // after the last one held the wrong half of it.
-            settingsBusy: () =>
-                session.configSync?.hasOutstandingWork ?? false,
+            // Not "the same source as the panel" any more — the same OBJECT.
+            // They used to fold the same events into two states and combine
+            // them differently, so with no network the panel said "not
+            // connected" while the dot beside it was green.
+            status: syncPanel.status,
           )..init();
 
           // The settings notify subscription is an in-flight call too, so it

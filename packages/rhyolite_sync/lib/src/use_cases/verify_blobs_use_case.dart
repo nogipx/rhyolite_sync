@@ -108,6 +108,10 @@ class VerifyBlobsUseCase {
 
   final LogScope _log;
 
+  /// How many unhealable ids are named individually before the rest become a
+  /// count. Enough to go looking with, short enough to stay one line.
+  static const int _unhealableSample = 10;
+
   Future<VerifyBlobsResult> call({RpcContext? context}) async {
     final referenced = <String>{};
     for (final state in store.allValuesFlat) {
@@ -202,11 +206,20 @@ class VerifyBlobsUseCase {
     }
 
     final unhealable = notInCache.length;
-    for (final id in notInCache) {
-      final tag = id.length <= 8 ? id : id.substring(0, 8);
+    if (unhealable > 0) {
+      // One line, not one per blob. This used to warn per id, and a partially
+      // present vault — a phone holding a few hundred of its files — produced
+      // four hundred identical lines that were 90% of the device's whole
+      // problem report, burying every other finding in it.
+      final tags = notInCache
+          .take(_unhealableSample)
+          .map((id) => id.length <= 8 ? id : id.substring(0, 8))
+          .join(', ');
+      final rest = unhealable - _unhealableSample;
       _log.warning(
-        'Blob verify: $tag missing on server, absent from the local cache '
-        'and not reproducible from disk — cannot heal from this device',
+        'Blob verify: $unhealable blob(s) missing on server, absent from the '
+        'local cache and not reproducible from disk — cannot heal from this '
+        'device: $tags${rest > 0 ? ', +$rest more' : ''}',
       );
     }
 

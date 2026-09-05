@@ -155,7 +155,8 @@ Future<_Fx> _newPuller(
     emit: events.add,
     isFatalRejection: (_) => false,
     log: LogScope.noop,
-    prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
+    prefetchFiles: (blobRefs, {context, onFileProgress}) async =>
+        (fromServer: 0, rebuilt: 0),
     downloadConcurrency: 1,
   );
 
@@ -199,7 +200,8 @@ void main() {
           emit: events.add,
           isFatalRejection: (_) => false,
           log: LogScope.noop,
-          prefetchFiles: (blobRefs, {context, onFileProgress}) async {},
+          prefetchFiles: (blobRefs, {context, onFileProgress}) async =>
+        (fromServer: 0, rebuilt: 0),
           downloadConcurrency: 1,
         );
 

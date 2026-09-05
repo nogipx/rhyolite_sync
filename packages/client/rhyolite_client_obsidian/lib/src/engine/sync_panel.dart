@@ -9,8 +9,7 @@ import 'package:rpc_dart/rpc_dart.dart';
 
 import '../i18n/i18n.dart';
 import 'plan_status.dart';
-import 'sync_activity.dart';
-import 'server_rejections.dart';
+import 'sync_status.dart';
 import 'session_contracts.dart';
 
 /// Stylesheet for the docked sync panel. Injected once at plugin load through
@@ -20,7 +19,7 @@ import 'session_contracts.dart';
 ///
 /// Status colours are the same literal rgb() values the status-bar indicator
 /// uses, so both surfaces always agree on what "green" means.
-const kSyncPanelCss = r'''
+const _kSyncPanelStructureCss = r'''
 /* ── Rhyolite sync panel ─────────────────────────────────────────────────── */
 .view-content.rhyolite-sync-panel-content { padding: 0; }
 
@@ -29,17 +28,6 @@ const kSyncPanelCss = r'''
   padding: 12px 12px 24px;
   color: var(--text-normal);
 }
-.rh-panel.is-ready      { --rh-status: rgb(48, 168, 96); }
-.rh-panel.is-pending    { --rh-status: rgb(220, 180, 60); }
-.rh-panel.is-connecting { --rh-status: rgb(200, 180, 90); }
-.rh-panel.is-syncing    { --rh-status: rgb(48, 128, 240); }
-.rh-panel.is-offline    { --rh-status: rgb(230, 110, 50); }
-.rh-panel.is-auth       { --rh-status: rgb(240, 150, 48); }
-.rh-panel.is-sub        { --rh-status: rgb(240, 150, 48); }
-.rh-panel.is-error      { --rh-status: rgb(220, 56, 56); }
-.rh-panel.is-stopped    { --rh-status: rgb(128, 128, 128); }
-.rh-panel.is-blocked    { --rh-status: rgb(240, 150, 48); }
-.rh-panel.is-paused     { --rh-status: rgb(150, 150, 150); }
 
 .rh-hidden { display: none !important; }
 
@@ -321,6 +309,21 @@ const kSyncPanelCss = r'''
 }
 ''';
 
+/// The panel stylesheet: hand-written structure plus the status colours
+/// GENERATED from the one table the status dot also reads.
+///
+/// The colours used to be a block of declarations right here, which is how the
+/// panel and the dot came to disagree on three of them — connecting, paused,
+/// and a repair that was purple in one surface and ordinary sync blue in the
+/// other. Nobody changed those on purpose. Two tables are simply not a thing
+/// that stays equal.
+///
+/// Still classes, not inline styles: this panel documents that themes and
+/// snippets can override any of its colours, and inlining would quietly take
+/// that away. Generating the declarations keeps both properties at once.
+final String kSyncPanelCss =
+    '$_kSyncPanelStructureCss\n${syncToneCss('.rh-panel')}\n';
+
 /// `globalThis` slot holding the panel view that is currently open, or null
 /// when the panel is closed. Written by both the boot placeholder and the live
 /// [SyncPanel] so whichever takes over next can adopt an already-open leaf
@@ -461,7 +464,11 @@ class SyncPanel implements SessionPanel {
        _onFetchUsage = onFetchUsage,
        _onSettingsCategories = onSettingsCategories,
        _onPluginSyncEnabled = onPluginSyncEnabled,
-       _work = SyncActivity(settingsBusy: onSettingsBusy),
+       _status = SyncStatusModel(
+         settingsBusy: onSettingsBusy,
+         paused: isPaused,
+         blocked: () => startBlock?.call() != null,
+       ),
        _onPluginStats = onPluginStats,
        _onStorageDetails = onStorageDetails,
        _onDatabaseStats = onDatabaseStats,
@@ -499,7 +506,19 @@ class SyncPanel implements SessionPanel {
   final bool? Function()? _onPluginSyncEnabled;
   /// The shared answer to "is anything working", identical to the status
   /// dot's — see [SyncActivity]. Two rules that had to agree are now one.
-  final SyncActivity _work;
+  /// The one status, shared with the dot.
+  ///
+  /// Built here because the panel already holds every predicate it needs —
+  /// paused, the start block, settings work — and handed OUT rather than
+  /// duplicated. Two models folding the same stream would agree today and be
+  /// free to drift tomorrow, which is exactly the bug this replaced.
+  final SyncStatusModel _status;
+  void Function()? _removeStatusListener;
+
+  /// For the host to give the status dot, so both surfaces read one object.
+  SyncStatusModel get status => _status;
+
+  /// Reached through the model so there is exactly one of it.
   final Future<({int count, int bytes})?> Function()? _onPluginStats;
   final void Function()? _onStorageDetails;
 
@@ -518,7 +537,7 @@ class SyncPanel implements SessionPanel {
   void setPlanNotice(PlanNotice notice) {
     if (notice == _planNotice) return;
     _planNotice = notice;
-    _render();
+    _repaint();
   }
 
   /// Propagates the deletes the user approved from the vanished-files section.
@@ -575,7 +594,6 @@ class SyncPanel implements SessionPanel {
   // Connection/activity model — green ("ready") means genuinely connected with
   // no work pending. The engine emits no "sync finished" event, so activity is
   // a transient overlay cleared by an idle-debounce timer.
-  bool _everStarted = false;
 
   /// A resume the user asked for, still in flight.
   ///
@@ -586,11 +604,7 @@ class SyncPanel implements SessionPanel {
   /// "sync stopped": the button had flipped, so the only thing on screen that
   /// answered the click was the button itself. Held until the first engine
   /// event, which knows better than we do.
-  bool _resuming = false;
-  bool _connected = false;
-  bool _connecting = false;
   int _connectAttempt = 0;
-  _Blocker _blocker = _Blocker.none;
 
   /// A 3 s idle debounce over whatever events happen to arrive — a hint that
   /// something is moving, never the verdict on its own.
@@ -601,11 +615,9 @@ class SyncPanel implements SessionPanel {
   /// mid-download — showing "up to date" while 47 seconds of transfer were
   /// still to come. Someone who believes that and quits loses the rest of it.
   /// The verdict is [SyncActivity]; this only widens it.
-  bool _activity = false;
   Timer? _activityTimer;
   Timer? _errorTimer;
 
-  bool _hasPending = false;
   ({int completed, int total})? _progress;
 
   /// Whether this pull is reporting files, so the blob figure stops competing.
@@ -708,6 +720,11 @@ class SyncPanel implements SessionPanel {
     final pending = jsu.getProperty<JSObject?>(jsu.globalThis, _kOpenViewSlot);
     if (pending != null) _onViewOpen(pending);
 
+    // The model folds the stream; this listens for what only the panel shows
+    // — the attempt counter, byte totals, the database-full banner — and
+    // repaints when the model says the answer moved.
+    _status.bind(_engine.events);
+    _removeStatusListener = _status.addListener(_render);
     _sub = _engine.events.listen(_onEvent);
   }
 
@@ -716,7 +733,7 @@ class SyncPanel implements SessionPanel {
   /// while the engine is down would sit behind a stale banner until the 30s
   /// tick. No-op when no view is open.
   @override
-  void refresh() => _scheduleRender();
+  void refresh() => _scheduleRepaint();
 
   /// Told by the host when settings sync starts or stops having work.
   ///
@@ -725,12 +742,17 @@ class SyncPanel implements SessionPanel {
   /// event-driven off the engine alone. That is exactly how it came to report
   /// "up to date" over a settings queue that was still transferring.
   @override
-  void setSettingsActivity(bool active) => _scheduleRender();
+  void setSettingsActivity(bool active) => _scheduleRepaint();
 
   @override
   void dispose() {
     _sub?.cancel();
     _sub = null;
+    // The panel builds the model, so it ends it. The dot removed its own
+    // listener when it was disposed; anything still registered goes with it.
+    _removeStatusListener?.call();
+    _removeStatusListener = null;
+    _status.dispose();
     _renderTimer?.cancel();
     _renderTimer = null;
     _activityTimer?.cancel();
@@ -780,14 +802,14 @@ class SyncPanel implements SessionPanel {
     jsu.setProperty(jsu.globalThis, _kOpenViewSlot, view);
     _contentEl = jsu.getProperty<JSObject>(view, 'contentEl');
     _dropSkeleton();
-    _render();
+    _repaint();
     _maybeFetchUsage();
     _fetchSideStats();
     _startSideStatsRetries();
     _tickTimer?.cancel();
     _tickTimer = Timer.periodic(
       const Duration(seconds: 30),
-      (_) => _scheduleRender(),
+      (_) => _scheduleRepaint(),
     );
   }
 
@@ -807,7 +829,7 @@ class SyncPanel implements SessionPanel {
           .then((stats) {
             if (stats == null && _pluginStats == null) return;
             _pluginStats = stats;
-            _scheduleRender();
+            _scheduleRepaint();
           })
           .catchError((Object e) {
             _log?.warning('sync panel: plugin stats fetch failed: $e');
@@ -876,41 +898,24 @@ class SyncPanel implements SessionPanel {
   // ---------------------------------------------------------------------------
 
   void _onEvent(SyncEngineEvent event) {
-    _work.observe(event);
+    // Deliberately does NOT fold the model — it folds the same stream itself,
+    // once. Two surfaces folding one model was how the second of them came to
+    // be told "nothing changed" and stopped repainting.
     switch (event) {
       case SyncStarted():
-        // The engine is talking; it owns the status from here.
-        _resuming = false;
-        _everStarted = true;
-        _connecting = true;
-        _connected = false;
-        _blocker = _Blocker.none;
+        _connectAttempt = 0;
       case SyncConnecting(:final attempt):
-        _connecting = true;
-        _connected = false;
         _connectAttempt = attempt;
       case SyncConnected():
-        _connected = true;
-        _connecting = false;
         _connectAttempt = 0;
-        _blocker = _Blocker.none; // a live connection clears a transient error
         _lastError = null;
         _uploaded = 0;
         _downloaded = 0;
       case SyncStopped():
-        _everStarted = false;
-        _connected = false;
-        _connecting = false;
         _databaseFull = null;
         _clearActivity();
       case SyncDisconnected():
-        _connected = false;
-        _connecting = false;
         _clearActivity();
-      case SyncBusy():
-        // Folded by [_work], which both surfaces read. Kept as an arm so the
-        // switch stays exhaustive over what the panel handles.
-        break;
       case SyncDatabaseFull(:final bytes, :final limitBytes):
         _databaseFull = (bytes: bytes, limitBytes: limitBytes);
       case SyncPushing():
@@ -937,8 +942,6 @@ class SyncPanel implements SessionPanel {
           _pushRecent(up: false, path: path, at: event.timestamp);
         }
         _bumpActivity();
-      case SyncPending(:final hasPending):
-        _hasPending = hasPending;
       case SyncCursorAdvanced():
         _lastSyncedAt = event.timestamp;
         // The pull ended, so its file count is spent. Cleared here rather than
@@ -1004,54 +1007,46 @@ class SyncPanel implements SessionPanel {
           _dataLoss.removeRange(0, _dataLoss.length - 100);
         }
       case SyncError(:final message):
-        _blocker = _Blocker.error;
         _lastError = message;
-        // Transient errors shouldn't stick red forever (the engine stays
-        // connected and keeps retrying). Auto-clear after a few seconds unless
-        // a harder blocker (auth/sub) supersedes it meanwhile.
+        // The expiry itself is the model's — one deadline for both surfaces.
+        // This only nudges a repaint at the moment it passes, so the panel
+        // does not sit red until the next event happens along.
         _errorTimer?.cancel();
-        _errorTimer = Timer(const Duration(seconds: 6), () {
+        _errorTimer = Timer(SyncStatusModel.errorLinger, () {
           _errorTimer = null;
-          if (_blocker == _Blocker.error) {
-            _blocker = _Blocker.none;
-            _lastError = null;
-            _render();
-          }
+          _lastError = null;
+          _repaint();
         });
-      case SessionExpired():
-        _blocker = _Blocker.auth;
-      case SubscriptionRequired():
-        _blocker = _Blocker.sub;
-      case SyncServerRejected(:final code) when code.startsWith('auth.'):
-        _blocker = _Blocker.auth;
-      case SyncServerRejected(:final code) when code.startsWith('app_policy.'):
-        _blocker = _Blocker.sub;
       default:
         return; // no visible change — skip the re-render
     }
-    _scheduleRender();
+    _scheduleRepaint();
   }
 
   /// Marks sync activity live and (re)arms the idle-debounce. The engine emits
   /// no "finished" event, so after 3s of silence we fall back to the base
   /// connection status (ready/pending) instead of showing "Syncing…" forever.
+  /// Re-arms the repaint that closes a burst.
+  ///
+  /// The "is it still working" part of this moved to [SyncStatusModel] — it
+  /// was a flag only this surface had, and the dot covered the same gap with a
+  /// timer of its own, which is two mechanisms for one question. What is left
+  /// is the repaint: the model's grace period expires lazily, so somebody has
+  /// to ask again at the moment it does.
   void _bumpActivity() {
-    _activity = true;
     _activityTimer?.cancel();
     _activityTimer = Timer(const Duration(seconds: 3), () {
       _activityTimer = null;
-      _activity = false;
       // A burst that just finished may have brought in new settings or plugin
       // records — that's the cheapest moment to notice.
       _refreshSideStatsIfStale();
-      _render();
+      _repaint();
     });
   }
 
   void _clearActivity() {
     _activityTimer?.cancel();
     _activityTimer = null;
-    _activity = false;
     _resetProgress();
     // A stopped or disconnected engine has no transfer in flight, whatever the
     // last event said. Left behind, they hold the status at "syncing" for a
@@ -1079,7 +1074,7 @@ class SyncPanel implements SessionPanel {
     if (_usageFetching) return;
     _usage = null;
     _maybeFetchUsage(); // sets _usageFetching synchronously, kicks off the fetch
-    _render(); // reflect the fetching state immediately
+    _repaint(); // reflect the fetching state immediately
   }
 
   void _maybeFetchUsage() {
@@ -1096,7 +1091,7 @@ class SyncPanel implements SessionPanel {
         })
         .whenComplete(() {
           _usageFetching = false;
-          _scheduleRender();
+          _scheduleRepaint();
         });
   }
 
@@ -1104,11 +1099,28 @@ class SyncPanel implements SessionPanel {
   // Rendering — coalesced so a burst of events repaints once.
   // ---------------------------------------------------------------------------
 
-  void _scheduleRender() {
-    if (_contentEl == null || _renderTimer != null) return;
+  /// Repaints EVERY surface, not just this one.
+  ///
+  /// The panel used to call its own `_render()` after changing something, and
+  /// each of those nineteen call sites was a chance to leave the status dot on
+  /// the previous answer — which pausing did: grey panel, green dot. There is
+  /// one way to ask for a repaint now and it goes through the shared model, so
+  /// forgetting the other surface is not something a call site can do.
+  ///
+  /// Cheap enough to be unconditional: the dot re-reads a few fields and sets
+  /// a colour. Wasting that is not comparable to the two disagreeing.
+  void _repaint() => _status.notifyListeners();
+
+  void _scheduleRepaint() {
+    // Deliberately NOT gated on the panel view being open. It used to be, and
+    // that was harmless while it only repainted the panel; now it repaints the
+    // dot too, and most of the time the side panel is closed — so the guard
+    // would have silently cut the dot off from every host-driven change.
+    // [_render] does its own early return when there is nothing to draw.
+    if (_renderTimer != null) return;
     _renderTimer = Timer(const Duration(milliseconds: 150), () {
       _renderTimer = null;
-      _render();
+      _repaint();
     });
   }
 
@@ -1285,7 +1297,11 @@ class SyncPanel implements SessionPanel {
     if (panel == null) return;
 
     final status = _effective();
-    jsu.setProperty(panel, 'className', 'rh-panel ${_statusClass(status)}');
+    jsu.setProperty(
+      panel,
+      'className',
+      'rh-panel ${syncToneClass(_tone(status))}',
+    );
 
     _renderHero(status);
     _renderStats();
@@ -1344,7 +1360,7 @@ class SyncPanel implements SessionPanel {
     _setHidden(alert, false);
   }
 
-  void _renderHero(_Status status) {
+  void _renderHero(SyncStatusKind status) {
     _setText(_statusEl!, _statusLabel(status));
 
     // "Not connected" is a claim about the connection, not about history — a
@@ -1356,9 +1372,9 @@ class SyncPanel implements SessionPanel {
     // synced before: "synced 3h ago" under "Not signed in" reads as reassurance
     // when the whole point is that nothing is syncing now.
     final syncedAt = _lastSyncedAt;
-    final offline = status == _Status.offline || status == _Status.stopped;
+    final offline = status == SyncStatusKind.offline || status == SyncStatusKind.stopped;
     final String sub;
-    if (status == _Status.blocked) {
+    if (status == SyncStatusKind.blocked) {
       sub = switch (_currentBlock()) {
         SyncStartBlock.signedOut => S.blockedSignedOutHint,
         SyncStartBlock.noVault => S.blockedNoVaultHint,
@@ -1375,7 +1391,7 @@ class SyncPanel implements SessionPanel {
     _setText(_subEl!, sub);
     _setHidden(_subEl!, sub.isEmpty);
 
-    final error = _blocker == _Blocker.error ? _lastError : null;
+    final error = status == SyncStatusKind.error ? _lastError : null;
     _setText(_errEl!, error ?? '');
     _setHidden(_errEl!, error == null);
 
@@ -1383,7 +1399,7 @@ class SyncPanel implements SessionPanel {
     // merely busy — either way the element itself survives the render, so the
     // animation doesn't stutter.
     final progress = _progress;
-    final busy = status == _Status.syncing;
+    final busy = status == SyncStatusKind.syncing;
     final determinate = progress != null && progress.total > 0;
     _setHidden(_progressEl!, !busy);
     _toggleClass(_progressEl!, 'is-indeterminate', busy && !determinate);
@@ -1539,13 +1555,13 @@ class SyncPanel implements SessionPanel {
   Future<void> _runCompact() async {
     if (_compacting) return;
     _compacting = true;
-    _scheduleRender();
+    _scheduleRepaint();
     try {
       await _onCompactDatabase?.call();
     } finally {
       _compacting = false;
       _dbStats = null; // the numbers just changed
-      _scheduleRender();
+      _scheduleRepaint();
     }
   }
 
@@ -1558,7 +1574,7 @@ class SyncPanel implements SessionPanel {
       _onDatabaseStats().then((v) {
         _dbStatsFetching = false;
         _dbStats = v;
-        if (v != null) _scheduleRender();
+        if (v != null) _scheduleRepaint();
       }).catchError((_) {
         _dbStatsFetching = false;
       }),
@@ -1587,7 +1603,7 @@ class SyncPanel implements SessionPanel {
     _setWidth(_meterFillEl!, frac);
   }
 
-  void _renderActions(_Status status) {
+  void _renderActions(SyncStatusKind status) {
     // When sync is stuck (offline / error / auth-expired) the primary control
     // becomes Reconnect — a Pause toggle is useless when we can't reach the
     // server, and the user's intent there is "get me back online". Otherwise
@@ -1597,7 +1613,7 @@ class SyncPanel implements SessionPanel {
     // A missing precondition overrides both: neither pausing nor reconnecting
     // means anything until the user signs in / picks a vault / unlocks, so the
     // button becomes that step and says so.
-    final block = status == _Status.blocked ? _currentBlock() : null;
+    final block = status == SyncStatusKind.blocked ? _currentBlock() : null;
     if (block != null) {
       jsu.setProperty(_primaryBtnEl!, 'className', 'rh-primary mod-cta');
       _setIcon(_primaryIconEl!, _blockIcon(block));
@@ -1751,7 +1767,7 @@ class SyncPanel implements SessionPanel {
       _onClick(confirm, () async {
         final ids = _vanished.keys.toList();
         _vanished = const {};
-        _scheduleRender();
+        _scheduleRepaint();
         await _onConfirmVanished?.call(ids);
       });
       final keep = _el(row, 'span', cls: 'rh-link', text: S.vanishedKeep);
@@ -1759,7 +1775,7 @@ class SyncPanel implements SessionPanel {
         // Dismissed for this session only. Nothing is written: if they really
         // are gone, the next start asks again, which is the right nagging.
         _vanished = const {};
-        _scheduleRender();
+        _scheduleRepaint();
       });
     }
 
@@ -1854,7 +1870,7 @@ class SyncPanel implements SessionPanel {
   /// handler re-derives that meaning at click time.
   Future<void> _handlePrimaryAction() async {
     final status = _effective();
-    final block = status == _Status.blocked ? _currentBlock() : null;
+    final block = status == SyncStatusKind.blocked ? _currentBlock() : null;
     if (block != null) {
       await _handleBlockAction(block);
       return;
@@ -1874,12 +1890,12 @@ class SyncPanel implements SessionPanel {
     await _handleTogglePause();
   }
 
-  bool _isReconnectAction(_Status status) =>
+  bool _isReconnectAction(SyncStatusKind status) =>
       _onReconnect != null &&
       !_isPaused() &&
-      (status == _Status.offline ||
-          status == _Status.error ||
-          status == _Status.authExpired);
+      (status == SyncStatusKind.offline ||
+          status == SyncStatusKind.error ||
+          status == SyncStatusKind.authExpired);
 
   /// Runs the step that clears [block]. Every branch falls back to opening
   /// settings, which is where all four are also fixable — a button that does
@@ -1903,7 +1919,7 @@ class SyncPanel implements SessionPanel {
     } catch (e) {
       _log?.warning('sync panel: unblock action failed: $e');
     }
-    _render();
+    _repaint();
   }
 
   Future<void> _handleTogglePause() async {
@@ -1911,11 +1927,16 @@ class SyncPanel implements SessionPanel {
     // Resuming has nothing to show until the engine emits, so say what is
     // actually happening in the meantime rather than leaving the pre-resume
     // status on screen.
-    _resuming = !next;
+    _status.resuming = !next;
     // _onSetPaused flips the shared pause flag synchronously (before its first
-    // await), so an immediate re-render already reflects the new state.
+    // await), so the repaint that follows already reflects the new state.
+    //
+    // AFTER it, not before. Announcing the change first told both surfaces to
+    // read a flag that had not moved yet; the panel then re-rendered itself
+    // on the next line and saw the new value, and nothing woke the dot again.
+    // Pausing turned the panel grey and left the dot green.
     final done = _onSetPaused(next);
-    _render();
+    _repaint();
     try {
       await done;
     } catch (e) {
@@ -1923,9 +1944,9 @@ class SyncPanel implements SessionPanel {
     } finally {
       // Cleared even when the engine never emitted: a resume that finished
       // without starting anything must not leave a permanent "Connecting...".
-      _resuming = false;
+      _status.resuming = false;
     }
-    _render();
+    _repaint();
   }
 
   // ---------------------------------------------------------------------------
@@ -2093,42 +2114,13 @@ class SyncPanel implements SessionPanel {
   /// Priority: paused > missing precondition > hard blocker > live activity >
   /// connection state. Green ("ready") is reserved for a genuine
   /// connected-and-idle state.
-  _Status _effective() {
-    if (_isPaused()) return _Status.paused;
-    // A missing precondition outranks everything below: the engine is not
-    // merely disconnected, it was never able to run, and no amount of
-    // reconnecting will change that.
-    if (_currentBlock() != null) return _Status.blocked;
-    switch (_blocker) {
-      case _Blocker.auth:
-        return _Status.authExpired;
-      case _Blocker.sub:
-        return _Status.subExpired;
-      case _Blocker.error:
-        return _Status.error;
-      case _Blocker.none:
-        break;
-    }
-    // Before the connection checks: work in progress outranks both
-    // "connecting" and "up to date".
-    //
-    // One rule, shared with the status dot — see [SyncActivity]. It used to
-    // be two, and they disagreed on the same screen: the panel counted open
-    // transfers and the dot did not, so a moving file left one saying
-    // "syncing" beside the other at rest.
-    //
-    // `_activity` is a three-second debounce over incoming events and stays
-    // here alone. It smooths a burst that carries no transfer; the dot covers
-    // the same gap with its own revert timer. Neither can make the answer
-    // differ, because neither is the answer.
-    if (_work.isWorking || _activity) {
-      return _Status.syncing;
-    }
-    if (_connected) return _hasPending ? _Status.pending : _Status.ready;
-    if (_connecting || _resuming) return _Status.connecting;
-    if (_everStarted) return _Status.offline;
-    return _Status.stopped;
-  }
+  /// The shown status.
+  ///
+  /// Was a ladder of this class's own flags, in an order that happened to be
+  /// right; the dot had its own and got the order wrong, and with no network
+  /// the two contradicted each other on the same screen. There is one ladder
+  /// now and it lives in [SyncStatusModel].
+  SyncStatusKind _effective() => _status.kind;
 
   /// The host's live verdict, or null when nothing is missing. Guarded because
   /// the callback reads engine/auth state that a teardown may have dropped.
@@ -2143,9 +2135,9 @@ class SyncPanel implements SessionPanel {
     }
   }
 
-  String _statusLabel(_Status status) => switch (status) {
-    _Status.stopped => S.syncStopped,
-    _Status.blocked => switch (_currentBlock()) {
+  String _statusLabel(SyncStatusKind status) => switch (status) {
+    SyncStatusKind.stopped => S.syncStopped,
+    SyncStatusKind.blocked => switch (_currentBlock()) {
       SyncStartBlock.signedOut => S.blockedSignedOut,
       SyncStartBlock.noVault => S.blockedNoVault,
       SyncStartBlock.locked => S.blockedLocked,
@@ -2153,35 +2145,25 @@ class SyncPanel implements SessionPanel {
       SyncStartBlock.storageRefused => S.blockedStorageRefused,
       null => S.syncStopped,
     },
-    _Status.connecting => _connectAttempt <= 2 ? S.connecting : S.reconnecting,
-    _Status.offline => S.offlineCantReach,
-    _Status.ready => S.upToDate,
-    _Status.pending => S.pendingChanges,
-    _Status.syncing =>
+    SyncStatusKind.connecting => _connectAttempt <= 2 ? S.connecting : S.reconnecting,
+    SyncStatusKind.offline => S.offlineCantReach,
+    SyncStatusKind.ready => S.upToDate,
+    SyncStatusKind.pending => S.pendingChanges,
+    SyncStatusKind.syncing =>
       _progress != null
           ? S.syncingProgress(_progress!.completed, _progress!.total)
           : S.syncingEllipsis,
-    _Status.error => S.syncErrorStatus,
-    _Status.authExpired => S.sessionExpiredStatus,
-    _Status.subExpired => S.subscriptionRequiredStatus,
-    _Status.paused => S.pausedStatus,
+    SyncStatusKind.error => S.syncErrorStatus,
+    SyncStatusKind.authExpired => S.sessionExpiredStatus,
+    SyncStatusKind.subExpired => S.subscriptionRequiredStatus,
+    SyncStatusKind.paused => S.pausedStatus,
   };
 
   /// Status → panel modifier class. The actual colours live in
   /// [kSyncPanelCss] and mirror the status-bar indicator's palette.
-  static String _statusClass(_Status status) => switch (status) {
-    _Status.blocked => 'is-blocked',
-    _Status.ready => 'is-ready',
-    _Status.pending => 'is-pending',
-    _Status.connecting => 'is-connecting',
-    _Status.syncing => 'is-syncing',
-    _Status.offline => 'is-offline',
-    _Status.authExpired => 'is-auth',
-    _Status.subExpired => 'is-sub',
-    _Status.error => 'is-error',
-    _Status.stopped => 'is-stopped',
-    _Status.paused => 'is-paused',
-  };
+  /// The one visual identity, from the one table. Same call the dot makes.
+  SyncTone _tone(SyncStatusKind status) =>
+      toneFor(status, _status.phase, hasPending: _status.hasPending);
 
   static String _ago(DateTime t) {
     final d = DateTime.now().difference(t);
@@ -2205,23 +2187,9 @@ class SyncPanel implements SessionPanel {
   }
 }
 
-enum _Status {
-  stopped,
-  blocked,
-  connecting,
-  offline,
-  ready,
-  pending,
-  syncing,
-  error,
-  authExpired,
-  subExpired,
-  paused,
-}
 
-/// Sticky sync-blocking condition, cleared when a live connection is
-/// (re)established (error) or the underlying state is fixed (auth/sub).
-enum _Blocker { none, error, auth, sub }
+
+
 
 /// A precondition the engine needs before it can start AT ALL — as opposed to
 /// a connection it had and lost.

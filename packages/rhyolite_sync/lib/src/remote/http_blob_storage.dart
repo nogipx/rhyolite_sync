@@ -131,10 +131,17 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
             // they mean opposite things: one is a blob to heal, the other is
             // the whole backend saying no. Undifferentiated, a wrong password
             // reads as a vault whose content has evaporated.
-            refused ??= BlobStorageRefused(
-              response.statusCode,
-              response.reasonPhrase ?? '',
-            );
+            //
+            // 401 outranks a 403 already recorded, for the reason [exists]
+            // gives: only one of the two is unambiguous, and which of eight
+            // workers lands first is a race.
+            if (refused == null ||
+                (response.statusCode == 401 && refused!.statusCode != 401)) {
+              refused = BlobStorageRefused(
+                response.statusCode,
+                response.reasonPhrase ?? '',
+              );
+            }
           }
         } catch (_) {
           // Skip blobs that fail to download (e.g. 404).
@@ -147,8 +154,11 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     }
     if (futures.isNotEmpty) await Future.wait(futures);
     // Raised after the whole batch rather than from inside it, so the refusal
-    // is reported once for the request instead of racing eight workers.
-    if (refused != null) throw refused!;
+    // is reported once for the request instead of racing eight workers — and
+    // only when it is about the credentials. A download batch is frequently
+    // one large chunk, so `result` alone is thin evidence; [_throwIfRefused]
+    // also weighs what this backend has already been seen to do.
+    _throwIfRefused(refused, anyAnswered: result.isNotEmpty);
     return result;
   }
 
@@ -223,14 +233,115 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
     if (firstError != null) throw firstError!;
   }
 
+  /// Statuses that are an ANSWER of "no such object". Everything else that is
+  /// not a 2xx and not a refusal is the backend declining to say.
+  ///
+  /// A HEAD the server would not serve — 405 because it implements only GET,
+  /// 429 or 500 after the throttle retries ran out — used to land in the same
+  /// bucket as a 404 and read as an absent blob. It is the opposite: 404 is
+  /// knowledge, the rest is its absence.
+  static const Set<int> _absentStatuses = {404, 410};
+
   @override
   Future<Set<String>> exists(
     List<String> blobIds, {
     RpcContext? context,
   }) async {
     if (blobIds.isEmpty) return {};
+    final first = await _probeBatch(blobIds, context: context);
+    // Raised after the batch rather than from inside it, so one verdict is
+    // reported for the request instead of eight workers racing to throw.
+    _throwIfRefused(first.refused, anyAnswered: first.present.isNotEmpty);
+    if (first.unanswered.isEmpty) return first.present;
+
+    // One retry, of the unanswered ids only. Absence still may not be guessed
+    // at, so a single dropped connection would otherwise be enough to send the
+    // whole batch back unanswered — and on a backend that drops the odd one,
+    // a batch of 128 would then almost never get through and the vault would
+    // never finish verifying. Two independent failures for the same id is a
+    // different claim from one.
+    final second = await _probeBatch(
+      first.unanswered.toList(),
+      context: context,
+    );
+    _throwIfRefused(
+      second.refused,
+      anyAnswered: first.present.isNotEmpty || second.present.isNotEmpty,
+    );
+    if (second.unanswered.isNotEmpty) {
+      throw BlobProbeIncomplete(blobIds.length, second.unanswered.length);
+    }
+    return first.present..addAll(second.present);
+  }
+
+  /// Reports a batch's refusal, but only when it is really about the
+  /// credentials rather than about one object.
+  ///
+  /// 401 is unambiguous: no valid credentials were presented, and it says
+  /// nothing about any particular blob. 403 is not. S3 answers a HEAD for a
+  /// key that is NOT THERE with 403 rather than 404 whenever the caller lacks
+  /// `s3:ListBucket` — which a tight BYO bucket policy routinely does. Read as
+  /// a refusal, the first genuinely-missing blob on such a bucket would put a
+  /// "check your credentials" block in front of the user and abandon the heal,
+  /// which is the exact repair this pass exists to perform.
+  ///
+  /// So a 403 only counts as a refusal when nothing else was served: one
+  /// success proves the credentials work, and demotes it to an object we
+  /// could not get a verdict on.
+  ///
+  /// A demotion is said out loud once, and remembered in
+  /// [_forbiddenIsAmbiguous]. The consequence of one is that this backend can
+  /// never finish a verify pass — every batch holding a blob it answers 403
+  /// for comes back incomplete and is postponed forever — and a repair that
+  /// silently never runs is indistinguishable from a vault that never needed
+  /// one. `runStorageReupload` (settings → Re-upload) is the manual repair
+  /// that does not depend on probing.
+  void _throwIfRefused(
+    BlobStorageRefused? refused, {
+    required bool anyAnswered,
+  }) {
+    if (refused == null) return;
+    if (refused.statusCode == 401 || !(anyAnswered || _forbiddenIsAmbiguous)) {
+      throw refused;
+    }
+    if (_forbiddenIsAmbiguous) return;
+    _forbiddenIsAmbiguous = true;
+    _log.warning(
+      'Blob backend answered HTTP ${refused.statusCode} for a blob while '
+      'serving others — it cannot distinguish "absent" from "forbidden", so '
+      'blob verification cannot reach a verdict on this storage and will keep '
+      'postponing. Re-upload from settings is the repair that does not probe.',
+    );
+  }
+
+  /// Set the first time a 403 arrived alongside a served request.
+  ///
+  /// Remembered rather than re-derived per call, because the evidence is not
+  /// evenly available. [exists] probes up to 128 ids at a time and will nearly
+  /// always have a success to weigh a 403 against; [download] is often called
+  /// with a single large chunk and has none. Uncarried, the same backend reads
+  /// as ambiguous to one method and as a refusal to the other — and the
+  /// refusal is the one that stops a pull to tell the user their credentials
+  /// are wrong when they are not.
+  ///
+  /// One-way and per-instance. The backend is rebuilt each engine run
+  /// (`BlobStorageProvider.reset`), so a credential that really did go bad is
+  /// judged from scratch on the next start rather than excused by what a
+  /// previous run saw.
+  bool _forbiddenIsAmbiguous = false;
+
+  /// HEADs every id once and sorts the replies into present, absent (dropped),
+  /// unanswered, and refused. Draws no conclusion — [exists] does that.
+  Future<
+    ({Set<String> present, Set<String> unanswered, BlobStorageRefused? refused})
+  >
+  _probeBatch(List<String> blobIds, {RpcContext? context}) async {
     final present = <String>{};
+    final unanswered = <String>{};
+    BlobStorageRefused? refused;
     await _runParallel(blobIds, (id) async {
+      // Outside the try on purpose: a cancellation is not a failed probe, and
+      // swallowing it here is how a preempted verify pass kept probing.
       context?.cancellationToken?.throwIfCancelled();
       try {
         final response = await _request(
@@ -238,16 +349,31 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
           _objectUri(id),
           context: context,
         );
-        if (response.statusCode >= 200 && response.statusCode < 300) {
+        final status = response.statusCode;
+        if (status >= 200 && status < 300) {
           present.add(id);
+        } else if (status == 401 || status == 403) {
+          // 401 wins over a 403 already recorded: only one of the two is
+          // unambiguous, and which arrived first is a race between eight
+          // workers. Kept as the batch's verdict either way.
+          if (refused == null ||
+              (status == 401 && refused!.statusCode != 401)) {
+            refused = BlobStorageRefused(status, response.reasonPhrase ?? '');
+          }
+          // Also unanswered, and not redundantly: [_throwIfRefused] can demote
+          // a 403 to "about this object", and then this is the only thing
+          // keeping the id out of the absent pile it was never proven to be in.
+          unanswered.add(id);
+        } else if (!_absentStatuses.contains(status)) {
+          unanswered.add(id);
         }
       } catch (_) {
-        // Treat probe failure as "unknown" — conservatively absent, so the
-        // caller may re-upload (idempotent, content-addressed) rather than
-        // skip a possibly-missing blob.
+        // No reply at all — DNS, socket, timeout. Recorded, never guessed at:
+        // see [BlobProbeIncomplete] for what guessing cost.
+        unanswered.add(id);
       }
     });
-    return present;
+    return (present: present, unanswered: unanswered, refused: refused);
   }
 
   /// Run [body] for every element in [items] with at most [_concurrency]
@@ -523,9 +649,7 @@ class HttpBlobStorage implements IBlobStorage, IListableBlobStorage {
       idle?.cancel();
       idle = Timer(
         _idleTimeout,
-        () => fail(
-          TimeoutException('no data for ${_idleTimeout.inSeconds}s'),
-        ),
+        () => fail(TimeoutException('no data for ${_idleTimeout.inSeconds}s')),
       );
     }
 

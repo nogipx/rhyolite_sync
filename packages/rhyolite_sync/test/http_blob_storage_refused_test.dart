@@ -73,6 +73,77 @@ void main() {
       );
     });
 
+    test('a 403 alongside a served blob is about that blob', () async {
+      // S3 answers a request for a key that is NOT THERE with 403 rather than
+      // 404 whenever the caller lacks s3:ListBucket — routine for a tight BYO
+      // bucket policy. Read as a refusal, one absent chunk stops the pull and
+      // tells the user their credentials are wrong when they are not.
+      final storage = HttpBlobStorage(
+        baseUrl: Uri.parse('https://dav.example.com/dav/'),
+        prefix: 'blobs/vault-1/',
+        auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
+        backend: HttpBlobBackend.webdav,
+        httpClient: MockClient((request) async {
+          final id = request.url.pathSegments.last;
+          return id == 'blob-2'
+              ? http.Response('denied', 403)
+              : http.Response.bytes(_bytes('hello'), 200);
+        }),
+      );
+      final got = await storage.download(['blob-1', 'blob-2']);
+      expect(got.keys, ['blob-1']);
+    });
+
+    test('the ambiguity, once seen, is carried to a lone 403', () async {
+      // A download batch is often one large chunk, so it has no success of its
+      // own to weigh the 403 against — while the probe that ran before it had
+      // 128. Uncarried, the same backend reads as ambiguous to exists() and as
+      // a refusal to download(), which is the reading that stops the pull.
+      var servedOne = true;
+      final storage = HttpBlobStorage(
+        baseUrl: Uri.parse('https://dav.example.com/dav/'),
+        prefix: 'blobs/vault-1/',
+        auth: BasicHttpBlobAuth(username: 'u', password: 'p'),
+        backend: HttpBlobBackend.webdav,
+        httpClient: MockClient((request) async {
+          final id = request.url.pathSegments.last;
+          if (servedOne && id == 'blob-1') {
+            return http.Response.bytes(_bytes('hello'), 200);
+          }
+          return http.Response('denied', 403);
+        }),
+      );
+      // The probe sees a 403 next to a success and records the ambiguity.
+      await expectLater(
+        storage.exists(['blob-1', 'blob-2']),
+        throwsA(isNot(isA<BlobStorageRefused>())),
+      );
+      // Now a batch of one, all 403, and no success anywhere in it.
+      servedOne = false;
+      expect(await storage.download(['blob-2']), isEmpty);
+    });
+
+    test('a 401 is never excused by a served blob', () async {
+      // No demotion for 401: it says no valid credentials were presented, and
+      // that is true whatever else the batch managed to fetch.
+      final storage = HttpBlobStorage(
+        baseUrl: Uri.parse('https://dav.example.com/dav/'),
+        prefix: 'blobs/vault-1/',
+        auth: BasicHttpBlobAuth(username: 'u', password: 'wrong'),
+        backend: HttpBlobBackend.webdav,
+        httpClient: MockClient((request) async {
+          final id = request.url.pathSegments.last;
+          return id == 'blob-2'
+              ? http.Response('denied', 401)
+              : http.Response.bytes(_bytes('hello'), 200);
+        }),
+      );
+      await expectLater(
+        storage.download(['blob-1', 'blob-2']),
+        throwsA(isA<BlobStorageRefused>()),
+      );
+    });
+
     test('the message names the cause and the fix', () async {
       // It reaches the user through the start block verbatim, so "401" alone
       // is not enough — it has to say which knob to turn.

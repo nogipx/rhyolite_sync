@@ -189,6 +189,7 @@ Future<_Fx> _newPuller(
     log: LogScope.noop,
     prefetchFiles: (blobRefs, {context, onFileProgress}) async {
       prefetched.addAll(blobRefs);
+      return (fromServer: blobRefs.length, rebuilt: 0);
     },
     downloadConcurrency: 1,
     diskProvablyHolds: (fileId, blobRef) => diskHolds.contains(fileId),

@@ -1,3 +1,15 @@
+## [3.17.4] - 2026-09-11
+
+**A reconnect picks up where it left off.**
+Work that resumes after the connection returns carries its own identity through
+to the server, so a device coming back online settles straight away. A transfer
+cut mid-flight says so instead of ending quietly.
+
+### Bug Fixes
+
+- reconnecting resumes cleanly, whatever was in flight before (core)
+- a transfer cut mid-flight reports the interruption, not a finished result (core)
+
 ## [3.17.3] - 2026-09-08
 
 **Sign in with a code when the browser cannot bring you back.**

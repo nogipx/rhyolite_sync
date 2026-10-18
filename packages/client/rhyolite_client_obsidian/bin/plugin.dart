@@ -1973,6 +1973,15 @@ $kSyncPanelCss
             showNotice(S.localStateLostNotice);
           });
 
+          // A corrupt database found by the engine never reaches the zone
+          // handler below: start() catches it, reports it as a SyncError and
+          // tears down. The health check then restarted into the same error on
+          // every visibility change, and the reset was never offered — not even
+          // after a reinstall, which leaves IndexedDB where it was.
+          session.corruptionSub = engine.events.listen((e) {
+            if (e is SyncError && _isSqliteCorrupt(e.message)) onCorruptDb();
+          });
+
           // Durability barriers at the engine's convergence points, so an
           // abrupt kill costs at most the last few seconds of sync rather than
           // everything since the last clean unload. Which events qualify is a

@@ -185,6 +185,9 @@ class PluginSession {
   /// Watches for the local state having been lost under the engine.
   StreamSubscription<SyncEngineEvent>? stateLostSub;
 
+  /// Offers the database reset when the engine reports a corrupt database.
+  StreamSubscription<SyncEngineEvent>? corruptionSub;
+
   /// Drains pending writes to durable storage at convergence points.
   StreamSubscription<SyncEngineEvent>? flushSub;
 
@@ -319,6 +322,7 @@ class PluginSession {
       authEventsSub,
       deletedVaultWatchSub,
       stateLostSub,
+      corruptionSub,
       flushSub,
       selfHealSub,
     ];
@@ -326,6 +330,7 @@ class PluginSession {
     authEventsSub = null;
     deletedVaultWatchSub = null;
     stateLostSub = null;
+    corruptionSub = null;
     flushSub = null;
     selfHealSub = null;
     for (final sub in subs) {

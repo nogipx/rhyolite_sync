@@ -22,17 +22,15 @@ Syncs your vault across devices using end-to-end encryption.
 
 ## Requirements
 
-- A Rhyolite Sync account — sign up at [rhyolite.nogipx.dev](https://rhyolite.nogipx.dev)
-- An active subscription
+For Rhyolite Cloud, use a [Rhyolite account](https://rhyolite.nogipx.dev). For self-hosting, use your server URL and token.
 
 ## Installation
 
-1. Open Settings → Community plugins → Browse.
-2. Search for **Rhyolite Sync** and install it.
-3. Enable the plugin.
-4. Open the plugin settings, create an account or sign in.
-5. Subscribe to activate sync.
-6. Connect or create a vault and enter your passphrase.
+1. In Obsidian, install and enable **BRAT** from Settings → Community plugins.
+2. Open BRAT settings, choose **Add beta plugin**, and enter `https://github.com/nogipx/rhyolite_sync`.
+3. Enable **Rhyolite Sync** in Community plugins.
+4. Open the plugin settings. For Rhyolite Cloud, sign in and connect your vault. For a self-hosted server, enter the server URL and token.
+5. Enter your vault passphrase.
 
 ## Network services
 
@@ -66,7 +64,9 @@ Where the different pieces of state live:
 
 ### Telemetry
 
-Release builds contain **no telemetry**. No usage data, crash reports, or analytics are sent anywhere. Dev builds can opt into streaming structured logs to a local developer-controlled `rpc_log` collector — that path is statically compiled out of release builds, so user installs never reach out to a developer host.
+Diagnostics are local by default. To stream logs from multiple devices on the same Wi-Fi, run `just log-collector` on the development machine. On each device, open the plugin's **Diagnostics** settings, enter the collector URL printed for that platform, then enable **Send logs to collector**. On macOS, install `mkcert` and `caddy` and run `mkcert -install` once. On iOS, install the public `rootCA.pem` from `mkcert -CAROOT` as a profile, then enable full trust in Certificate Trust Settings.
+
+Connect an MCP client on the collector machine to `http://127.0.0.1:9501/mcp`. Call `rpc_log_sources` to see connected devices and their labels. Call `rpc_log_get_logs` with a `device` label to isolate one connection, or with `traceId` to follow a traced operation. Pass the returned cursor on the next call to read newer records.
 
 ## Bundled native components
 
@@ -88,7 +88,7 @@ License: sqlite3mc is dual-licensed under the [MIT License](https://github.com/u
 
 ## Build provenance
 
-The plugin is written in [Dart](https://dart.dev) and compiled to JavaScript via `dart2js`. The compiled `main.js` shipped with each release is built in a private CI from a private source tree.
+The sync engine is written in [Dart](https://dart.dev) and compiled to JavaScript via `dart2js`; the Obsidian shell around it is TypeScript, bundled with esbuild. Both halves are concatenated into the single `main.js` shipped with each release, built in a private CI from a private source tree.
 
 Each release lists the **SHA-256 of `main.js`** and a link to the CI workflow run that produced it in the release notes. You can verify the binary you install matches that hash with `shasum -a 256 main.js`.
 

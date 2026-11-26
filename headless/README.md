@@ -9,7 +9,7 @@ Run as the user who owns the notes. Keep the state and secrets directories outsi
 ```sh
 mkdir -p ~/rhyolite-headless
 cd ~/rhyolite-headless
-curl -fLO https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.0/headless/compose.yaml
+curl -fLO https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.1/headless/compose.yaml
 mkdir -m 700 -p state secrets
 printf 'RHYOLITE_UID=%s\nRHYOLITE_GID=%s\nVAULT_PATH=/absolute/path/to/notes\n' "$(id -u)" "$(id -g)" > .env
 touch secrets/passphrase && chmod 600 secrets/passphrase
@@ -35,13 +35,13 @@ Run `docker compose up -d`. Create a note in Obsidian and check that it appears 
 
 ## Install without Docker
 
-Download version 1.0.0 for your platform.
+Download version 1.0.1 for your platform.
 
 | | x64 | arm64 |
 |---|---|---|
-| Linux (glibc) | [Download Linux x64](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.0/headless/downloads/rhyolite-1.0.0-linux-x64.tar.gz) | [Download Linux arm64](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.0/headless/downloads/rhyolite-1.0.0-linux-arm64.tar.gz) |
-| macOS | [Download Intel](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.0/headless/downloads/rhyolite-1.0.0-macos-x64.tar.gz) | [Download Apple Silicon](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.0/headless/downloads/rhyolite-1.0.0-macos-arm64.tar.gz) |
+| Linux (glibc) | [Download Linux x64](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.1/headless/downloads/rhyolite-1.0.1-linux-x64.tar.gz) | [Download Linux arm64](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.1/headless/downloads/rhyolite-1.0.1-linux-arm64.tar.gz) |
+| macOS | [Download Intel](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.1/headless/downloads/rhyolite-1.0.1-macos-x64.tar.gz) | [Download Apple Silicon](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.1/headless/downloads/rhyolite-1.0.1-macos-arm64.tar.gz) |
 
-[SHA-256 checksums](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.0/headless/downloads/SHA256SUMS). Extract the entire archive into one directory and run `./bin/rhyolite --help` there. Linux needs `libsqlite3.so` (on Debian or Ubuntu, install `libsqlite3-dev`).
+[SHA-256 checksums](https://raw.githubusercontent.com/nogipx/rhyolite_sync/cli-1.0.1/headless/downloads/SHA256SUMS). Extract the entire archive into one directory and run `./bin/rhyolite --help` there. Linux needs `libsqlite3.so` (on Debian or Ubuntu, install `libsqlite3-dev`).
 
 For Cloud, run `./bin/rhyolite login --vault-path /path/to/notes` once. Then run `./bin/rhyolite daemon --vault-path /path/to/notes --passphrase-file /path/to/passphrase` for continuous sync, or replace `daemon` with `sync` for one pass. The passphrase file must be readable only by its owner.

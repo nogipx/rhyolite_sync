@@ -1,6 +1,6 @@
 services:
   sync:
-    image: ghcr.io/nogipx/rhyolite-headless:1.0.0
+    image: ghcr.io/nogipx/rhyolite-headless:1.0.1
     restart: unless-stopped
     user: "${RHYOLITE_UID:?set RHYOLITE_UID}:${RHYOLITE_GID:?set RHYOLITE_GID}"
     environment:

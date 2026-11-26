@@ -68,9 +68,9 @@ Where the different pieces of state live:
 
 ### Telemetry
 
-Diagnostics are local by default. To stream logs from multiple devices on the same Wi-Fi, run `just log-collector` on the development machine. On each device, open the plugin's **Diagnostics** settings, enter the collector URL printed for that platform, then enable **Send logs to collector**. On macOS, install `mkcert` and `caddy` and run `mkcert -install` once. On iOS, install the public `rootCA.pem` from `mkcert -CAROOT` as a profile, then enable full trust in Certificate Trust Settings.
+Diagnostics are local by default. On macOS, open **Parlance Console.command** in Finder to start the console and its collector. Opening the built `.app` directly opens the offline journal viewer. In the console, open **Wi-Fi**, enable **Accept devices over Wi-Fi** and copy the address for the device. In the Obsidian plugin, expand **Advanced diagnostics**, enter the address and enable **Share diagnostics**. The console remembers the Wi-Fi setting for the next launch. Each device opens one WebSocket for its logs and live sync state. For iOS, install the public `rootCA.pem` from `mkcert -CAROOT` as a profile and enable full trust in Certificate Trust Settings.
 
-Connect an MCP client on the collector machine to `http://127.0.0.1:9501/mcp`. Call `rpc_log_sources` to see connected devices and their labels. Call `rpc_log_get_logs` with a `device` label to isolate one connection, or with `traceId` to follow a traced operation. Pass the returned cursor on the next call to read newer records.
+Parlance Console exposes MCP on the local Unix socket `~/.parlance/mcp.sock`. Call `hosts` to find connected devices and their current prefixes, then use their `targets`, `read` and `why` tools. Use the full device label with `rpc_log_get_logs` to read that instance's buffered logs. `rpc_log_sources` lists log sources and cursors.
 
 ## Bundled native components
 

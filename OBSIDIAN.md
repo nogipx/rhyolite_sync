@@ -32,6 +32,10 @@ For Rhyolite Cloud, use a [Rhyolite account](https://rhyolite.nogipx.dev). For s
 4. Open the plugin settings. For Rhyolite Cloud, sign in and connect your vault. For a self-hosted server, enter the server URL and token.
 5. Enter your vault passphrase.
 
+### Upgrading from the previous plugin ID
+
+On each device, keep the previous installation (`rhyolite-sync`) and enable **Rhyolite Sync** (`rhyolite`). The new plugin imports the previous settings and custom hotkeys for supported commands on first setup, then disables the old plugin. Its original settings stay in place. You can remove the old installation after verifying your connected vault.
+
 ## Network services
 
 This plugin connects to the **Rhyolite Sync backend** (hosted at `rhyolite.nogipx.dev`) for the following purposes:
@@ -60,7 +64,7 @@ Where the different pieces of state live:
 | Sync metadata (cursors, CRDT state, blob cache) | SQLite database kept by the WASM runtime in the host's local storage (IndexedDB on desktop and mobile). Not exposed as files in the vault. |
 | Auth tokens (session, refresh) | Obsidian's secret storage (`Plugin.loadData`/secret APIs). Never written to `data.json` or files on disk. |
 | Encryption key (derived from your passphrase, only when "Remember on this device" is on) | Obsidian's secret storage. Cleared on sign-out or disconnect. |
-| Plugin UI configuration (vault id, last-used server URL) | `.obsidian/plugins/rhyolite_sync/data.json` |
+| Plugin UI configuration (vault id, last-used server URL) | `.obsidian/plugins/rhyolite/data.json` |
 
 ### Telemetry
 
